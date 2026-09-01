@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -59,6 +60,60 @@ MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
         result = MlxArray::concatenate(result, rows[row], 1);
     }
     return result;
+}
+
+struct PrefillRopeTableCache {
+    std::mutex mutex;
+    std::size_t position{0};
+    int rows{0};
+    int rotary{0};
+    double theta{0.0};
+    mlx_dtype dtype{MLX_FLOAT32};
+    bool valid{false};
+    MlxArray cosine;
+    MlxArray sine;
+};
+
+std::pair<MlxArray, MlxArray> prefill_rope_tables(
+    const std::size_t position,
+    const int rows,
+    const int rotary,
+    const double theta,
+    const mlx_dtype dtype) {
+    static PrefillRopeTableCache cache;
+    std::scoped_lock lock(cache.mutex);
+    if (!cache.valid || cache.position != position || cache.rows != rows ||
+        cache.rotary != rotary || cache.theta != theta || cache.dtype != dtype) {
+        const int half = rotary / 2;
+        std::vector<float> cosine(static_cast<std::size_t>(rows * rotary));
+        std::vector<float> sine(static_cast<std::size_t>(rows * rotary));
+        for (int row = 0; row < rows; ++row) {
+            for (int index = 0; index < half; ++index) {
+                const double frequency = std::pow(
+                    theta, -2.0 * static_cast<double>(index) /
+                        static_cast<double>(rotary));
+                const double angle = static_cast<double>(
+                    position + static_cast<std::size_t>(row)) * frequency;
+                const float c = static_cast<float>(std::cos(angle));
+                const float s = static_cast<float>(std::sin(angle));
+                const std::size_t base = static_cast<std::size_t>(row * rotary);
+                cosine[base + static_cast<std::size_t>(index)] = c;
+                cosine[base + static_cast<std::size_t>(index + half)] = c;
+                sine[base + static_cast<std::size_t>(index)] = s;
+                sine[base + static_cast<std::size_t>(index + half)] = s;
+            }
+        }
+        const std::vector<int> shape{1, 1, rows, rotary};
+        cache.cosine = MlxArray::from_float32(cosine, shape).astype(dtype);
+        cache.sine = MlxArray::from_float32(sine, shape).astype(dtype);
+        cache.position = position;
+        cache.rows = rows;
+        cache.rotary = rotary;
+        cache.theta = theta;
+        cache.dtype = dtype;
+        cache.valid = true;
+    }
+    return {cache.cosine.share(), cache.sine.share()};
 }
 
 } // namespace
@@ -163,27 +218,8 @@ MlxArray SelfAttention::apply_rope_prefill(
     const int rows = shape[2];
     const int rotary = dimension(rotary_dimension_, "rotary dimension");
     const int half = rotary / 2;
-    std::vector<float> cosine(static_cast<std::size_t>(rows * rotary));
-    std::vector<float> sine(static_cast<std::size_t>(rows * rotary));
-    for (int row = 0; row < rows; ++row) {
-        for (int index = 0; index < half; ++index) {
-            const double frequency = std::pow(
-                rope_theta_, -2.0 * static_cast<double>(index) /
-                    static_cast<double>(rotary));
-            const double angle = static_cast<double>(
-                position + static_cast<std::size_t>(row)) * frequency;
-            const float c = static_cast<float>(std::cos(angle));
-            const float s = static_cast<float>(std::sin(angle));
-            const std::size_t base = static_cast<std::size_t>(row * rotary);
-            cosine[base + static_cast<std::size_t>(index)] = c;
-            cosine[base + static_cast<std::size_t>(index + half)] = c;
-            sine[base + static_cast<std::size_t>(index)] = s;
-            sine[base + static_cast<std::size_t>(index + half)] = s;
-        }
-    }
-    const std::vector<int> angle_shape{1, 1, rows, rotary};
-    MlxArray cos_array = MlxArray::from_float32(cosine, angle_shape).astype(input.dtype());
-    MlxArray sin_array = MlxArray::from_float32(sine, angle_shape).astype(input.dtype());
+    auto [cos_array, sin_array] = prefill_rope_tables(
+        position, rows, rotary, rope_theta_, input.dtype());
     const std::vector<int> strides{1, 1, 1, 1};
     const std::vector<int> rope_start{0, 0, 0, 0};
     const std::vector<int> rope_stop{shape[0], shape[1], rows, rotary};
