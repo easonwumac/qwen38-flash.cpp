@@ -22,12 +22,23 @@ struct GreedyStep {
     float logit{0.0F};
 };
 
+// The Qwen3.8 MTP companion consumes the four-stream residual before the
+// target's final mixer. Keeping it beside the logits avoids a second trunk
+// forward and prevents callers from accidentally feeding the collapsed hidden.
+struct TargetDecodeStep {
+    MlxArray logits;
+    MlxArray pre_mixer_stream;
+};
+
 class QwenModel final {
 public:
     explicit QwenModel(MlxTensorStore& tensors);
 
     [[nodiscard]] ModelDecodeState make_state() const;
     [[nodiscard]] MlxArray forward_decode(std::uint32_t token, ModelDecodeState& state) const;
+    [[nodiscard]] TargetDecodeStep forward_decode_capture(
+        std::uint32_t token,
+        ModelDecodeState& state) const;
     void consume_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,
@@ -38,6 +49,11 @@ public:
     [[nodiscard]] std::size_t layer_count() const noexcept { return layers_.size(); }
 
 private:
+    struct HiddenDecodeStep {
+        MlxArray mixed;
+        MlxArray pre_mixer_stream;
+    };
+
     struct QuantizedTensor {
         MlxArray weight;
         MlxArray scales;
@@ -53,7 +69,7 @@ private:
         ModelDecodeState& state,
         std::vector<double>* layer_checksums,
         std::vector<double>* layer_ms) const;
-    [[nodiscard]] MlxArray forward_hidden_decode_impl(
+    [[nodiscard]] HiddenDecodeStep forward_hidden_decode_impl(
         std::uint32_t token,
         ModelDecodeState& state,
         std::vector<double>* layer_checksums,

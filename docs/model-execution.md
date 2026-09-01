@@ -190,6 +190,12 @@ mixer and Q4 vocabulary head, and performs greedy argmax. Starting from token
 per-layer trace shows small BF16 composition differences from layer 0 that
 accumulate through the trunk, while the greedy decisions remain stable.
 
+The target decode API now also retains the four-stream, 10,240-wide residual
+immediately before the final mixer. This is the hidden seam consumed by the
+Qwen3.8 Flash Next MTP companion. It comes from the same lazy target graph as
+the logits, so speculative decoding will not require a second 48-layer forward
+or incorrectly consume the collapsed 2,560-wide hidden.
+
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
 footprint was about 41.3 GB. This is explicitly the unfused correctness graph,

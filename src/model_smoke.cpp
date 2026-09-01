@@ -23,6 +23,7 @@ int main(int argc, char** argv) {
         auto state = model.make_state();
         const auto first_started = std::chrono::steady_clock::now();
         qwen38::GreedyStep first;
+        std::size_t captured_stream_width = 0;
         std::vector<double> trace;
         std::vector<double> trace_ms;
         if (argc == 3 && std::string(argv[2]) == "--trace") {
@@ -32,7 +33,17 @@ int main(int argc, char** argv) {
             first.token = static_cast<std::uint32_t>(std::distance(logits.begin(), best));
             first.logit = *best;
         } else {
-            first = model.greedy_decode(9419, state);
+            qwen38::TargetDecodeStep captured = model.forward_decode_capture(9419, state);
+            const std::vector<int> stream_shape = captured.pre_mixer_stream.shape();
+            if (stream_shape != std::vector<int>({1, 1, 10240})) {
+                throw std::runtime_error("captured pre-mixer stream shape mismatch");
+            }
+            captured_stream_width = static_cast<std::size_t>(stream_shape.back());
+            const std::vector<float> logits =
+                captured.logits.astype(MLX_FLOAT32).to_float32();
+            const auto best = std::ranges::max_element(logits);
+            first.token = static_cast<std::uint32_t>(std::distance(logits.begin(), best));
+            first.logit = *best;
         }
         const double first_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - first_started).count();
@@ -60,6 +71,7 @@ int main(int argc, char** argv) {
                   << ",\"first_ms\":" << first_ms
                   << ",\"second_ms\":" << second_ms
                   << ",\"second_tps\":" << (1000.0 / second_ms)
+                  << ",\"captured_stream_width\":" << captured_stream_width
                   << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";
         if (!trace.empty()) {
             std::cout << "{\"layer_checksums\":[";

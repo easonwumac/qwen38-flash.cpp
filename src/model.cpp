@@ -76,7 +76,24 @@ MlxArray QwenModel::embed(const std::uint32_t token) const {
 }
 
 MlxArray QwenModel::forward_decode(const std::uint32_t token, ModelDecodeState& state) const {
-    return forward_decode_impl(token, state, nullptr, nullptr);
+    return std::move(forward_decode_capture(token, state).logits);
+}
+
+TargetDecodeStep QwenModel::forward_decode_capture(
+    const std::uint32_t token,
+    ModelDecodeState& state) const {
+    HiddenDecodeStep hidden = forward_hidden_decode_impl(token, state, nullptr, nullptr);
+    MlxArray logits = MlxArray::quantized_matmul(
+        hidden.mixed,
+        language_head_.weight,
+        language_head_.scales,
+        language_head_.biases,
+        group_size_,
+        bits_);
+    return {
+        .logits = std::move(logits),
+        .pre_mixer_stream = std::move(hidden.pre_mixer_stream),
+    };
 }
 
 MlxArray QwenModel::trace_decode(
@@ -96,9 +113,10 @@ MlxArray QwenModel::forward_decode_impl(
     ModelDecodeState& state,
     std::vector<double>* layer_checksums,
     std::vector<double>* layer_ms) const {
-    MlxArray hidden = forward_hidden_decode_impl(token, state, layer_checksums, layer_ms);
+    HiddenDecodeStep hidden =
+        forward_hidden_decode_impl(token, state, layer_checksums, layer_ms);
     return MlxArray::quantized_matmul(
-        hidden,
+        hidden.mixed,
         language_head_.weight,
         language_head_.scales,
         language_head_.biases,
@@ -106,7 +124,7 @@ MlxArray QwenModel::forward_decode_impl(
         bits_);
 }
 
-MlxArray QwenModel::forward_hidden_decode_impl(
+QwenModel::HiddenDecodeStep QwenModel::forward_hidden_decode_impl(
     const std::uint32_t token,
     ModelDecodeState& state,
     std::vector<double>* layer_checksums,
@@ -130,14 +148,17 @@ MlxArray QwenModel::forward_hidden_decode_impl(
     }
     HyperConnectionRead final = final_mixer_.read(stream);
     ++state.token_count;
-    return std::move(final.mixed);
+    return {
+        .mixed = std::move(final.mixed),
+        .pre_mixer_stream = std::move(stream),
+    };
 }
 
 void QwenModel::consume_decode(
     const std::uint32_t token,
     ModelDecodeState& state) const {
-    static_cast<void>(
-        forward_hidden_decode_impl(token, state, nullptr, nullptr).astype(MLX_FLOAT32).to_float32());
+    HiddenDecodeStep hidden = forward_hidden_decode_impl(token, state, nullptr, nullptr);
+    static_cast<void>(hidden.mixed.astype(MLX_FLOAT32).to_float32());
 }
 
 GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelDecodeState& state) const {
