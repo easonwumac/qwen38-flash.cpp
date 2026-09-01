@@ -3,6 +3,7 @@
 #include "qwen38/mtp_runner.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -48,16 +49,20 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> serial_tokens;
         serial_tokens.reserve(token_goal);
         std::uint32_t serial_current = current;
+        const auto serial_started = std::chrono::steady_clock::now();
         for (std::size_t index = 0; index < token_goal; ++index) {
             qwen38::GreedyStep step = target.greedy_decode(serial_current, serial_state);
             serial_tokens.push_back(step.token);
             serial_current = step.token;
         }
+        const double serial_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - serial_started).count();
         qwen38::MlxArray::clear_cache();
 
         std::vector<std::uint32_t> mtp_tokens;
         std::size_t accepted = 0;
         std::size_t rounds = 0;
+        const auto mtp_started = std::chrono::steady_clock::now();
         while (mtp_tokens.size() < token_goal && rounds < token_goal) {
             qwen38::MtpRoundStep step = qwen38::run_greedy_mtp_round_reference(
                 target,
@@ -77,12 +82,22 @@ int main(int argc, char** argv) {
             previous_stream = std::move(step.next_target_stream);
             qwen38::MlxArray::clear_cache();
         }
+        const double mtp_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - mtp_started).count();
         if (mtp_tokens.size() < token_goal ||
             !std::equal(serial_tokens.begin(), serial_tokens.end(), mtp_tokens.begin())) {
             throw std::runtime_error("multi-round MTP output diverged from serial greedy decode");
         }
         std::cout << "{\"tokens_checked\":" << token_goal << ",\"rounds\":" << rounds
-                  << ",\"accepted\":" << accepted << ",\"tokens\":[";
+                  << ",\"accepted\":" << accepted
+                  << ",\"serial_ms\":" << serial_ms
+                  << ",\"serial_tps\":"
+                  << 1000.0 * static_cast<double>(token_goal) / serial_ms
+                  << ",\"mtp_ms\":" << mtp_ms
+                  << ",\"mtp_emitted\":" << mtp_tokens.size()
+                  << ",\"mtp_tps\":"
+                  << 1000.0 * static_cast<double>(mtp_tokens.size()) / mtp_ms
+                  << ",\"tokens\":[";
         for (std::size_t index = 0; index < token_goal; ++index) {
             if (index != 0) std::cout << ',';
             std::cout << mtp_tokens[index];
