@@ -1,5 +1,7 @@
 #include "qwen38/self_attention.hpp"
 
+#include "qwen38/quantization_geometry.hpp"
+
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -143,14 +145,17 @@ SelfAttention::SelfAttention(
       head_dimension_(config.head_dimension),
       rotary_dimension_(static_cast<std::size_t>(
           static_cast<double>(config.head_dimension) * config.partial_rotary_factor)),
-      bits_(dimension(config.quantization_bits, "quantization bits")),
       group_size_(dimension(config.quantization_group_size, "quantization group size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       rope_theta_(config.rope_theta),
-      query_projection_(load_projection(tensors, std::string(prefix) + ".q_proj")),
-      key_projection_(load_projection(tensors, std::string(prefix) + ".k_proj")),
-      value_projection_(load_projection(tensors, std::string(prefix) + ".v_proj")),
-      output_projection_(load_projection(tensors, std::string(prefix) + ".o_proj")),
+      query_projection_(load_projection(
+          tensors, std::string(prefix) + ".q_proj", config.quantization_group_size)),
+      key_projection_(load_projection(
+          tensors, std::string(prefix) + ".k_proj", config.quantization_group_size)),
+      value_projection_(load_projection(
+          tensors, std::string(prefix) + ".v_proj", config.quantization_group_size)),
+      output_projection_(load_projection(
+          tensors, std::string(prefix) + ".o_proj", config.quantization_group_size)),
       query_norm_weight_(effective_norm_weight(
           tensors.tensor(std::string(prefix) + ".q_norm.weight"),
           config.head_dimension,
@@ -159,6 +164,7 @@ SelfAttention::SelfAttention(
           tensors.tensor(std::string(prefix) + ".k_norm.weight"),
           config.head_dimension,
           config.attention_norm_has_offset)) {
+    static_cast<void>(dimension(config.quantization_bits, "quantization bits"));
     if (attention_heads_ % key_value_heads_ != 0 || rotary_dimension_ == 0 ||
         rotary_dimension_ % 2 != 0 || rotary_dimension_ > head_dimension_) {
         throw std::runtime_error("unsupported attention head/rotary configuration");
@@ -167,12 +173,18 @@ SelfAttention::SelfAttention(
 
 SelfAttention::QuantizedProjection SelfAttention::load_projection(
     MlxTensorStore& tensors,
-    const std::string_view name) {
+    const std::string_view name,
+    const std::size_t group_size) {
     const std::string base(name);
+    MlxArray weight = tensors.tensor(base + ".weight");
+    MlxArray scales = tensors.tensor(base + ".scales");
+    const int bits = infer_affine_quantization_bits(
+        weight.shape(), scales.shape(), group_size, "attention");
     return {
-        .weight = tensors.tensor(base + ".weight"),
-        .scales = tensors.tensor(base + ".scales"),
+        .weight = std::move(weight),
+        .scales = std::move(scales),
         .biases = tensors.tensor(base + ".biases"),
+        .bits = bits,
     };
 }
 
@@ -180,7 +192,8 @@ MlxArray SelfAttention::project(
     const MlxArray& input,
     const QuantizedProjection& projection) const {
     return MlxArray::quantized_matmul(
-        input, projection.weight, projection.scales, projection.biases, group_size_, bits_);
+        input, projection.weight, projection.scales, projection.biases,
+        group_size_, projection.bits);
 }
 
 MlxArray SelfAttention::apply_rope(const MlxArray& input, const std::size_t position) const {

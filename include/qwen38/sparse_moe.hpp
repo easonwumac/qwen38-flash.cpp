@@ -35,11 +35,13 @@ private:
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
+        int bits{0};
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
-        std::string_view name);
+        std::string_view name,
+        std::size_t group_size);
     static void make_resident(QuantizedProjection& projection);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
@@ -53,7 +55,6 @@ private:
 
     std::size_t expert_count_;
     std::size_t experts_per_token_;
-    int bits_;
     int group_size_;
     bool normalize_topk_probability_;
     MlxArray router_weight_;
@@ -66,6 +67,7 @@ private:
     MlxArray shared_router_weight_;
     std::shared_ptr<MlxMetalKernel> fused_gate_up_;
     std::shared_ptr<MlxMetalKernel> fused_down_;
+    bool fused_q8_exact_{false};
 };
 
 } // namespace qwen38

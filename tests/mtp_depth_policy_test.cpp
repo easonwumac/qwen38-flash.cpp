@@ -31,14 +31,33 @@ void run_mtp_depth_policy_tests() {
     for (int round = 0; round < 11; ++round) high_acceptance.observe(3, round < 5 ? 2 : 1);
     QWEN38_CHECK(high_acceptance.depth() == 3);
     high_acceptance.observe(3, 0);
+    QWEN38_CHECK(high_acceptance.depth() == 3);
+    for (int round = 0; round < 12; ++round) high_acceptance.observe(3, 0);
     QWEN38_CHECK(high_acceptance.depth() == 2);
     QWEN38_CHECK(high_acceptance.demotions() == 1);
+
+    qwen38::MtpDepthPolicy recovered_window(3, 32);
+    for (int round = 0; round < 8; ++round) recovered_window.observe(2, 2);
+    for (int round = 0; round < 12; ++round) recovered_window.observe(3, 1);
+    for (int round = 0; round < 12; ++round) recovered_window.observe(3, 2);
+    for (int round = 0; round < 12; ++round) recovered_window.observe(3, 1);
+    QWEN38_CHECK(recovered_window.depth() == 3);
+    QWEN38_CHECK(recovered_window.demotions() == 0);
 
     qwen38::MtpDepthPolicy exact_half(3, 32);
     for (int round = 0; round < 8; ++round) exact_half.observe(2, 2);
     for (int round = 0; round < 12; ++round) exact_half.observe(3, round < 6 ? 3 : 0);
     QWEN38_CHECK(exact_half.depth() == 3);
     QWEN38_CHECK(exact_half.demotions() == 0);
+
+    setenv("QWEN38_MTP_DEMOTION", "0", 1);
+    qwen38::MtpDepthPolicy retained_three(3, 32);
+    for (int round = 0; round < 8; ++round) retained_three.observe(2, 2);
+    for (int round = 0; round < 24; ++round) retained_three.observe(3, 0);
+    QWEN38_CHECK(retained_three.depth() == 3);
+    QWEN38_CHECK(retained_three.promotions() == 1);
+    QWEN38_CHECK(retained_three.demotions() == 0);
+    unsetenv("QWEN38_MTP_DEMOTION");
 
     setenv("QWEN38_MTP_EARLY_DEMOTION", "1", 1);
     qwen38::MtpDepthPolicy failed_promotion(3, 32);
@@ -51,7 +70,8 @@ void run_mtp_depth_policy_tests() {
 
     qwen38::MtpDepthPolicy passed_probation(3, 32);
     for (int round = 0; round < 8; ++round) passed_probation.observe(2, 2);
-    for (int round = 0; round < 4; ++round) passed_probation.observe(3, 2);
+    for (int round = 0; round < 12; ++round) passed_probation.observe(3, 2);
+    for (int round = 0; round < 4; ++round) passed_probation.observe(3, 0);
     QWEN38_CHECK(passed_probation.depth() == 3);
     unsetenv("QWEN38_MTP_EARLY_DEMOTION");
 

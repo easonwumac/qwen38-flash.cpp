@@ -9,6 +9,7 @@ int main() {
     run_mtp_depth_policy_tests();
     run_mtp_lifecycle_tests();
     run_ngram_tests();
+    run_quantization_geometry_tests();
     run_runtime_tests();
     run_api_tests();
     if (qwen38::test::failures == 0) {

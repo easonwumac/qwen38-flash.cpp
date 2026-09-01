@@ -18,6 +18,11 @@ bool early_demotion_enabled() {
     return value != nullptr && std::string_view(value) == "1";
 }
 
+bool demotion_enabled() {
+    const char* value = std::getenv("QWEN38_MTP_DEMOTION");
+    return value == nullptr || std::string_view(value) != "0";
+}
+
 } // namespace
 
 MtpDepthPolicy::MtpDepthPolicy(
@@ -53,11 +58,11 @@ void MtpDepthPolicy::observe(
         }
         return;
     }
-    if (!monitoring_ || depth_ != 3) return;
+    if (!monitoring_ || depth_ != 3 || !demotion_enabled()) return;
     ++monitor_rounds_;
     monitor_proposed_ += proposed;
     monitor_accepted_ += accepted;
-    if (early_demotion_enabled() &&
+    if (!promotion_probation_complete_ && early_demotion_enabled() &&
         monitor_rounds_ == promotion_probation_round_limit &&
         monitor_accepted_ * 2 < monitor_proposed_) {
         depth_ = 2;
@@ -65,16 +70,23 @@ void MtpDepthPolicy::observe(
         ++demotions_;
         return;
     }
+    if (monitor_rounds_ == promotion_probation_round_limit) {
+        promotion_probation_complete_ = true;
+    }
     if (monitor_rounds_ == monitor_round_limit) {
         if (monitor_accepted_ * 2 < monitor_proposed_) {
-            depth_ = 2;
-            monitoring_ = false;
-            ++demotions_;
+            ++monitor_losing_windows_;
+            if (monitor_losing_windows_ == 2) {
+                depth_ = 2;
+                monitoring_ = false;
+                ++demotions_;
+            }
         } else {
-            monitor_rounds_ = 0;
-            monitor_proposed_ = 0;
-            monitor_accepted_ = 0;
+            monitor_losing_windows_ = 0;
         }
+        monitor_rounds_ = 0;
+        monitor_proposed_ = 0;
+        monitor_accepted_ = 0;
     }
 }
 

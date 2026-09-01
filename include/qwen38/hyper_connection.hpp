@@ -40,6 +40,7 @@ private:
         MlxArray scales;
         MlxArray biases;
         bool quantized{false};
+        int bits{0};
     };
 
     [[nodiscard]] Projection load_projection(

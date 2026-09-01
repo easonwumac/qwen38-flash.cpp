@@ -90,6 +90,15 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"enable_thinking":false})"));
     QWEN38_CHECK(no_think.status == 200);
     QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
+    const auto no_think_compat = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"thinking":false})"));
+    QWEN38_CHECK(no_think_compat.status == 200);
+    QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
+    const auto conflicting_thinking = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"thinking":false,"enable_thinking":true})"));
+    QWEN38_CHECK(conflicting_thinking.status == 400);
     QWEN38_CHECK(inference_api.handle(post("/admin/cache/clear", "{}")).status == 200);
     QWEN38_CHECK(engine.cleared);
 
@@ -123,7 +132,7 @@ void run_api_tests() {
     QWEN38_CHECK(chat_stream_wire.find("\"content\":\"final answer\"") !=
         std::string::npos);
     QWEN38_CHECK(chat_stream_wire.ends_with("data: [DONE]\n\n"));
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 12);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 14);
 
     QWEN38_CHECK(qwen38::json_escape("a\n\"b") == "a\\n\\\"b");
 }

@@ -26,6 +26,7 @@ add_library(qwen38_core
     src/mtp_depth_policy.cpp
     src/mtp_lifecycle.cpp
     src/ngram.cpp
+    src/quantization_geometry.cpp
     src/runtime.cpp
     src/safetensors.cpp
 )
@@ -213,6 +214,7 @@ if(QWEN38_BUILD_TESTS)
         tests/mtp_depth_policy_test.cpp
         tests/mtp_lifecycle_test.cpp
         tests/ngram_test.cpp
+        tests/quantization_geometry_test.cpp
         tests/runtime_test.cpp
         tests/safetensors_test.cpp
         tests/test_main.cpp

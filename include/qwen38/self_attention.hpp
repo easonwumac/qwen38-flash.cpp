@@ -38,11 +38,13 @@ private:
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
+        int bits{0};
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
-        std::string_view name);
+        std::string_view name,
+        std::size_t group_size);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
@@ -55,7 +57,6 @@ private:
     std::size_t key_value_heads_;
     std::size_t head_dimension_;
     std::size_t rotary_dimension_;
-    int bits_;
     int group_size_;
     float epsilon_;
     double rope_theta_;

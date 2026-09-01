@@ -15,5 +15,9 @@ The sorted multi-row MoE dispatch design and fused hyper-connection read
 kernels are adapted from mlx-serve
 (Copyright 2026 David Dalcu), licensed under the MIT License.
 
+The Q8 MTP gather-QMV accumulation and BF16 SwiGLU rounding-order kernels are
+adapted from mlx-serve under the same MIT license and attribution. The license
+text is retained in `licenses/mlx-serve-MIT.txt`.
+
 The fused GatedDeltaNet norm/gate epilogue is adapted from mlx-serve under
 the same MIT license and attribution.

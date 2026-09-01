@@ -47,8 +47,20 @@ bool stream_usage_enabled(const Json& body) {
 
 ChatTemplateOptions chat_template_options(const Json& body) {
     ChatTemplateOptions options;
-    if (const Json* value = body.find("enable_thinking"); value != nullptr) {
-        options.enable_thinking = value->as_boolean();
+    const Json* enable_thinking = body.find("enable_thinking");
+    const Json* thinking = body.find("thinking");
+    if (enable_thinking != nullptr && thinking != nullptr &&
+        enable_thinking->as_boolean() != thinking->as_boolean()) {
+        throw std::runtime_error("thinking and enable_thinking must agree");
+    }
+    if (enable_thinking != nullptr) {
+        options.enable_thinking = enable_thinking->as_boolean();
+    } else if (thinking != nullptr) {
+        // mlx-serve and the established local benchmark surface use the
+        // shorter spelling. Keep it as a first-class compatibility alias so
+        // thinking-off requests actually receive the tokenizer template's
+        // closed empty <think> block.
+        options.enable_thinking = thinking->as_boolean();
     }
     if (const Json* value = body.find("reasoning_effort"); value != nullptr) {
         const std::string& effort = value->as_string();

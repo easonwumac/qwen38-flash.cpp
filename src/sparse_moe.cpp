@@ -1,9 +1,12 @@
 #include "qwen38/sparse_moe.hpp"
 
+#include "qwen38/quantization_geometry.hpp"
+
 #include "moe_metal_kernels.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -67,6 +70,62 @@ std::shared_ptr<MlxMetalKernel> fused_verify_down_kernel() {
             moe_metal::header);
     }();
     return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q8_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts", "sigtab"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_gate_up_q8_exact", inputs, "h",
+            moe_metal::gate_up_q8_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q8_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_down_q8_exact", inputs, "y",
+            moe_metal::down_q8_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q8_verify_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts", "sigtab"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_gate_up_q8_exact", inputs, "h",
+            moe_metal::gate_up_verify_q8_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q8_verify_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_down_q8_exact", inputs, "y",
+            moe_metal::down_verify_q8_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+const MlxArray& bf16_sigmoid_table() {
+    static const MlxArray table = [] {
+        constexpr std::size_t count = 1U << 16;
+        std::vector<float> patterns(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            patterns[index] = std::bit_cast<float>(static_cast<std::uint32_t>(index) << 16);
+        }
+        const std::vector<int> shape{static_cast<int>(count)};
+        MlxArray values = MlxArray::from_float32(patterns, shape).astype(MLX_BFLOAT16);
+        MlxArray result = values.sigmoid();
+        result.eval();
+        return result;
+    }();
+    return table;
 }
 
 std::size_t layer_index(const std::string_view prefix) {
@@ -143,17 +202,23 @@ SparseMoe::SparseMoe(
     const bool normalize_topk_probability)
     : expert_count_(expert_count),
       experts_per_token_(experts_per_token),
-      bits_(checked_int(quantization_bits, "quantization_bits")),
       group_size_(checked_int(quantization_group_size, "quantization_group_size")),
       normalize_topk_probability_(normalize_topk_probability),
       router_weight_(tensors.tensor(std::string(prefix) + ".gate.weight")),
-      expert_gate_(load_projection(tensors, std::string(prefix) + ".switch_mlp.gate_proj")),
-      expert_up_(load_projection(tensors, std::string(prefix) + ".switch_mlp.up_proj")),
-      expert_down_(load_projection(tensors, std::string(prefix) + ".switch_mlp.down_proj")),
-      shared_gate_(load_projection(tensors, std::string(prefix) + ".shared_expert.gate_proj")),
-      shared_up_(load_projection(tensors, std::string(prefix) + ".shared_expert.up_proj")),
-      shared_down_(load_projection(tensors, std::string(prefix) + ".shared_expert.down_proj")),
+      expert_gate_(load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.gate_proj", quantization_group_size)),
+      expert_up_(load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.up_proj", quantization_group_size)),
+      expert_down_(load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.down_proj", quantization_group_size)),
+      shared_gate_(load_projection(
+          tensors, std::string(prefix) + ".shared_expert.gate_proj", quantization_group_size)),
+      shared_up_(load_projection(
+          tensors, std::string(prefix) + ".shared_expert.up_proj", quantization_group_size)),
+      shared_down_(load_projection(
+          tensors, std::string(prefix) + ".shared_expert.down_proj", quantization_group_size)),
       shared_router_weight_(tensors.tensor(std::string(prefix) + ".shared_expert_gate.weight")) {
+    static_cast<void>(checked_int(quantization_bits, "quantization_bits"));
     static_cast<void>(checked_int(expert_count_, "expert_count"));
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
@@ -164,22 +229,39 @@ SparseMoe::SparseMoe(
         make_resident(expert_down_);
     }
     const char* fused = std::getenv("QWEN38_FUSED_MOE");
+    const char* q8_exact = std::getenv("QWEN38_Q8_EXACT_MOE");
     if (fused != nullptr && std::string_view(fused) == "1" &&
-        expert_count_ >= experts_per_token_ && experts_per_token_ == 10 && bits_ == 4 &&
+        expert_count_ >= experts_per_token_ && experts_per_token_ == 10 &&
+        expert_gate_.bits == expert_up_.bits && expert_gate_.bits == expert_down_.bits &&
+        (expert_gate_.bits == 4 || expert_gate_.bits == 8) &&
         group_size_ == 64) {
-        fused_gate_up_ = fused_gate_up_kernel();
-        fused_down_ = fused_down_kernel();
+        if (expert_gate_.bits == 8) {
+            fused_q8_exact_ = q8_exact == nullptr || std::string_view(q8_exact) != "0";
+            if (fused_q8_exact_) {
+                fused_gate_up_ = fused_q8_gate_up_kernel();
+                fused_down_ = fused_q8_down_kernel();
+            }
+        } else {
+            fused_gate_up_ = fused_gate_up_kernel();
+            fused_down_ = fused_down_kernel();
+        }
     }
 }
 
 SparseMoe::QuantizedProjection SparseMoe::load_projection(
     MlxTensorStore& tensors,
-    const std::string_view name) {
+    const std::string_view name,
+    const std::size_t group_size) {
     const std::string base(name);
+    MlxArray weight = tensors.tensor(base + ".weight");
+    MlxArray scales = tensors.tensor(base + ".scales");
+    const int bits = infer_affine_quantization_bits(
+        weight.shape(), scales.shape(), group_size, "MoE");
     return {
-        .weight = tensors.tensor(base + ".weight"),
-        .scales = tensors.tensor(base + ".scales"),
+        .weight = std::move(weight),
+        .scales = std::move(scales),
         .biases = tensors.tensor(base + ".biases"),
+        .bits = bits,
     };
 }
 
@@ -193,7 +275,8 @@ MlxArray SparseMoe::project(
     const MlxArray& input,
     const QuantizedProjection& projection) const {
     return MlxArray::quantized_matmul(
-        input, projection.weight, projection.scales, projection.biases, group_size_, bits_);
+        input, projection.weight, projection.scales, projection.biases,
+        group_size_, projection.bits);
 }
 
 MlxArray SparseMoe::project_expert(
@@ -208,7 +291,7 @@ MlxArray SparseMoe::project_expert(
     const MlxArray scales = MlxArray::take_axis(projection.scales, index, 0);
     const MlxArray biases = MlxArray::take_axis(projection.biases, index, 0);
     return MlxArray::quantized_matmul(
-        input, weight, scales, biases, group_size_, bits_);
+        input, weight, scales, biases, group_size_, projection.bits);
 }
 
 RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
@@ -295,23 +378,32 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             experts = MlxArray::from_int32(expert_values, selected_shape);
             weights = MlxArray::from_float32(selection.weights, selected_shape);
         }
-        const MlxArray* gate_inputs[]{
-            &input,
-            &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
-            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases,
-            &experts};
+        const MlxArray& sigmoid_table = bf16_sigmoid_table();
+        const MlxArray* q4_gate_inputs[]{
+            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts};
+        const MlxArray* q8_gate_inputs[]{
+            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts,
+            &sigmoid_table};
         const std::vector<int> hidden_shape{10, 640};
         const std::array<int, 3> gate_grid{200 * 1024, 1, 1};
         const std::array<int, 3> threadgroup{1024, 1, 1};
         MlxArray hidden = fused_gate_up_->apply(
-            gate_inputs, hidden_shape, input.dtype(), gate_grid, threadgroup);
+            fused_q8_exact_
+                ? std::span<const MlxArray* const>(q8_gate_inputs)
+                : std::span<const MlxArray* const>(q4_gate_inputs),
+            hidden_shape, input.dtype(), gate_grid, threadgroup);
+        MlxArray down_weights = fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
         const MlxArray* down_inputs[]{
             &hidden,
             &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
-            &experts, &weights};
+            &experts, &down_weights};
         const std::vector<int> output_shape{1, 1, 2560};
-        const std::array<int, 3> down_grid{320 * 64, 1, 1};
-        const std::array<int, 3> down_threadgroup{64, 1, 1};
+        const std::array<int, 3> down_grid{
+            fused_q8_exact_ ? 640 * 320 : 320 * 64, 1, 1};
+        const std::array<int, 3> down_threadgroup{
+            fused_q8_exact_ ? 320 : 64, 1, 1};
         expert_sum = fused_down_->apply(
             down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
     } else {
@@ -383,28 +475,48 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
         weights = weights.reshape(
             std::vector<int>{rows, static_cast<int>(experts_per_token_)});
         weights = weights.astype(MLX_FLOAT32);
-        const MlxArray* gate_inputs[]{
-            &input,
-            &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
-            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases,
-            &experts};
+        const MlxArray& sigmoid_table = bf16_sigmoid_table();
+        const MlxArray* q4_gate_inputs[]{
+            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts};
+        const MlxArray* q8_gate_inputs[]{
+            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts,
+            &sigmoid_table};
         const std::vector<int> hidden_shape{rows, 10, 640};
         const std::array<int, 3> gate_grid{
             static_cast<int>(rows * 200 * 1024), 1, 1};
         const std::array<int, 3> gate_threadgroup{1024, 1, 1};
-        MlxArray hidden = fused_verify_gate_up_kernel()->apply(
-            gate_inputs, hidden_shape, input.dtype(), gate_grid, gate_threadgroup);
+        MlxArray hidden = (fused_q8_exact_
+            ? fused_q8_verify_gate_up_kernel()
+            : fused_verify_gate_up_kernel())->apply(
+                fused_q8_exact_
+                    ? std::span<const MlxArray* const>(q8_gate_inputs)
+                    : std::span<const MlxArray* const>(q4_gate_inputs),
+                hidden_shape, input.dtype(), gate_grid, gate_threadgroup);
+        MlxArray down_weights = fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
         const MlxArray* down_inputs[]{
             &hidden,
             &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
-            &experts, &weights};
+            &experts, &down_weights};
         const std::vector<int> output_shape{1, rows, 2560};
         const std::array<int, 3> down_grid{
-            static_cast<int>(rows * 320 * 64), 1, 1};
-        const std::array<int, 3> down_threadgroup{64, 1, 1};
-        MlxArray routed = fused_verify_down_kernel()->apply(
+            static_cast<int>(rows * (fused_q8_exact_ ? 640 * 320 : 320 * 64)),
+            1, 1};
+        const std::array<int, 3> down_threadgroup{
+            fused_q8_exact_ ? 320 : 64, 1, 1};
+        MlxArray routed = (fused_q8_exact_
+            ? fused_q8_verify_down_kernel()
+            : fused_verify_down_kernel())->apply(
             down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
         return MlxArray::add(routed, forward_shared(input));
+    }
+
+    const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
+    if ((!fused_gate_up_ || !fused_down_) && shape[1] > 1 &&
+        device_router != nullptr && std::string_view(device_router) == "1" &&
+        grouped != nullptr && std::string_view(grouped) == "1") {
+        return forward_prefill(input);
     }
 
     std::vector<MlxArray> routed;
@@ -422,7 +534,9 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
         throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..512");
     }
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
-    if (shape[1] < 16 || grouped == nullptr || std::string_view(grouped) != "1") {
+    const bool mixed_quantization = !fused_gate_up_ || !fused_down_;
+    if ((!mixed_quantization && shape[1] < 16) || grouped == nullptr ||
+        std::string_view(grouped) != "1") {
         return forward_verify(input);
     }
 
@@ -463,7 +577,7 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
         no_indices,
         sorted_experts,
         group_size_,
-        bits_,
+        expert_gate_.bits,
         true).silu();
     MlxArray up = MlxArray::gather_quantized_matmul(
         gathered_input,
@@ -473,7 +587,7 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
         no_indices,
         sorted_experts,
         group_size_,
-        bits_,
+        expert_up_.bits,
         true);
     MlxArray expert_hidden = MlxArray::multiply(gate, up);
     const std::vector<int> expert_shape = expert_hidden.shape();
@@ -488,7 +602,7 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
         no_indices,
         sorted_experts,
         group_size_,
-        bits_,
+        expert_down_.bits,
         true).reshape(std::vector<int>{slots, hidden_size});
     MlxArray unsorted = MlxArray::take_axis(down, inverse_order, 0).reshape(
         std::vector<int>{1, rows, top_k, hidden_size});

@@ -1,5 +1,7 @@
 #include "qwen38/hyper_connection.hpp"
 
+#include "qwen38/quantization_geometry.hpp"
+
 #include "hc_metal_kernels.hpp"
 
 #include <array>
@@ -124,7 +126,7 @@ HyperConnection::HyperConnection(
                 injection_.scales,
                 injection_.biases,
                 group_size_,
-                bits_).transpose(),
+                injection_.bits).transpose(),
             scalar_like(1.0F / static_cast<float>(stream_count_), raw_norm.dtype()));
         injection_dense_.eval();
         fused_injection_ready_ = true;
@@ -142,13 +144,20 @@ HyperConnection::Projection HyperConnection::load_projection(
             .scales = MlxArray{},
             .biases = MlxArray{},
             .quantized = false,
+            .bits = 0,
         };
     }
+    MlxArray weight = tensors.tensor(base + ".weight");
+    MlxArray scales = tensors.tensor(base + ".scales");
+    const int bits = infer_affine_quantization_bits(
+        weight.shape(), scales.shape(), static_cast<std::size_t>(group_size_),
+        "hyper-connection");
     return {
-        .weight = tensors.tensor(base + ".weight"),
-        .scales = tensors.tensor(base + ".scales"),
+        .weight = std::move(weight),
+        .scales = std::move(scales),
         .biases = tensors.tensor(base + ".biases"),
         .quantized = true,
+        .bits = bits,
     };
 }
 
@@ -159,7 +168,8 @@ MlxArray HyperConnection::project(
         return MlxArray::matmul(input, projection.weight.transpose());
     }
     return MlxArray::quantized_matmul(
-        input, projection.weight, projection.scales, projection.biases, group_size_, bits_);
+        input, projection.weight, projection.scales, projection.biases,
+        group_size_, projection.bits);
 }
 
 MlxArray HyperConnection::initialize_stream(
@@ -188,13 +198,15 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
 
     const char* fused_flag = std::getenv("QWEN38_HC_FUSED");
     const bool fused_enabled = fused_flag != nullptr && std::string_view(fused_flag) == "1";
-    const int values_per_word = 32 / bits_;
+    const int fused_bits = down_.quantized ? down_.bits : bits_;
+    const int values_per_word = 32 / fused_bits;
     const std::vector<int> down_shape = down_.weight.shape();
     const std::vector<int> up_shape = up_.weight.shape();
     const bool fused_supported =
         fused_enabled && batch == 1 && sequence == 1 &&
         (stream.dtype() == MLX_BFLOAT16 || stream.dtype() == MLX_FLOAT16) &&
-        down_.quantized && up_.quantized && bits_ > 0 && 32 % bits_ == 0 &&
+        down_.quantized && up_.quantized && down_.bits == up_.bits &&
+        fused_bits > 0 && 32 % fused_bits == 0 &&
         hidden % 256 == 0 && group_size_ % values_per_word == 0 &&
         down_shape.size() == 2 && up_shape.size() == 2 &&
         down_shape[1] * values_per_word == streams * hidden &&
@@ -215,7 +227,7 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
             {.name = "H", .value = hidden},
             {.name = "R", .value = rank},
             {.name = "GS", .value = group_size_},
-            {.name = "BITS", .value = bits_},
+            {.name = "BITS", .value = fused_bits},
         }};
 
         const std::array<int, 3> normalize_grid{256 * streams, 1, 1};

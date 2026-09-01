@@ -23,6 +23,8 @@ scheduling remain later milestones.
 Completion requests accept a string `prompt` and `max_tokens` from 1 through
 256. Chat requests accept a non-empty OpenAI-style `messages` array and either
 `max_completion_tokens` or `max_tokens`. The current engine is greedy-only;
+`enable_thinking` and the mlx-serve-compatible alias `thinking` select the Qwen
+thinking template; when both are present they must agree.
 `stream: true` returns live HTTP/1.1 chunked SSE for both completion routes.
 Confirmed target-token text is emitted from the decode path, the final event
 contains `finish_reason`, and the stream terminates with `data: [DONE]`.

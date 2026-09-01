@@ -240,4 +240,211 @@ inline constexpr std::string_view down_verify = R"metal(
     }
 )metal";
 
+// Portions of the Q8 kernels below are derived from mlx-serve,
+// Copyright (c) 2026 David Dalcu, under the MIT license. They reproduce its gather-QMV
+// accumulation and BF16 SwiGLU rounding order for the fixed Qwen3.8 MTP
+// geometry. Keeping this as a separate lane avoids changing the established
+// Q4 trunk trajectory while making the retained Q8 drafter numerically
+// comparable to the historical 65+ tok/s implementation.
+inline constexpr std::string_view gate_up_q8_exact = R"metal(
+    constexpr int K = 2560;
+    constexpr int N = 640;
+    constexpr int GS = 64;
+    constexpr int VPW = 4;
+    constexpr int K_PACKED = K / VPW;
+    constexpr int K_GROUPS = K / GS;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = tid / 32;
+    const uint lane = tid % 32;
+    const uint gsid = threadgroup_position_in_grid.x * 32 + sg;
+    if (gsid >= 10 * N) return;
+    const uint slot = gsid / N;
+    const uint row = gsid % N;
+    const uint expert = experts[slot];
+    const size_t wbase = ((size_t)expert * N + row) * K_PACKED;
+    const size_t gbase = ((size_t)expert * N + row) * K_GROUPS;
+    float g0 = 0.0f, g1 = 0.0f, g2 = 0.0f, g3 = 0.0f;
+    float u0 = 0.0f, u1 = 0.0f, u2 = 0.0f, u3 = 0.0f;
+    for (int pack = int(lane); pack < K_PACKED; pack += 32) {
+        uint32_t qg = gw[wbase + (size_t)pack];
+        uint32_t qu = uw[wbase + (size_t)pack];
+        const int k = pack * VPW;
+        const int gi = k / GS;
+        const float sgate = float(gs[gbase + (size_t)gi]);
+        const float bgate = float(gb[gbase + (size_t)gi]);
+        const float sup = float(us[gbase + (size_t)gi]);
+        const float bup = float(ub[gbase + (size_t)gi]);
+        const float x0 = float(x[k + 0]);
+        const float x1 = float(x[k + 1]);
+        const float x2 = float(x[k + 2]);
+        const float x3 = float(x[k + 3]);
+        g0 += x0 * (float((qg >> 0) & 255u) * sgate + bgate);
+        g1 += x1 * (float((qg >> 8) & 255u) * sgate + bgate);
+        g2 += x2 * (float((qg >> 16) & 255u) * sgate + bgate);
+        g3 += x3 * (float((qg >> 24) & 255u) * sgate + bgate);
+        u0 += x0 * (float((qu >> 0) & 255u) * sup + bup);
+        u1 += x1 * (float((qu >> 8) & 255u) * sup + bup);
+        u2 += x2 * (float((qu >> 16) & 255u) * sup + bup);
+        u3 += x3 * (float((qu >> 24) & 255u) * sup + bup);
+    }
+    const float gate_acc = simd_sum((g0 + g1) + (g2 + g3));
+    const float up_acc = simd_sum((u0 + u1) + (u2 + u3));
+    if (lane == 0) {
+        const T gt = T(gate_acc);
+        const T ut = T(up_acc);
+        const T sig = sigtab[as_type<ushort>(gt)];
+        h[(size_t)slot * N + row] = (gt * sig) * ut;
+    }
+)metal";
+
+inline constexpr std::string_view gate_up_verify_q8_exact = R"metal(
+    constexpr int K = 2560;
+    constexpr int N = 640;
+    constexpr int GS = 64;
+    constexpr int VPW = 4;
+    constexpr int K_PACKED = K / VPW;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int SLOTS = 10;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = tid / 32;
+    const uint lane = tid % 32;
+    const uint gsid = threadgroup_position_in_grid.x * 32 + sg;
+    const uint batch = gsid / (SLOTS * N);
+    const uint local = gsid % (SLOTS * N);
+    const uint slot = local / N;
+    const uint row = local % N;
+    const uint expert = experts[batch * SLOTS + slot];
+    const device T* xb = x + (size_t)batch * K;
+    const size_t wbase = ((size_t)expert * N + row) * K_PACKED;
+    const size_t gbase = ((size_t)expert * N + row) * K_GROUPS;
+    float g0 = 0.0f, g1 = 0.0f, g2 = 0.0f, g3 = 0.0f;
+    float u0 = 0.0f, u1 = 0.0f, u2 = 0.0f, u3 = 0.0f;
+    for (int pack = int(lane); pack < K_PACKED; pack += 32) {
+        uint32_t qg = gw[wbase + (size_t)pack];
+        uint32_t qu = uw[wbase + (size_t)pack];
+        const int k = pack * VPW;
+        const int gi = k / GS;
+        const float sgate = float(gs[gbase + (size_t)gi]);
+        const float bgate = float(gb[gbase + (size_t)gi]);
+        const float sup = float(us[gbase + (size_t)gi]);
+        const float bup = float(ub[gbase + (size_t)gi]);
+        const float x0 = float(xb[k + 0]);
+        const float x1 = float(xb[k + 1]);
+        const float x2 = float(xb[k + 2]);
+        const float x3 = float(xb[k + 3]);
+        g0 += x0 * (float((qg >> 0) & 255u) * sgate + bgate);
+        g1 += x1 * (float((qg >> 8) & 255u) * sgate + bgate);
+        g2 += x2 * (float((qg >> 16) & 255u) * sgate + bgate);
+        g3 += x3 * (float((qg >> 24) & 255u) * sgate + bgate);
+        u0 += x0 * (float((qu >> 0) & 255u) * sup + bup);
+        u1 += x1 * (float((qu >> 8) & 255u) * sup + bup);
+        u2 += x2 * (float((qu >> 16) & 255u) * sup + bup);
+        u3 += x3 * (float((qu >> 24) & 255u) * sup + bup);
+    }
+    const float gate_acc = simd_sum((g0 + g1) + (g2 + g3));
+    const float up_acc = simd_sum((u0 + u1) + (u2 + u3));
+    if (lane == 0) {
+        const T gt = T(gate_acc);
+        const T ut = T(up_acc);
+        const T sig = sigtab[as_type<ushort>(gt)];
+        h[((size_t)batch * SLOTS + slot) * N + row] = (gt * sig) * ut;
+    }
+)metal";
+
+inline constexpr std::string_view down_q8_exact = R"metal(
+    constexpr int K = 640;
+    constexpr int N = 2560;
+    constexpr int GS = 64;
+    constexpr int VPW = 4;
+    constexpr int K_PACKED = K / VPW;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int TOPK = 10;
+    constexpr int ROWS = 4;
+    const uint lane = thread_index_in_simdgroup;
+    const uint slot = simdgroup_index_in_threadgroup;
+    const uint tile = threadgroup_position_in_grid.x;
+    const uint expert = experts[slot];
+    threadgroup T slot_values[TOPK * ROWS];
+    for (uint r = 0; r < ROWS; ++r) {
+        const uint n = tile * ROWS + r;
+        const size_t wbase = ((size_t)expert * N + n) * K_PACKED;
+        const size_t gbase = ((size_t)expert * N + n) * K_GROUPS;
+        const size_t xbase = (size_t)slot * K;
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        for (int pack = int(lane); pack < K_PACKED; pack += 32) {
+            const uint32_t q = dw[wbase + (size_t)pack];
+            const int k = pack * VPW;
+            const int gi = k / GS;
+            const float scale = float(ds[gbase + (size_t)gi]);
+            const float bias = float(db[gbase + (size_t)gi]);
+            a0 += float(h[xbase + k + 0]) * (float((q >> 0) & 255u) * scale + bias);
+            a1 += float(h[xbase + k + 1]) * (float((q >> 8) & 255u) * scale + bias);
+            a2 += float(h[xbase + k + 2]) * (float((q >> 16) & 255u) * scale + bias);
+            a3 += float(h[xbase + k + 3]) * (float((q >> 24) & 255u) * scale + bias);
+        }
+        const float acc = simd_sum((a0 + a1) + (a2 + a3));
+        if (lane == 0) slot_values[slot * ROWS + r] = T(acc);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0 && lane < ROWS) {
+        const T p0 = slot_values[0 * ROWS + lane] * rw[0];
+        const T p8 = slot_values[8 * ROWS + lane] * rw[8];
+        const T p1 = slot_values[1 * ROWS + lane] * rw[1];
+        const T p9 = slot_values[9 * ROWS + lane] * rw[9];
+        T total = (p8 + p0) + (p9 + p1);
+        for (uint s = 2; s < 8; ++s) total = slot_values[s * ROWS + lane] * rw[s] + total;
+        y[(size_t)tile * ROWS + lane] = total;
+    }
+)metal";
+
+inline constexpr std::string_view down_verify_q8_exact = R"metal(
+    constexpr int K = 640;
+    constexpr int N = 2560;
+    constexpr int GS = 64;
+    constexpr int VPW = 4;
+    constexpr int K_PACKED = K / VPW;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int TOPK = 10;
+    constexpr int ROWS = 4;
+    constexpr int TILES = N / ROWS;
+    const uint lane = thread_index_in_simdgroup;
+    const uint slot = simdgroup_index_in_threadgroup;
+    const uint group = threadgroup_position_in_grid.x;
+    const uint batch = group / TILES;
+    const uint tile = group % TILES;
+    const uint expert = experts[batch * TOPK + slot];
+    threadgroup T slot_values[TOPK * ROWS];
+    for (uint r = 0; r < ROWS; ++r) {
+        const uint n = tile * ROWS + r;
+        const size_t wbase = ((size_t)expert * N + n) * K_PACKED;
+        const size_t gbase = ((size_t)expert * N + n) * K_GROUPS;
+        const size_t xbase = ((size_t)batch * TOPK + slot) * K;
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        for (int pack = int(lane); pack < K_PACKED; pack += 32) {
+            const uint32_t q = dw[wbase + (size_t)pack];
+            const int k = pack * VPW;
+            const int gi = k / GS;
+            const float scale = float(ds[gbase + (size_t)gi]);
+            const float bias = float(db[gbase + (size_t)gi]);
+            a0 += float(h[xbase + k + 0]) * (float((q >> 0) & 255u) * scale + bias);
+            a1 += float(h[xbase + k + 1]) * (float((q >> 8) & 255u) * scale + bias);
+            a2 += float(h[xbase + k + 2]) * (float((q >> 16) & 255u) * scale + bias);
+            a3 += float(h[xbase + k + 3]) * (float((q >> 24) & 255u) * scale + bias);
+        }
+        const float acc = simd_sum((a0 + a1) + (a2 + a3));
+        if (lane == 0) slot_values[slot * ROWS + r] = T(acc);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0 && lane < ROWS) {
+        const device T* scores = rw + (size_t)batch * TOPK;
+        const T p0 = slot_values[0 * ROWS + lane] * scores[0];
+        const T p8 = slot_values[8 * ROWS + lane] * scores[8];
+        const T p1 = slot_values[1 * ROWS + lane] * scores[1];
+        const T p9 = slot_values[9 * ROWS + lane] * scores[9];
+        T total = (p8 + p0) + (p9 + p1);
+        for (uint s = 2; s < 8; ++s) total = slot_values[s * ROWS + lane] * scores[s] + total;
+        y[(size_t)batch * N + (size_t)tile * ROWS + lane] = total;
+    }
+)metal";
+
 } // namespace qwen38::moe_metal

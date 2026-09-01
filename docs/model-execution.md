@@ -203,6 +203,12 @@ broadcast-added across four streams, processed by the sidecar's attention/MoE
 layer, and collapsed through its own final mixer before the shared Q4 language
 head. Hyper-Connection projections are detected per tensor, because the
 sidecar combines Q8 projections with dense BF16 block-injection weights.
+Affine Q4/Q8 geometry is now inferred independently for every projection, so a
+selective mixed-precision sidecar does not reinterpret Q8 tensors through the
+manifest's Q4 default. Q8 routed experts use an attributed, exact-order Metal
+lane for decode and narrow verification. Disabling that lane falls back to
+per-projection Q8 MLX operations rather than interpreting Q8 storage through a
+Q4 fused kernel.
 
 This is not yet the speculative runtime. A guarded real-weight smoke produced a
 well-formed 10,240-wide recursive stream at 36.7 GiB peak RSS. Exact top-1/logit

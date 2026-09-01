@@ -132,10 +132,13 @@ small memory increase. `--profile speed` remains the balanced default.
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote
 to depth 3 only after at least 10 accepted drafts. A promoted request is checked
-in 12-round windows and permanently demoted to depth 2 below 50% per-draft
-acceptance. The `speed` profile also treats the first four depth-3 rounds as a
-probation window and demotes immediately when they are already below 50%; set
-`QWEN38_MTP_EARLY_DEMOTION=0` to retain the full initial 12-round window.
+in 12-round windows and permanently demoted to depth 2 after two consecutive
+windows below 50% per-draft acceptance. A recovered window resets that
+hysteresis. The `speed` profile also treats only the first four depth-3 rounds
+after promotion as a probation window and demotes immediately when they are
+already below 50%; set `QWEN38_MTP_EARLY_DEMOTION=0` to retain the full initial
+12-round window. `QWEN38_MTP_DEMOTION=0` is a diagnostic rollback that disables
+both demotion checks without changing the initial probe.
 Prompts longer than 2,048 tokens stay at depth 2. Without an MTP
 companion auto mode stays serial. `3` uses the same adaptive cap explicitly;
 `off`, `2`, and `4` are fixed alternatives. On a 64 GB Mac, auto mode also
@@ -176,6 +179,17 @@ both fields back on subsequent assistant messages to reproduce the chat prefix.
 The reproduced Q4/g64 L47 sidecar is the recommended production companion. A
 same-target B31 run found the retained Q8 sidecar slower on code, creative, and
 JSON prompts because its higher per-round cost did not buy enough acceptance.
+The runtime nevertheless supports mixed Q4/Q8 sidecars by detecting each affine
+projection's packed geometry. For Q8 routed experts it uses a dedicated
+mlx-serve-derived gather-QMV/BF16-SwiGLU Metal lane whose reduction order is
+needed for useful draft acceptance; `QWEN38_Q8_EXACT_MOE=0` restores the generic
+diagnostic path. On the retained 38-token deterministic Python prompt, the
+exact lane plus corrected depth hysteresis completed 256 tokens in 75 rounds,
+accepted 180/217 drafts, and repeated at 59.28--59.30 tok/s warm. The same model
+with the earlier premature demotion repeated at about 55.86 tok/s. This is an
+M5 Pro 64 GiB, Q4-trunk/Q8-head, temperature-zero, thinking-off, no-prefix-cache
+high-predictability result—not a universal MTP floor. Peak guarded RSS was
+36.1 GiB.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
