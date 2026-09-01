@@ -60,6 +60,41 @@ ModelDecodeState QwenModel::make_state() const {
     return ModelDecodeState(layers_.size());
 }
 
+ModelDecodeState snapshot_decode_state(const ModelDecodeState& state) {
+    ModelDecodeState snapshot(state.layers.size());
+    snapshot.token_count = state.token_count;
+    for (std::size_t index = 0; index < state.layers.size(); ++index) {
+        const DecoderLayerState& source = state.layers[index];
+        DecoderLayerState& destination = snapshot.layers[index];
+        destination.linear_attention.initialized = source.linear_attention.initialized;
+        if (source.linear_attention.initialized) {
+            destination.linear_attention.convolution =
+                source.linear_attention.convolution.share();
+            destination.linear_attention.recurrent =
+                source.linear_attention.recurrent.share();
+        }
+        destination.full_attention.token_count = source.full_attention.token_count;
+        destination.full_attention.position_base = source.full_attention.position_base;
+        if (source.full_attention.token_count != 0) {
+            destination.full_attention.keys = source.full_attention.keys.share();
+            destination.full_attention.values = source.full_attention.values.share();
+        }
+        destination.ple.ngram = source.ple.ngram;
+        destination.ple.convolution_initialized = source.ple.convolution_initialized;
+        if (source.ple.convolution_initialized) {
+            destination.ple.convolution = source.ple.convolution.share();
+        }
+    }
+    return snapshot;
+}
+
+ModelDecodeState QwenModel::snapshot_state(const ModelDecodeState& state) const {
+    if (state.layers.size() != layers_.size()) {
+        throw std::runtime_error("model state layer count mismatch");
+    }
+    return snapshot_decode_state(state);
+}
+
 MlxArray QwenModel::embed(const std::uint32_t token) const {
     if (token >= vocabulary_size_) throw std::runtime_error("token id is out of range");
     const std::vector<std::int32_t> token_values{static_cast<std::int32_t>(token)};

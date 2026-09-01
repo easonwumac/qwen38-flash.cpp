@@ -1,4 +1,5 @@
 #include "qwen38/mlx_backend.hpp"
+#include "qwen38/model.hpp"
 
 #include <array>
 #include <cmath>
@@ -82,6 +83,39 @@ int main() {
         qwen38::MlxArray::maximum(signed_array, zero).to_float32() !=
             std::vector<float>({0, 0, 0, 9})) {
         std::cerr << "MLX abs/sign/sqrt/maximum mismatch\n";
+        return 1;
+    }
+    qwen38::MlxArray shared;
+    {
+        const auto owner = qwen38::MlxArray::from_float32(left_values, shape);
+        shared = owner.share();
+    }
+    if (shared.to_float32() != std::vector<float>({1, 2, 3, 4})) {
+        std::cerr << "MLX shared reference mismatch\n";
+        return 1;
+    }
+    qwen38::ModelDecodeState state(1);
+    state.token_count = 7;
+    state.layers[0].linear_attention.initialized = true;
+    state.layers[0].linear_attention.convolution =
+        qwen38::MlxArray::from_float32(left_values, shape);
+    state.layers[0].linear_attention.recurrent =
+        qwen38::MlxArray::from_float32(right_values, shape);
+    state.layers[0].ple.ngram.previous = {11, 22};
+    state.layers[0].ple.ngram.initialized = true;
+    state.layers[0].ple.convolution_initialized = true;
+    state.layers[0].ple.convolution = state.layers[0].linear_attention.convolution.share();
+    auto snapshot = qwen38::snapshot_decode_state(state);
+    state = qwen38::ModelDecodeState(1);
+    if (snapshot.token_count != 7 ||
+        snapshot.layers[0].linear_attention.convolution.to_float32() !=
+            std::vector<float>({1, 2, 3, 4}) ||
+        snapshot.layers[0].linear_attention.recurrent.to_float32() !=
+            std::vector<float>({5, 6, 7, 8}) ||
+        snapshot.layers[0].ple.ngram.previous != std::array<std::uint32_t, 2>({11, 22}) ||
+        snapshot.layers[0].ple.convolution.to_float32() !=
+            std::vector<float>({1, 2, 3, 4})) {
+        std::cerr << "model decode-state snapshot mismatch\n";
         return 1;
     }
     return 0;

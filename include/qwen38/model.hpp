@@ -17,6 +17,8 @@ struct ModelDecodeState {
     std::size_t token_count{0};
 };
 
+[[nodiscard]] ModelDecodeState snapshot_decode_state(const ModelDecodeState& state);
+
 struct GreedyStep {
     std::uint32_t token{0};
     float logit{0.0F};
@@ -35,6 +37,7 @@ public:
     explicit QwenModel(MlxTensorStore& tensors);
 
     [[nodiscard]] ModelDecodeState make_state() const;
+    [[nodiscard]] ModelDecodeState snapshot_state(const ModelDecodeState& state) const;
     [[nodiscard]] MlxArray forward_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] TargetDecodeStep forward_decode_capture(
         std::uint32_t token,

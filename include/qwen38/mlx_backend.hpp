@@ -30,6 +30,8 @@ public:
     MlxArray(MlxArray&& other) noexcept;
     MlxArray& operator=(MlxArray&& other) noexcept;
 
+    [[nodiscard]] MlxArray share() const;
+
     [[nodiscard]] static MlxArray from_float32(
         std::span<const float> values,
         std::span<const int> shape);

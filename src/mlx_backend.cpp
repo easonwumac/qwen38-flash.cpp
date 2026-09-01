@@ -77,6 +77,12 @@ MlxArray& MlxArray::operator=(MlxArray&& other) noexcept {
     return *this;
 }
 
+MlxArray MlxArray::share() const {
+    MlxArray result;
+    check(mlx_array_set(&result.value_, value_), "share array");
+    return result;
+}
+
 MlxMetalKernel::MlxMetalKernel(
     const std::string_view name,
     const std::span<const char* const> input_names,

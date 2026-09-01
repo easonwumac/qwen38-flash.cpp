@@ -233,6 +233,15 @@ cover cold, chunked, reset, gap, partial-accept, and invalid-accept cases under
 ASan/UBSan. The planner is ready to drive the native head but is not yet wired
 to a batched target verifier.
 
+Target decode state now supports explicit ref-counted snapshots across every
+implemented state family: GDN recurrent/convolution arrays, full-attention KV
+and absolute position, PLE convolution, n-gram history, and the model token
+offset. MLX buffers are shared until a functional update replaces them, so a
+verifier can retain a rollback anchor without duplicating model weights or
+cache storage. Unit coverage destroys the source state and verifies that the
+snapshot remains valid. Per-verify-position capture and QSA state are the next
+requirements before partial-accept rollback is complete.
+
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
 footprint was about 41.3 GB. This is explicitly the unfused correctness graph,
