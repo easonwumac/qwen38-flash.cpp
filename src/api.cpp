@@ -83,7 +83,10 @@ std::string completion_json(
         << ",\"mtp\":{\"rounds\":" << result.mtp_rounds
         << ",\"proposed\":" << result.mtp_proposed
         << ",\"accepted\":" << result.mtp_accepted
-        << ",\"fallbacks\":" << result.mtp_fallbacks << "}"
+        << ",\"fallbacks\":" << result.mtp_fallbacks
+        << ",\"depth\":" << result.mtp_final_depth
+        << ",\"promotions\":" << result.mtp_promotions
+        << ",\"demotions\":" << result.mtp_demotions << "}"
         << "}}";
     return out.str();
 }

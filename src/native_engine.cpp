@@ -1,4 +1,5 @@
 #include "qwen38/native_engine.hpp"
+#include "qwen38/mtp_depth_policy.hpp"
 #include "qwen38/mtp_runner.hpp"
 
 #include <algorithm>
@@ -19,7 +20,7 @@ std::size_t resolved_mtp_depth(
     const ModelManifest& manifest,
     const NativeEngineOptions& options) {
     const bool available = has_mtp_weights(manifest);
-    const std::size_t depth = options.mtp_depth.value_or(available ? 2 : 0);
+    const std::size_t depth = options.mtp_depth.value_or(available ? 3 : 0);
     if (depth != 0 && (depth < 2 || depth > 4)) {
         throw std::runtime_error("MTP depth must be 0 or between 2 and 4");
     }
@@ -154,6 +155,8 @@ GenerationResult NativeEngine::complete(
     std::uint32_t current = prompt_tokens.back();
     std::size_t zero_accept_streak = 0;
     bool mtp_profitable = mtp_head_ != nullptr;
+    MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
+    result.mtp_final_depth = depth_policy.depth();
     const auto generation_started = std::chrono::steady_clock::now();
     while (result.tokens.size() < max_tokens) {
         const std::size_t remaining = max_tokens - result.tokens.size();
@@ -172,10 +175,14 @@ GenerationResult NativeEngine::complete(
 
         MtpRoundStep step = run_greedy_mtp_round_reference(
             model_, *mtp_head_, current, *previous_target_stream, state.token_count,
-            mtp_depth_, state, mtp_state);
+            depth_policy.depth(), state, mtp_state);
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
+        depth_policy.observe(step.draft_tokens.size(), step.accepted);
+        result.mtp_final_depth = depth_policy.depth();
+        result.mtp_promotions = depth_policy.promotions();
+        result.mtp_demotions = depth_policy.demotions();
         zero_accept_streak = step.accepted == 0 ? zero_accept_streak + 1 : 0;
         current = step.next_current_token;
         previous_target_stream = std::move(step.next_target_stream);
@@ -189,7 +196,11 @@ GenerationResult NativeEngine::complete(
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
-        if (zero_accept_streak >= options_.zero_accept_fallback_rounds) {
+        // The recovered production policy makes its first request-static
+        // decision from all eight probe rounds. Do not let the supplemental
+        // zero-accept guard truncate that evidence window.
+        if (!depth_policy.probing() &&
+            zero_accept_streak >= options_.zero_accept_fallback_rounds) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
         }

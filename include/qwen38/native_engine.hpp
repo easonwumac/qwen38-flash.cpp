@@ -20,7 +20,9 @@ struct NativeEngineOptions {
     std::size_t prefill_chunk_rows{64};
     // Retain one exact complete-state prefix. Zero disables caching.
     std::size_t prefix_cache_max_tokens{8192};
-    // nullopt selects depth 2 when an MTP sidecar is present, otherwise serial.
+    // nullopt selects the verified adaptive depth-3 policy when an MTP sidecar
+    // is present: start at 2, promote only on strong short-prompt acceptance,
+    // and demote if verification becomes unprofitable.
     std::optional<std::size_t> mtp_depth;
     std::size_t mtp_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};
     std::size_t zero_accept_fallback_rounds{2};

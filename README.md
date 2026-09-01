@@ -95,9 +95,14 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
   -d '{"prompt":"Hello","max_tokens":1}'
 ```
 
-`--mtp-depth auto` is the default. It selects depth 2 when the model index has
-the Qwen3.8 MTP companion, otherwise it stays serial. `off`, `2`, `3`, and `4`
-are explicit alternatives. On a 64 GB Mac, auto mode also selects the verified
+`--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
+companion, short prompts start at depth 2 for an eight-round probe and promote
+to depth 3 only after at least 10 accepted drafts. A promoted request is checked
+in 12-round windows and permanently demoted to depth 2 below 50% per-draft
+acceptance. Prompts longer than 2,048 tokens stay at depth 2. Without an MTP
+companion auto mode stays serial. `3` uses the same adaptive cap explicitly;
+`off`, `2`, and `4` are fixed alternatives. On a 64 GB Mac, auto mode also
+selects the verified
 `12:24` resident-expert safety tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
 already set, caps the MLX cache at 256 MiB, and falls back to serial after two
 consecutive zero-accept rounds.

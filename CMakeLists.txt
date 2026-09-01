@@ -22,6 +22,7 @@ add_library(qwen38_core
     src/json.cpp
     src/mapped_file.cpp
     src/model_manifest.cpp
+    src/mtp_depth_policy.cpp
     src/mtp_lifecycle.cpp
     src/ngram.cpp
     src/runtime.cpp
@@ -207,6 +208,7 @@ if(QWEN38_BUILD_TESTS)
         tests/chat_template_test.cpp
         tests/json_test.cpp
         tests/model_manifest_test.cpp
+        tests/mtp_depth_policy_test.cpp
         tests/mtp_lifecycle_test.cpp
         tests/ngram_test.cpp
         tests/runtime_test.cpp

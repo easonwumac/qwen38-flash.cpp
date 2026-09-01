@@ -20,6 +20,9 @@ struct GenerationResult {
     std::size_t mtp_proposed{0};
     std::size_t mtp_accepted{0};
     std::size_t mtp_fallbacks{0};
+    std::size_t mtp_final_depth{0};
+    std::size_t mtp_promotions{0};
+    std::size_t mtp_demotions{0};
 };
 
 class InferenceEngine {
