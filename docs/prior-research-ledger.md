@@ -71,6 +71,7 @@ directions. New code should build on them.
 | Per-shape affine-Q4 autoregressive QMV retuning | P268's best isolated kernel was 1.082x, but full-engine ON was only 0.10% above pooled controls and slower than reverse controls | Do not continue tile/threadgroup/half-vector sweeps without a fused multi-consumer design |
 | Grouped S=2..3 verify gate/up | Isolated 1.06x; full model 44.446 versus 44.897 tok/s, with worse measured acceptance | Rejected as a production optimization |
 | Grouped verify down/reduce prototype | Isolated Q4 gain 1.05x; Q8 generalization produced incorrect values | Do not port as-is; require a new exact Q8 design and end-to-end cost case |
+| Routed-expert union gate/up prototype | The guarded depth-2 full-model parity run reached 38.3 GiB RSS before completion and was terminated at the 38 GiB cap | Rejected for the 64 GiB product profile; do not raise the safety cap to promote it |
 | Qwen4 Fused-QKV flag used in P73 | The Qwen4 geometry declined the path, so apparent timing differences were environmental | No performance claim and no blind rerun |
 | Decode async ladder used in P73 | The Qwen4 layer loop never engaged it | No performance claim and no blind rerun |
 | KV-only MTP prefix snapshots | QSA raw/pooled state and offsets become stale | Correctness-invalid |
