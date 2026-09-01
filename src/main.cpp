@@ -2,6 +2,7 @@
 #include "qwen38/http_server.hpp"
 #include "qwen38/model_manifest.hpp"
 #include "qwen38/runtime.hpp"
+#include "qwen38/runtime_profile.hpp"
 #ifdef QWEN38_HAS_INFERENCE
 #include "qwen38/native_engine.hpp"
 #endif
@@ -16,7 +17,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <utility>
 
 namespace {
 
@@ -38,43 +38,6 @@ void print_usage(const char* program) {
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
         << "qwen38-flash.cpp native inference server.\n";
-}
-
-void set_environment_default(const char* name, const char* value) {
-    if (setenv(name, value, 0) != 0) {
-        throw std::runtime_error(std::string("cannot set speed profile option ") + name);
-    }
-}
-
-void apply_profile(const std::string& profile) {
-    if (profile == "safe") return;
-    if (profile != "speed" && profile != "latency") {
-        throw std::runtime_error("invalid profile: " + profile);
-    }
-    const char* resident_range = profile == "latency" ? "12:34" : "12:28";
-    const std::pair<const char*, const char*> settings[]{
-        {"QWEN38_RESIDENT_EXPERT_RANGE", resident_range},
-        {"QWEN38_FUSED_MOE", "1"},
-        {"QWEN38_DEVICE_ROUTER", "1"},
-        {"QWEN38_COMPILE_LAYER", "1"},
-        {"QWEN38_HC_FUSED", "1"},
-        {"QWEN38_HC_FUSED_INJECTION", "1"},
-        {"QWEN38_GDN_NORM_GATE", "1"},
-        {"QWEN38_GDN_PREWORK", "1"},
-        {"QWEN38_GDN_METAL_VERIFY_BF16_SUM", "1"},
-        {"QWEN38_BATCH_KV_VERIFY", "1"},
-        {"QWEN38_SDPA_PREFILL", "1"},
-        {"QWEN38_GDN_METAL_PREFILL", "1"},
-        {"QWEN38_GROUPED_PREFILL", "1"},
-        {"QWEN38_PREFILL_BARRIER_STRIDE", "8"},
-        {"QWEN38_SELECTED_SOFTMAX_ROUTER", "1"},
-        {"QWEN38_MTP_EARLY_DEMOTION", "1"},
-        {"QWEN38_MTP_DEMOTION", "1"},
-        {"QWEN38_Q8_EXACT_MOE", "1"},
-        {"QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE", "1"},
-        {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
-    };
-    for (const auto& [name, value] : settings) set_environment_default(name, value);
 }
 
 std::optional<std::size_t> parse_mtp_depth(const std::string& value) {
@@ -164,7 +127,7 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("unknown argument: " + argument);
             }
         }
-        apply_profile(profile);
+        qwen38::apply_runtime_profile(profile);
         if ((profile == "speed" || profile == "latency") &&
             !prefill_chunk_explicit) {
             prefill_chunk_rows = 512;

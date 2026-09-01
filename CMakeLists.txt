@@ -28,6 +28,7 @@ add_library(qwen38_core
     src/ngram.cpp
     src/quantization_geometry.cpp
     src/runtime.cpp
+    src/runtime_profile.cpp
     src/safetensors.cpp
     src/tool_call.cpp
 )

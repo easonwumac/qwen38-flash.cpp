@@ -145,12 +145,14 @@ rollback checkpoint. The first real-weight boundary test engages at 2,052
 tokens and retains 0.999957 batched/serial output cosine.
 
 The first implementation deliberately feeds the resulting Boolean mask to MLX
-SDPA rather than claiming a custom sparse attention kernel. Guarded full-model
-checks at 1,984/2,112 tokens measured 18.31/18.41 prefill tok/s, so crossing the
-selection boundary did not introduce a visible prefill regression. A 3,505-token
-run reached 18.62 prefill tok/s, decoded the next token in 274.9 ms, retained 876
-pooled blocks on all 12 full-attention layers, and peaked at 28.3 GiB RSS. Longer
-retrieval quality and the 128K/262K memory envelope remain release gates.
+SDPA rather than claiming a custom sparse attention kernel. Conservative
+full-model controls at 1,984/2,112 tokens measured 18.31/18.41 prefill tok/s, so
+crossing the selection boundary did not introduce a visible regression. The
+production `speed` profile reached 178.41 PP tok/s at 2,112 tokens and 193.52 at
+3,505 tokens. The latter retained 876 pooled blocks on all 12 full-attention
+layers, decoded the next token in 74.9 ms, peaked at 35.2 GiB RSS, and kept 9.4
+GiB available. Longer retrieval quality and the 128K/262K memory envelope remain
+release gates.
 
 ## PLE n-gram SSD table
 

@@ -1,5 +1,6 @@
 #include "qwen38/chat_template.hpp"
 #include "qwen38/model.hpp"
+#include "qwen38/runtime_profile.hpp"
 #include "qwen38/tokenizer.hpp"
 
 #include <algorithm>
@@ -27,8 +28,9 @@ std::string read_file(const std::filesystem::path &path) {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc < 3 || argc > 5) {
-        std::cerr << "Usage: " << argv[0] << " MODEL PROMPT.txt [CHUNK_ROWS [MAX_TOKENS]]\n";
+    if (argc < 3 || argc > 6) {
+        std::cerr << "Usage: " << argv[0]
+                  << " MODEL PROMPT.txt [CHUNK_ROWS [MAX_TOKENS [PROFILE]]]\n";
         return EXIT_FAILURE;
     }
     try {
@@ -38,9 +40,11 @@ int main(int argc, char **argv) {
         }
         const std::filesystem::path model_path = argv[1];
         const std::size_t chunk_rows = argc >= 4 ? std::stoul(argv[3]) : 64;
+        const std::string profile = argc == 6 ? argv[5] : "speed";
         if (chunk_rows == 0 || chunk_rows > 512) {
             throw std::runtime_error("CHUNK_ROWS must be between 1 and 512");
         }
+        qwen38::apply_runtime_profile(profile);
 
         qwen38::ChatTemplateOptions options;
         options.enable_thinking = false;
@@ -51,7 +55,7 @@ int main(int argc, char **argv) {
             options);
         const qwen38::Tokenizer tokenizer = qwen38::Tokenizer::load(model_path);
         std::vector<std::uint32_t> tokens = tokenizer.encode(rendered);
-        if (argc == 5) {
+        if (argc >= 5) {
             const std::size_t max_tokens = std::stoul(argv[4]);
             if (max_tokens < 2) {
                 throw std::runtime_error("MAX_TOKENS must be at least 2");
@@ -134,6 +138,7 @@ int main(int argc, char **argv) {
         const double decode_ms =
             std::chrono::duration<double, std::milli>(finished - prefill_done).count();
         std::cout << "{\"prompt_tokens\":" << tokens.size() << ",\"chunk_rows\":" << chunk_rows
+                  << ",\"profile\":\"" << profile << "\""
                   << ",\"full_attention_layers\":" << full_attention_layers
                   << ",\"qsa_layers\":" << qsa_layers
                   << ",\"qsa_engaged\":" << (qsa_layers != 0 ? "true" : "false")
