@@ -14,10 +14,14 @@
 #include <future>
 #include <functional>
 #include <iostream>
+#include <iomanip>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <thread>
 #include <utility>
+#include <pwd.h>
+#include <unistd.h>
 
 namespace qwen38 {
 namespace {
@@ -133,6 +137,75 @@ bool cache_completed_mtp_as_profitable(
     return cache_mtp_as_profitable(rounds, accepted, fallbacks);
 }
 
+std::uint64_t fnv1a(const std::string_view text) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const char character : text) {
+        const auto byte = static_cast<unsigned char>(character);
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+std::string cache_compatibility_key(
+    const ModelManifest& manifest,
+    const std::size_t mtp_depth) {
+    std::ostringstream source;
+    std::error_code ignored;
+    source << std::filesystem::weakly_canonical(manifest.directory(), ignored).string()
+           << '|' << manifest.declared_weight_bytes()
+           << '|' << manifest.config().layer_count
+           << '|' << manifest.config().quantization_bits
+           << '|' << mtp_depth;
+    for (const char* file : {"config.json", "model.safetensors.index.json"}) {
+        const std::filesystem::path path = manifest.directory() / file;
+        std::uintmax_t bytes = std::filesystem::file_size(path, ignored);
+        if (ignored) bytes = 0;
+        ignored.clear();
+        const auto modified = std::filesystem::last_write_time(path, ignored);
+        const auto ticks = ignored ? 0LL : std::chrono::duration_cast<std::chrono::nanoseconds>(
+            modified.time_since_epoch()).count();
+        source << '|' << bytes << '|' << ticks;
+        ignored.clear();
+    }
+    constexpr std::array<const char*, 10> state_environment{
+        "QWEN38_COMPACT_QMETA",
+        "QWEN38_FUSED_MOE",
+        "QWEN38_DEVICE_ROUTER",
+        "QWEN38_SELECTED_SOFTMAX_ROUTER",
+        "QWEN38_GDN_METAL_PREFILL",
+        "QWEN38_SDPA_PREFILL",
+        "QWEN38_QSA_PREFILL",
+        "QWEN38_HC_FUSED_INJECTION",
+        "QWEN38_COMPILE_LAYER",
+        "QWEN38_SDPA_DECODE",
+    };
+    for (const char* name : state_environment) {
+        const char* value = std::getenv(name);
+        source << '|' << name << '=' << (value == nullptr ? "" : value);
+    }
+    std::ostringstream result;
+    result << std::hex << std::setfill('0') << std::setw(16) << fnv1a(source.str());
+    return result.str();
+}
+
+std::filesystem::path default_cache_directory(
+    const ModelManifest& manifest,
+    const std::size_t mtp_depth) {
+    std::filesystem::path root;
+    if (const char* configured = std::getenv("XDG_CACHE_HOME");
+        configured != nullptr && *configured != '\0') {
+        root = configured;
+    } else if (const passwd* account = getpwuid(getuid());
+               account != nullptr && account->pw_dir != nullptr) {
+        root = std::filesystem::path(account->pw_dir) / "Library" / "Caches";
+    } else {
+        root = std::filesystem::temp_directory_path();
+    }
+    return root / "qwen38-flash.cpp" / "prefix" /
+        cache_compatibility_key(manifest, mtp_depth);
+}
+
 std::size_t complete_utf8_prefix(const std::string_view text) {
     std::size_t offset = 0;
     while (offset < text.size()) {
@@ -197,6 +270,17 @@ NativeEngine::NativeEngine(
         }
         mtp_head_ = std::make_unique<QwenMtpHead>(tensors_);
     }
+    if (options_.ssd_prefix_cache_max_bytes != 0) {
+        const std::filesystem::path directory =
+            options_.ssd_prefix_cache_directory.empty()
+            ? default_cache_directory(tensors_.manifest(), mtp_depth_)
+            : options_.ssd_prefix_cache_directory /
+                cache_compatibility_key(tensors_.manifest(), mtp_depth_);
+        ssd_prefix_cache_ = std::make_unique<PrefixCacheStore>(
+            directory, options_.ssd_prefix_cache_max_bytes, model_.layer_count());
+        std::clog << "qwen38-server: SSD prefix cache=" << directory
+                  << " limit_bytes=" << options_.ssd_prefix_cache_max_bytes << '\n';
+    }
 }
 
 GenerationResult NativeEngine::complete(
@@ -248,6 +332,29 @@ GenerationResult NativeEngine::complete_impl(
         options_.qmeta_cache_max_prompt_tokens != 0 &&
         prefill_rows <= options_.qmeta_cache_max_prompt_tokens);
     const auto prompt_started = std::chrono::steady_clock::now();
+    const std::span<const std::uint32_t> prefill_tokens(
+        prompt_tokens.data(), prefill_rows);
+    if (ssd_prefix_cache_ != nullptr &&
+        (prefix_cache_ == nullptr || !is_prefix(prefix_cache_->tokens, prefill_tokens))) {
+        std::optional<StoredPrefixState> stored =
+            ssd_prefix_cache_->load_longest(prefill_tokens);
+        if (stored.has_value()) {
+            PersistedPrefixState& persistent = stored->state;
+            prefix_cache_ = std::make_unique<PrefixCacheEntry>(PrefixCacheEntry{
+                .tokens = std::move(stored->tokens),
+                .target_state = std::move(persistent.target),
+                .mtp_state = std::move(persistent.mtp),
+                .previous_target_stream = std::move(persistent.previous_target_stream),
+                .pending_mtp_streams = std::move(persistent.pending_mtp_streams),
+                .pending_mtp_tokens = std::move(persistent.pending_mtp_tokens),
+                .mtp_profitable = persistent.mtp_profitable,
+                .mtp_profitability_current_token =
+                    persistent.mtp_profitability_current_token,
+                .mtp_cumulative_profitability_keep =
+                    persistent.mtp_cumulative_profitability_keep,
+            });
+        }
+    }
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,
             std::span<const std::uint32_t>(prompt_tokens.data(), prefill_rows))) {
@@ -294,6 +401,9 @@ GenerationResult NativeEngine::complete_impl(
     result.prompt_tokens = prompt_tokens.size();
     result.cached_prompt_tokens = prefill_offset;
     result.prompt_ms = prompt_ms;
+    bool prefix_cache_changed = false;
+    std::vector<std::uint32_t> prompt_cache_tokens;
+    std::optional<PersistedPrefixState> prompt_cache_state;
     std::size_t streamed_tokens = 0;
     std::string pending_stream_bytes;
     bool stream_connected = true;
@@ -337,11 +447,17 @@ GenerationResult NativeEngine::complete_impl(
             .mtp_profitability_current_token = std::nullopt,
             .mtp_cumulative_profitability_keep = false,
         });
+        prefix_cache_changed = true;
+        if (ssd_prefix_cache_ != nullptr) {
+            prompt_cache_tokens = prefix_cache_->tokens;
+            prompt_cache_state.emplace(snapshot_prefix_cache(*prefix_cache_));
+        }
     }
     result.tokens.reserve(max_tokens);
     const char* extend_cache = std::getenv("QWEN38_EXTEND_PREFIX_CACHE");
     const bool extend_cache_enabled =
-        extend_cache != nullptr && std::string_view(extend_cache) == "1";
+        ssd_prefix_cache_ != nullptr ||
+        (extend_cache != nullptr && std::string_view(extend_cache) == "1");
     bool mtp_cache_extendable = true;
     std::vector<MlxArray> pending_mtp_streams;
     std::vector<std::uint32_t> pending_mtp_tokens;
@@ -516,6 +632,7 @@ GenerationResult NativeEngine::complete_impl(
         prefix_cache_->mtp_profitability_current_token = prompt_tokens.back();
         prefix_cache_->mtp_cumulative_profitability_keep =
             result.mtp_fallbacks != 0 && *prefix_cache_->mtp_profitable;
+        prefix_cache_changed = true;
     }
     const std::size_t complete_token_count = prompt_tokens.size() + result.tokens.size();
     const bool target_matches_output = stopped_on_terminator
@@ -558,13 +675,58 @@ GenerationResult NativeEngine::complete_impl(
             .mtp_cumulative_profitability_keep =
                 result.mtp_fallbacks != 0 && extended_profitability.value_or(false),
         });
+        prefix_cache_changed = true;
     }
     if (on_delta != nullptr && stream_connected && !pending_stream_bytes.empty() &&
         !(*on_delta)(pending_stream_bytes)) {
         result.finish_reason = "cancelled";
     }
     result.text = tokenizer_.decode(result.tokens);
+    if (prefix_cache_changed && ssd_prefix_cache_ != nullptr) {
+        try {
+            if (prompt_cache_state.has_value()) {
+                ssd_prefix_cache_->save(prompt_cache_tokens, *prompt_cache_state);
+            }
+            if (prefix_cache_ != nullptr &&
+                (!prompt_cache_state.has_value() ||
+                    prefix_cache_->tokens != prompt_cache_tokens)) {
+                persist_prefix_cache(*prefix_cache_);
+            }
+        } catch (const std::exception& error) {
+            std::cerr << "SSD prefix cache write failed: " << error.what() << '\n';
+        }
+    }
     return result;
+}
+
+PersistedPrefixState NativeEngine::snapshot_prefix_cache(
+    const PrefixCacheEntry& entry) const {
+    PersistedPrefixState persistent(model_.layer_count());
+    persistent.target = model_.snapshot_state(entry.target_state);
+    persistent.mtp = mtp_head_ == nullptr
+        ? MtpDecodeState{}
+        : mtp_head_->snapshot_state(entry.mtp_state);
+    if (entry.previous_target_stream.has_value()) {
+        persistent.previous_target_stream =
+            entry.previous_target_stream->share();
+    }
+    persistent.pending_mtp_streams.reserve(entry.pending_mtp_streams.size());
+    for (const MlxArray& stream : entry.pending_mtp_streams) {
+        persistent.pending_mtp_streams.push_back(stream.share());
+    }
+    persistent.pending_mtp_tokens = entry.pending_mtp_tokens;
+    persistent.mtp_profitable = entry.mtp_profitable;
+    persistent.mtp_profitability_current_token =
+        entry.mtp_profitability_current_token;
+    persistent.mtp_cumulative_profitability_keep =
+        entry.mtp_cumulative_profitability_keep;
+    return persistent;
+}
+
+void NativeEngine::persist_prefix_cache(const PrefixCacheEntry& entry) const {
+    if (ssd_prefix_cache_ == nullptr) return;
+    const PersistedPrefixState persistent = snapshot_prefix_cache(entry);
+    ssd_prefix_cache_->save(entry.tokens, persistent);
 }
 
 void NativeEngine::clear_cache() {
@@ -572,6 +734,7 @@ void NativeEngine::clear_cache() {
     // Request-owned decode state is released at request completion. This also
     // returns unused MLX allocator/cache blocks to the system on demand.
     prefix_cache_.reset();
+    if (ssd_prefix_cache_ != nullptr) ssd_prefix_cache_->clear();
     MlxArray::clear_cache();
 }
 

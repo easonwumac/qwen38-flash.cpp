@@ -13,6 +13,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -35,6 +36,7 @@ void print_usage(const char* program) {
         << " [--profile safe|speed|latency|long-context]"
         << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
         << " [--qmeta-cache-max-prompt-tokens N]"
+        << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
         << " [--max-generation-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
@@ -90,6 +92,8 @@ int main(int argc, char** argv) {
         bool prefill_chunk_explicit = false;
         std::size_t prefix_cache_max_tokens = 8192;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
+        std::uint64_t ssd_prefix_cache_max_bytes = 0;
+        std::filesystem::path ssd_prefix_cache_directory;
         std::size_t max_generation_tokens = 4096;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
@@ -102,6 +106,8 @@ int main(int argc, char** argv) {
                  argument == "--mtp-depth" || argument == "--prefill-chunk" ||
                  argument == "--prefix-cache-tokens" ||
                  argument == "--qmeta-cache-max-prompt-tokens" ||
+                 argument == "--ssd-prefix-cache-gib" ||
+                 argument == "--ssd-prefix-cache-dir" ||
                  argument == "--max-generation-tokens" || argument == "--profile") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
@@ -124,6 +130,15 @@ int main(int argc, char** argv) {
             } else if (argument == "--qmeta-cache-max-prompt-tokens") {
                 qmeta_cache_max_prompt_tokens =
                     parse_size(argv[++i], "qmeta cache prompt token limit");
+            } else if (argument == "--ssd-prefix-cache-gib") {
+                const std::size_t gib = parse_size(argv[++i], "SSD prefix cache size");
+                constexpr std::uint64_t bytes_per_gib = 1024ULL * 1024ULL * 1024ULL;
+                if (gib > std::numeric_limits<std::uint64_t>::max() / bytes_per_gib) {
+                    throw std::runtime_error("SSD prefix cache size is too large");
+                }
+                ssd_prefix_cache_max_bytes = gib * bytes_per_gib;
+            } else if (argument == "--ssd-prefix-cache-dir") {
+                ssd_prefix_cache_directory = argv[++i];
             } else if (argument == "--max-generation-tokens") {
                 max_generation_tokens = parse_size(argv[++i], "generation token limit");
                 if (max_generation_tokens == 0) {
@@ -153,12 +168,18 @@ int main(int argc, char** argv) {
                 engine_options.prefix_cache_max_tokens = prefix_cache_max_tokens;
                 engine_options.qmeta_cache_max_prompt_tokens =
                     qmeta_cache_max_prompt_tokens;
+                engine_options.ssd_prefix_cache_max_bytes =
+                    ssd_prefix_cache_max_bytes;
+                engine_options.ssd_prefix_cache_directory =
+                    ssd_prefix_cache_directory;
                 engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
                           << " prefill_chunk=" << prefill_chunk_rows
                           << " qmeta_cache_max_prompt_tokens="
                           << qmeta_cache_max_prompt_tokens
+                          << " ssd_prefix_cache_gib="
+                          << ssd_prefix_cache_max_bytes / (1024ULL * 1024ULL * 1024ULL)
                           << " max_generation_tokens=" << max_generation_tokens << '\n';
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else

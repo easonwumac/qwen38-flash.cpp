@@ -374,6 +374,27 @@ the next cache hit, while a profitable probe remains enabled. The response
 reports this as `performance.mtp.profitability_cache_skip`. Set
 `QWEN38_MTP_TRACE=1` for per-round acceptance and timing diagnostics.
 
+Set `--ssd-prefix-cache-gib N` to persist those exact complete-state snapshots
+across requests and server restarts. The store is disabled by default, uses a
+model/runtime compatibility namespace, finds the longest cached prefix of an
+append-only prompt, and restores target, MTP, KV/QSA, GDN, PLE/ngram, and pending
+stream state before processing only the appended tokens. It is not a token-list
+cache: the full recurrent checkpoint is stored as safetensors. Entries are
+least-recently-used and bounded by the configured total size. The default path
+is `~/Library/Caches/qwen38-flash.cpp/prefix/`; use
+`--ssd-prefix-cache-dir PATH` to select another SSD location. Enabling the SSD
+store also extends eligible checkpoints through generated output so the next
+chat turn can reuse the prior assistant turn. The existing
+`--prefix-cache-tokens` limit remains the maximum persisted checkpoint length;
+raise it deliberately for longer conversations. `POST /admin/cache/clear`
+clears both RAM and the active SSD namespace.
+
+```bash
+./devtools/memory_guard.py -- ./build-all/qwen38-server \
+  --model /path/to/model --profile speed \
+  --prefix-cache-tokens 32768 --ssd-prefix-cache-gib 8
+```
+
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`
 to keep top-k selection and routing weights on the GPU. `QWEN38_COMPILE_LAYER=1`

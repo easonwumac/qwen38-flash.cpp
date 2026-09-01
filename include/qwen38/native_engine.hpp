@@ -4,6 +4,7 @@
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
+#include "qwen38/prefix_cache_store.hpp"
 #include "qwen38/tokenizer.hpp"
 
 #include <cstdint>
@@ -29,6 +30,10 @@ struct NativeEngineOptions {
     // with growing attention state. Disable it automatically above this prompt
     // size on 64 GiB systems. Zero disables it for every request.
     std::size_t qmeta_cache_max_prompt_tokens{32768};
+    // Zero disables persistent prefix caching. The on-disk store mirrors the
+    // exact complete-state RAM prefix and evicts least-recently-used entries.
+    std::uint64_t ssd_prefix_cache_max_bytes{0};
+    std::filesystem::path ssd_prefix_cache_directory;
     // nullopt selects the verified adaptive depth-3 policy when an MTP sidecar
     // is present: start at 2, promote only on strong short-prompt acceptance,
     // and demote if verification becomes unprofitable.
@@ -74,6 +79,7 @@ private:
     QwenModel model_;
     std::unique_ptr<QwenMtpHead> mtp_head_;
     std::unique_ptr<PrefixCacheEntry> prefix_cache_;
+    std::unique_ptr<PrefixCacheStore> ssd_prefix_cache_;
     std::size_t mtp_depth_{0};
     std::uint32_t chat_end_token_{0};
     std::mutex inference_mutex_;
@@ -82,6 +88,9 @@ private:
         std::string_view prompt,
         std::size_t max_tokens,
         const TextDeltaCallback* on_delta);
+    [[nodiscard]] PersistedPrefixState snapshot_prefix_cache(
+        const PrefixCacheEntry& entry) const;
+    void persist_prefix_cache(const PrefixCacheEntry& entry) const;
 };
 
 // Owns the native engine on one dedicated thread. Recent MLX releases bind
