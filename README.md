@@ -15,6 +15,11 @@ a UI and is not a wrapper around `mlx-serve`.
 > Graph execution and inference are not implemented yet, so this version is not a
 > usable LLM runtime and makes no performance claim.
 
+The execution path now includes a real-checkpoint Q4 affine projection smoke:
+`qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
+lazy safetensors primitives and evaluates its 248,320 logits on the Apple GPU.
+This proves weight-to-Metal plumbing, not a complete transformer forward.
+
 ## Build
 
 Requirements: CMake 3.24 or newer and a C++20 compiler.

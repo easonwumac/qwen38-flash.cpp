@@ -12,13 +12,21 @@ void check(const int status, const char* operation) {
     }
 }
 
-mlx_stream gpu_stream() {
-    mlx_stream stream = mlx_default_gpu_stream_new();
-    if (stream.ctx == nullptr) {
-        throw std::runtime_error("MLX did not provide a default GPU stream");
+class Stream final {
+public:
+    Stream() : value_(mlx_default_gpu_stream_new()) {
+        if (value_.ctx == nullptr) {
+            throw std::runtime_error("MLX did not provide a default GPU stream");
+        }
     }
-    return stream;
-}
+    ~Stream() { static_cast<void>(mlx_stream_free(value_)); }
+    Stream(const Stream&) = delete;
+    Stream& operator=(const Stream&) = delete;
+    [[nodiscard]] mlx_stream get() const noexcept { return value_; }
+
+private:
+    mlx_stream value_{};
+};
 
 } // namespace
 
@@ -63,17 +71,50 @@ MlxArray MlxArray::from_float32(
 
 MlxArray MlxArray::add(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
-    mlx_stream stream = gpu_stream();
-    check(mlx_add(&result.value_, left.value_, right.value_, stream), "add");
-    static_cast<void>(mlx_stream_free(stream));
+    const Stream stream;
+    check(mlx_add(&result.value_, left.value_, right.value_, stream.get()), "add");
     return result;
 }
 
 MlxArray MlxArray::matmul(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
-    mlx_stream stream = gpu_stream();
-    check(mlx_matmul(&result.value_, left.value_, right.value_, stream), "matmul");
-    static_cast<void>(mlx_stream_free(stream));
+    const Stream stream;
+    check(mlx_matmul(&result.value_, left.value_, right.value_, stream.get()), "matmul");
+    return result;
+}
+
+MlxArray MlxArray::astype(const mlx_dtype dtype) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_astype(&result.value_, value_, dtype, stream.get()), "astype");
+    return result;
+}
+
+MlxArray MlxArray::quantized_matmul(
+    const MlxArray& input,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const int group_size,
+    const int bits,
+    const bool transpose) {
+    if (group_size <= 0 || bits <= 0) {
+        throw std::runtime_error("invalid quantization parameters");
+    }
+    MlxArray result;
+    const Stream stream;
+    check(mlx_quantized_matmul(
+              &result.value_,
+              input.value_,
+              weight.value_,
+              scales.value_,
+              biases.value_,
+              transpose,
+              mlx_optional_int{.value = group_size, .has_value = true},
+              mlx_optional_int{.value = bits, .has_value = true},
+              "affine",
+              stream.get()),
+        "quantized_matmul");
     return result;
 }
 
@@ -105,6 +146,37 @@ std::size_t MlxArray::size() const noexcept {
 
 mlx_dtype MlxArray::dtype() const noexcept {
     return mlx_array_dtype(value_);
+}
+
+MlxSafetensors::MlxSafetensors(const std::filesystem::path& path)
+    : tensors_(mlx_map_string_to_array_new()), metadata_(mlx_map_string_to_string_new()) {
+    mlx_stream stream = mlx_default_cpu_stream_new();
+    if (stream.ctx == nullptr) {
+        throw std::runtime_error("MLX did not provide a default CPU stream");
+    }
+    const int status = mlx_load_safetensors(&tensors_, &metadata_, path.c_str(), stream);
+    static_cast<void>(mlx_stream_free(stream));
+    if (status != 0) {
+        static_cast<void>(mlx_map_string_to_array_free(tensors_));
+        static_cast<void>(mlx_map_string_to_string_free(metadata_));
+        tensors_ = {};
+        metadata_ = {};
+        throw std::runtime_error("MLX could not load safetensors shard: " + path.string());
+    }
+}
+
+MlxSafetensors::~MlxSafetensors() {
+    if (tensors_.ctx != nullptr) static_cast<void>(mlx_map_string_to_array_free(tensors_));
+    if (metadata_.ctx != nullptr) static_cast<void>(mlx_map_string_to_string_free(metadata_));
+}
+
+MlxArray MlxSafetensors::tensor(const std::string_view name) const {
+    MlxArray result;
+    const std::string key(name);
+    const int status = mlx_map_string_to_array_get(&result.value_, tensors_, key.c_str());
+    if (status == 2) throw std::out_of_range("tensor not found in MLX shard: " + key);
+    check(status, "map_string_to_array_get");
+    return result;
 }
 
 std::string mlx_backend_description() {
