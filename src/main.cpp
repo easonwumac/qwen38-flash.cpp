@@ -32,7 +32,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
-        << " [--profile safe|speed]"
+        << " [--profile safe|speed|latency]"
         << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
@@ -47,9 +47,12 @@ void set_environment_default(const char* name, const char* value) {
 
 void apply_profile(const std::string& profile) {
     if (profile == "safe") return;
-    if (profile != "speed") throw std::runtime_error("invalid profile: " + profile);
+    if (profile != "speed" && profile != "latency") {
+        throw std::runtime_error("invalid profile: " + profile);
+    }
+    const char* resident_range = profile == "latency" ? "12:34" : "12:28";
     const std::pair<const char*, const char*> settings[]{
-        {"QWEN38_RESIDENT_EXPERT_RANGE", "12:28"},
+        {"QWEN38_RESIDENT_EXPERT_RANGE", resident_range},
         {"QWEN38_FUSED_MOE", "1"},
         {"QWEN38_DEVICE_ROUTER", "1"},
         {"QWEN38_COMPILE_LAYER", "1"},
@@ -151,7 +154,10 @@ int main(int argc, char** argv) {
             }
         }
         apply_profile(profile);
-        if (profile == "speed" && !prefill_chunk_explicit) prefill_chunk_rows = 512;
+        if ((profile == "speed" || profile == "latency") &&
+            !prefill_chunk_explicit) {
+            prefill_chunk_rows = 512;
+        }
 
         qwen38::RuntimeState runtime;
         std::unique_ptr<qwen38::InferenceEngine> engine;
