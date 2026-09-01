@@ -209,7 +209,7 @@ void QwenMtpHead::consume_decode(
     MtpDecodeState& state) const {
     MlxArray stream = forward_stream(
         target_pre_mixer_stream, next_token, query_position, state, nullptr);
-    static_cast<void>(stream.astype(MLX_FLOAT32).to_float32());
+    stream.eval();
 }
 
 MtpDecodeStep QwenMtpHead::forward_decode(
