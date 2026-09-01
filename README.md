@@ -413,10 +413,14 @@ On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
 refuse unguarded execution. The default guard refuses to start below
 42 GiB reclaimable memory and terminates the process group plus recursively
-spawned descendants before they exceed 38 GiB aggregate RSS or leave less than
-8 GiB reclaimable. SIGINT, SIGTERM, and SIGHUP drain the isolated child process
-group before the guard exits, including when a terminal wrapper sends multiple
-shutdown signals. A system-wide lock prevents overlapping guarded model runs.
+spawned descendants before they exceed a 44 GiB aggregate macOS physical
+footprint, exceed 38 GiB aggregate RSS, or leave less than 8 GiB reclaimable.
+Physical footprint is the authoritative 64 GiB safety limit because it includes
+Metal/IOAccelerator allocations that `ps` RSS omits. Override it only for a
+controlled experiment with `--max-footprint-gib`. SIGINT, SIGTERM, and SIGHUP
+drain the isolated child process group before the guard exits, including when a
+terminal wrapper sends multiple shutdown signals. A system-wide lock prevents
+overlapping guarded model runs.
 
 For per-token warmup evidence rather than a two-token snapshot:
 

@@ -12,6 +12,9 @@ import tempfile
 import time
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "devtools"))
+import memory_guard  # noqa: E402
+
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "devtools" / "memory_guard.py"
@@ -26,6 +29,40 @@ def process_exists(pid: int) -> bool:
 
 
 class MemoryGuardSignalTest(unittest.TestCase):
+    def test_physical_footprint_includes_current_process(self) -> None:
+        self.assertGreater(memory_guard.physical_footprint_bytes(os.getpid()), 0)
+
+    def test_physical_footprint_limit_stops_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(GUARD),
+                    "--min-start-gib",
+                    "0",
+                    "--min-available-gib",
+                    "0",
+                    "--max-rss-gib",
+                    "1024",
+                    "--max-footprint-gib",
+                    "0.001",
+                    "--interval",
+                    "0.02",
+                    "--lock-file",
+                    str(Path(directory) / "guard.lock"),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(60)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 76)
+            self.assertIn("footprint=", result.stderr)
+
     def test_control_signals_reap_guarded_child(self) -> None:
         signal_sequences = (
             (signal.SIGINT,),
@@ -51,6 +88,8 @@ class MemoryGuardSignalTest(unittest.TestCase):
                         "--min-available-gib",
                         "0",
                         "--max-rss-gib",
+                        "1024",
+                        "--max-footprint-gib",
                         "1024",
                         "--interval",
                         "0.05",

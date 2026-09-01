@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import fcntl
 import os
 import re
@@ -14,6 +15,26 @@ import time
 
 
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+GIB = 1024**3
+RUSAGE_INFO_V4 = 4
+PHYS_FOOTPRINT_OFFSET = 72
+RUSAGE_BUFFER_SIZE = 1024
+
+
+def physical_footprint_bytes(pid: int) -> int:
+    """Return macOS's process physical footprint, including Metal allocations."""
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    proc_pid_rusage = libproc.proc_pid_rusage
+    proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    proc_pid_rusage.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(RUSAGE_BUFFER_SIZE)
+    if proc_pid_rusage(pid, RUSAGE_INFO_V4, buffer) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return int.from_bytes(
+        buffer.raw[PHYS_FOOTPRINT_OFFSET : PHYS_FOOTPRINT_OFFSET + 8],
+        byteorder=sys.byteorder,
+    )
 
 
 def vm_pages() -> dict[str, int]:
@@ -65,6 +86,21 @@ def guarded_tree_rss_gib(root_pid: int) -> float:
         return 0.0
 
 
+def guarded_tree_footprint_gib(root_pid: int) -> float:
+    """Sum physical footprints for the guarded process tree."""
+    try:
+        protected = guarded_pids(root_pid)
+    except (subprocess.CalledProcessError, ValueError, IndexError):
+        protected = {root_pid}
+    total_bytes = 0
+    for pid in protected:
+        try:
+            total_bytes += physical_footprint_bytes(pid)
+        except (OSError, ProcessLookupError):
+            pass
+    return total_bytes / GIB
+
+
 def stop_tree(pid: int) -> None:
     try:
         protected = guarded_pids(pid)
@@ -96,6 +132,7 @@ def main() -> int:
     parser.add_argument("--min-start-gib", type=float, default=42.0)
     parser.add_argument("--min-available-gib", type=float, default=8.0)
     parser.add_argument("--max-rss-gib", type=float, default=38.0)
+    parser.add_argument("--max-footprint-gib", type=float, default=44.0)
     parser.add_argument("--interval", type=float, default=0.25)
     parser.add_argument("--lock-file", default="/tmp/qwen38-memory-guard.lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -126,6 +163,7 @@ def main() -> int:
     child_environment["QWEN38_MEMORY_GUARD"] = "1"
     child = subprocess.Popen(command, start_new_session=True, env=child_environment)
     peak_rss = 0.0
+    peak_footprint = 0.0
     minimum_available = start_available
     handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {
@@ -147,12 +185,20 @@ def main() -> int:
                 child.wait()
                 return 128 + shutdown_signal
             current_rss = guarded_tree_rss_gib(child.pid)
+            current_footprint = guarded_tree_footprint_gib(child.pid)
             current_available = available_gib()
             peak_rss = max(peak_rss, current_rss)
+            peak_footprint = max(peak_footprint, current_footprint)
             minimum_available = min(minimum_available, current_available)
-            if current_rss > args.max_rss_gib or current_available < args.min_available_gib:
+            if (
+                current_rss > args.max_rss_gib
+                or current_footprint > args.max_footprint_gib
+                or current_available < args.min_available_gib
+            ):
                 print(
-                    f"memory_guard: stopping pid {child.pid}: rss={current_rss:.1f} GiB, "
+                    f"memory_guard: stopping pid {child.pid}: "
+                    f"footprint={current_footprint:.1f} GiB, "
+                    f"rss={current_rss:.1f} GiB, "
                     f"available={current_available:.1f} GiB",
                     file=sys.stderr,
                 )
@@ -168,7 +214,8 @@ def main() -> int:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
     print(
-        f"memory_guard: peak_rss={peak_rss:.1f} GiB "
+        f"memory_guard: peak_footprint={peak_footprint:.1f} GiB "
+        f"peak_rss={peak_rss:.1f} GiB "
         f"minimum_available={minimum_available:.1f} GiB",
         file=sys.stderr,
     )
