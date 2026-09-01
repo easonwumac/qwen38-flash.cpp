@@ -86,7 +86,7 @@ With both MLX and tokenizer options enabled, run the native inference server:
 
 ```bash
 ./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model \
-  --prefill-chunk 64 --prefix-cache-tokens 8192 --mtp-depth auto
+  --profile speed --prefix-cache-tokens 8192 --mtp-depth auto
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
@@ -94,6 +94,15 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Hello","max_tokens":1}'
 ```
+
+`--profile speed` applies the complete verified Apple-Silicon configuration:
+the fused Q4 MoE/device router, compiled linear layers, fused HC/GDN paths,
+selected-expert decode softmax, grouped SDPA prefill, the `12:28` resident
+expert tier, chunk 512 for short prompts, and the bounded tiered long-prompt
+policy. Existing environment variables and an explicit `--prefill-chunk`
+override the preset. It normally settles around 35--37 GiB on the validated
+64 GiB M5 Pro and should be launched through the memory guard. `--profile safe`
+is the default conservative graph with chunk 64.
 
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote

@@ -14,7 +14,9 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -30,10 +32,39 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
+        << " [--profile safe|speed]"
         << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
         << "qwen38-flash.cpp native inference server.\n";
+}
+
+void set_environment_default(const char* name, const char* value) {
+    if (setenv(name, value, 0) != 0) {
+        throw std::runtime_error(std::string("cannot set speed profile option ") + name);
+    }
+}
+
+void apply_profile(const std::string& profile) {
+    if (profile == "safe") return;
+    if (profile != "speed") throw std::runtime_error("invalid profile: " + profile);
+    const std::pair<const char*, const char*> settings[]{
+        {"QWEN38_RESIDENT_EXPERT_RANGE", "12:28"},
+        {"QWEN38_FUSED_MOE", "1"},
+        {"QWEN38_DEVICE_ROUTER", "1"},
+        {"QWEN38_COMPILE_LAYER", "1"},
+        {"QWEN38_HC_FUSED", "1"},
+        {"QWEN38_HC_FUSED_INJECTION", "1"},
+        {"QWEN38_GDN_NORM_GATE", "1"},
+        {"QWEN38_GDN_PREWORK", "1"},
+        {"QWEN38_GDN_METAL_VERIFY_BF16_SUM", "1"},
+        {"QWEN38_SDPA_PREFILL", "1"},
+        {"QWEN38_GDN_METAL_PREFILL", "1"},
+        {"QWEN38_GROUPED_PREFILL", "1"},
+        {"QWEN38_PREFILL_BARRIER_STRIDE", "8"},
+        {"QWEN38_SELECTED_SOFTMAX_ROUTER", "1"},
+    };
+    for (const auto& [name, value] : settings) set_environment_default(name, value);
 }
 
 std::optional<std::size_t> parse_mtp_depth(const std::string& value) {
@@ -79,8 +110,10 @@ std::size_t parse_size(const std::string& value, const char* name) {
 int main(int argc, char** argv) {
     try {
         qwen38::ServerConfig config;
+        std::string profile = "safe";
         std::optional<std::size_t> mtp_depth;
         std::size_t prefill_chunk_rows = 64;
+        bool prefill_chunk_explicit = false;
         std::size_t prefix_cache_max_tokens = 8192;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
@@ -91,7 +124,7 @@ int main(int argc, char** argv) {
             }
             if ((argument == "--host" || argument == "--port" || argument == "--model" ||
                  argument == "--mtp-depth" || argument == "--prefill-chunk" ||
-                 argument == "--prefix-cache-tokens") &&
+                 argument == "--prefix-cache-tokens" || argument == "--profile") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
             }
@@ -101,16 +134,21 @@ int main(int argc, char** argv) {
                 config.port = parse_port(argv[++i]);
             } else if (argument == "--model") {
                 model_path = argv[++i];
+            } else if (argument == "--profile") {
+                profile = argv[++i];
             } else if (argument == "--mtp-depth") {
                 mtp_depth = parse_mtp_depth(argv[++i]);
             } else if (argument == "--prefill-chunk") {
                 prefill_chunk_rows = parse_prefill_chunk(argv[++i]);
+                prefill_chunk_explicit = true;
             } else if (argument == "--prefix-cache-tokens") {
                 prefix_cache_max_tokens = parse_size(argv[++i], "prefix cache token limit");
             } else {
                 throw std::runtime_error("unknown argument: " + argument);
             }
         }
+        apply_profile(profile);
+        if (profile == "speed" && !prefill_chunk_explicit) prefill_chunk_rows = 512;
 
         qwen38::RuntimeState runtime;
         std::unique_ptr<qwen38::InferenceEngine> engine;
@@ -124,6 +162,8 @@ int main(int argc, char** argv) {
                 engine_options.prefix_cache_max_tokens = prefix_cache_max_tokens;
                 engine = std::make_unique<qwen38::NativeEngine>(
                     *model_path, engine_options);
+                std::clog << "qwen38-server: profile=" << profile
+                          << " prefill_chunk=" << prefill_chunk_rows << '\n';
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else
                 static_cast<void>(qwen38::ModelManifest::load(*model_path));
