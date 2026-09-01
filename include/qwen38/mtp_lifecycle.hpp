@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <span>
 #include <vector>
 
 namespace qwen38 {
@@ -44,5 +46,15 @@ struct MtpCommitPlan {
     std::size_t round_offset,
     std::size_t drafted,
     std::size_t accepted);
+
+struct MtpGreedyDecision {
+    std::size_t accepted{0};
+    std::size_t correction_row{0};
+    std::uint32_t next_token{0};
+};
+
+[[nodiscard]] MtpGreedyDecision decide_mtp_greedy(
+    std::span<const std::uint32_t> drafts,
+    std::span<const std::uint32_t> target_argmax_rows);
 
 } // namespace qwen38

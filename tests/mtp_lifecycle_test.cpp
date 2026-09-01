@@ -49,4 +49,17 @@ void run_mtp_lifecycle_tests() {
         rejected_accept = true;
     }
     QWEN38_CHECK(rejected_accept);
+
+    const std::vector<std::uint32_t> drafts{10, 20, 30};
+    const auto zero = qwen38::decide_mtp_greedy(
+        drafts, std::vector<std::uint32_t>{11, 20, 30, 40});
+    QWEN38_CHECK(zero.accepted == 0 && zero.correction_row == 0 && zero.next_token == 11);
+    const auto partial_decision = qwen38::decide_mtp_greedy(
+        drafts, std::vector<std::uint32_t>{10, 20, 31, 40});
+    QWEN38_CHECK(
+        partial_decision.accepted == 2 && partial_decision.correction_row == 2 &&
+        partial_decision.next_token == 31);
+    const auto full = qwen38::decide_mtp_greedy(
+        drafts, std::vector<std::uint32_t>{10, 20, 30, 40});
+    QWEN38_CHECK(full.accepted == 3 && full.correction_row == 3 && full.next_token == 40);
 }

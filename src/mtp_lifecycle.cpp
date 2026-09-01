@@ -71,4 +71,23 @@ MtpCommitPlan plan_mtp_commit(
     };
 }
 
+MtpGreedyDecision decide_mtp_greedy(
+    const std::span<const std::uint32_t> drafts,
+    const std::span<const std::uint32_t> target_argmax_rows) {
+    if (drafts.empty()) throw std::runtime_error("MTP verification requires at least one draft");
+    if (target_argmax_rows.size() != drafts.size() + 1) {
+        throw std::runtime_error("MTP target verification must include the bonus row");
+    }
+    std::size_t accepted = 0;
+    while (accepted < drafts.size() &&
+           drafts[accepted] == target_argmax_rows[accepted]) {
+        ++accepted;
+    }
+    return {
+        .accepted = accepted,
+        .correction_row = accepted,
+        .next_token = target_argmax_rows[accepted],
+    };
+}
+
 } // namespace qwen38
