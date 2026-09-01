@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -38,6 +39,21 @@ MlxArray scalar(const float value, const mlx_dtype dtype) {
     const std::vector<float> values{value};
     const std::vector<int> shape{};
     return MlxArray::from_float32(values, shape).astype(dtype);
+}
+
+bool use_sdpa_decode(const std::size_t token_count) {
+    const char* configured = std::getenv("QWEN38_SDPA_DECODE");
+    const bool enabled = configured == nullptr
+        ? token_count >= 512
+        : std::string_view(configured) == "1";
+    if (enabled) {
+        static std::once_flag announced;
+        std::call_once(announced, [token_count] {
+            std::clog << "qwen38: grouped-query SDPA decode engaged at "
+                      << token_count << " cached attention tokens\n";
+        });
+    }
+    return enabled;
 }
 
 MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
@@ -273,14 +289,25 @@ MlxArray SelfAttention::forward_decode(
         state.values = MlxArray::concatenate(state.values, value, 2);
     }
     ++state.token_count;
-    const int repetitions = heads / kv_heads;
-    MlxArray repeated_keys = state.keys.repeat_axis(repetitions, 1);
-    MlxArray repeated_values = state.values.repeat_axis(repetitions, 1);
-    MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
-    MlxArray scale = scalar(1.0F / std::sqrt(static_cast<float>(head_dimension_)), scores.dtype());
-    scores = MlxArray::multiply(scores, scale);
-    MlxArray probabilities = scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
-    MlxArray attended = MlxArray::matmul(probabilities, repeated_values).swapaxes(1, 2);
+    MlxArray attended;
+    if (use_sdpa_decode(state.token_count)) {
+        attended = MlxArray::scaled_dot_product_attention(
+            query,
+            state.keys,
+            state.values,
+            1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+            false).swapaxes(1, 2);
+    } else {
+        const int repetitions = heads / kv_heads;
+        MlxArray repeated_keys = state.keys.repeat_axis(repetitions, 1);
+        MlxArray repeated_values = state.values.repeat_axis(repetitions, 1);
+        MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
+        MlxArray scale = scalar(
+            1.0F / std::sqrt(static_cast<float>(head_dimension_)), scores.dtype());
+        scores = MlxArray::multiply(scores, scale);
+        MlxArray probabilities = scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
+        attended = MlxArray::matmul(probabilities, repeated_values).swapaxes(1, 2);
+    }
     const std::vector<int> flat_shape{1, 1, heads * head_dimension};
     MlxArray gated = MlxArray::multiply(
         attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
@@ -349,17 +376,27 @@ MlxArray SelfAttention::forward_verify(
         checkpoints[row].token_count = working.token_count;
         checkpoints[row].position_base = working.position_base;
 
-        const int repetitions = heads / kv_heads;
-        MlxArray repeated_keys = working.keys.repeat_axis(repetitions, 1);
-        MlxArray repeated_values = working.values.repeat_axis(repetitions, 1);
-        MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
-        scores = MlxArray::multiply(
-            scores,
-            scalar(1.0F / std::sqrt(static_cast<float>(head_dimension_)), scores.dtype()));
-        MlxArray probabilities =
-            scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
-        MlxArray attended =
-            MlxArray::matmul(probabilities, repeated_values).swapaxes(1, 2);
+        MlxArray attended;
+        if (use_sdpa_decode(working.token_count)) {
+            attended = MlxArray::scaled_dot_product_attention(
+                query,
+                working.keys,
+                working.values,
+                1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+                false).swapaxes(1, 2);
+        } else {
+            const int repetitions = heads / kv_heads;
+            MlxArray repeated_keys = working.keys.repeat_axis(repetitions, 1);
+            MlxArray repeated_values = working.values.repeat_axis(repetitions, 1);
+            MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
+            scores = MlxArray::multiply(
+                scores,
+                scalar(1.0F / std::sqrt(static_cast<float>(head_dimension_)), scores.dtype()));
+            MlxArray probabilities =
+                scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
+            attended = MlxArray::matmul(
+                probabilities, repeated_values).swapaxes(1, 2);
+        }
         const std::vector<int> flat_shape{1, 1, heads * head_dimension};
         gated_rows.push_back(MlxArray::multiply(
             attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid()));

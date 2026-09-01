@@ -138,6 +138,14 @@ the retained numerical mode. On the 64 GiB validation machine, a single
 512-row chunk reached about 671 prompt tok/s at 35.5 GiB peak; longer prompts
 take the automatic chunk-128 safety path.
 
+Serial decode and each MTP verifier row automatically switch the 12
+full-attention layers from expanded-KV matmul/softmax to MLX grouped-query SDPA
+once their cache reaches 512 tokens. The expanded path remains faster below the
+crossover, while SDPA avoids materializing 16 repeated KV heads at longer
+contexts. Set
+`QWEN38_SDPA_DECODE=0` to force the short-context path or `1` to force SDPA for
+diagnostics.
+
 The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,
 PLE, QSA, and KV state family together. Set the limit to `0` to disable it;
