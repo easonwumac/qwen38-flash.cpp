@@ -62,28 +62,65 @@ GATE_UP = r"""
 DOWN = r"""
     constexpr int K = 640;
     constexpr int GS = 64;
-    const uint tid = thread_position_in_threadgroup.x;
-    const uint sg = tid / 32;
-    const uint lane = tid % 32;
-    const uint d = threadgroup_position_in_grid.x * 32 + sg;
-    if (d >= 2560) return;
-    float acc = 0.0f;
+    constexpr int ROWS = 4;
+    constexpr int VALUES = 8;
+    constexpr int BLOCK = VALUES * 32;
+    constexpr int NG = K / GS;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint lane = thread_index_in_simdgroup;
+    const uint row0 = threadgroup_position_in_grid.x * 8 + sg * ROWS;
+    if (row0 >= 2560) return;
+    float acc[ROWS] = {0.0f};
     for (int slot = 0; slot < 10; ++slot) {
         const uint expert = experts[slot];
-        const device uint32_t* wr = dw + ((size_t)expert * 2560 + d) * (K / 8);
-        const device T* sr = ds + ((size_t)expert * 2560 + d) * (K / GS);
-        const device T* br = db + ((size_t)expert * 2560 + d) * (K / GS);
-        const device T* hv = h + slot * K;
-        float dot = 0.0f;
-        for (int k = lane; k < K; k += 32) {
-            uint32_t word = wr[k / 8];
-            float q = (float)((word >> (4 * (k % 8))) & 15);
-            dot = fma((float)sr[k / GS] * q + (float)br[k / GS], (float)hv[k], dot);
+        const int packed_row = K / 8;
+        const size_t base = (size_t)expert * 2560 + row0;
+        const device uint8_t* wr =
+            (const device uint8_t*)(dw + base * packed_row) + lane * 4;
+        const device T* sr = ds + base * NG + lane / 8;
+        const device T* br = db + base * NG + lane / 8;
+        const device T* xv = h + slot * K + lane * VALUES;
+        float dot[ROWS] = {0.0f};
+        for (int k0 = 0; k0 < K; k0 += BLOCK) {
+            float xt[VALUES] = {0.0f};
+            float sum = 0.0f;
+            if (k0 + lane * VALUES < K) {
+                for (int i = 0; i < VALUES; i += 4) {
+                    float x0 = (float)xv[i], x1 = (float)xv[i + 1];
+                    float x2 = (float)xv[i + 2], x3 = (float)xv[i + 3];
+                    sum += x0 + x1 + x2 + x3;
+                    xt[i] = x0;
+                    xt[i + 1] = x1 / 16.0f;
+                    xt[i + 2] = x2 / 256.0f;
+                    xt[i + 3] = x3 / 4096.0f;
+                }
+            }
+            for (int r = 0; r < ROWS; ++r) {
+                const device uint16_t* words =
+                    (const device uint16_t*)(wr + r * packed_row * 4);
+                float q = 0.0f;
+                for (int i = 0; i < VALUES / 4; ++i) {
+                    uint16_t value = words[i];
+                    q += xt[4 * i] * (value & 0x000f) +
+                        xt[4 * i + 1] * (value & 0x00f0) +
+                        xt[4 * i + 2] * (value & 0x0f00) +
+                        xt[4 * i + 3] * (value & 0xf000);
+                }
+                dot[r] += (float)sr[r * NG] * q + (float)br[r * NG] * sum;
+            }
+            wr += BLOCK / 2;
+            sr += BLOCK / GS;
+            br += BLOCK / GS;
+            xv += BLOCK;
         }
-        dot = simd_sum(dot);
-        acc += rw[slot] * (float)((T)dot);
+        for (int r = 0; r < ROWS; ++r) {
+            dot[r] = simd_sum(dot[r]);
+            acc[r] += rw[slot] * (float)((T)dot[r]);
+        }
     }
-    if (lane == 0) y[d] = (T)acc;
+    if (lane == 0) {
+        for (int r = 0; r < ROWS; ++r) y[row0 + r] = (T)acc[r];
+    }
 """
 
 
@@ -150,12 +187,16 @@ def main() -> None:
             output_shapes=[(10, 640)], output_dtypes=[x.dtype])
         (output,) = kb(inputs=[hidden, tensor(base + ".down_proj.weight"),
             tensor(base + ".down_proj.scales"), tensor(base + ".down_proj.biases"),
-            experts, weights], template=[("T", x.dtype)], grid=(80 * 1024, 1, 1),
-            threadgroup=(1024, 1, 1), output_shapes=[(2560,)], output_dtypes=[x.dtype])
+            experts, weights], template=[("T", x.dtype)], grid=(320 * 64, 1, 1),
+            threadgroup=(64, 1, 1), output_shapes=[(2560,)], output_dtypes=[x.dtype])
         return hidden, output
 
     _, candidate = custom()
     mx.eval(reference, candidate)
+    gate_timings = []
+    for _ in range(8):
+        started = time.perf_counter(); hidden, _ = custom(); mx.eval(hidden)
+        gate_timings.append((time.perf_counter() - started) * 1000)
     timings = []
     for _ in range(8):
         started = time.perf_counter(); _, value = custom(); mx.eval(value)
@@ -165,6 +206,7 @@ def main() -> None:
         "reference_checksum": float(reference.astype(mx.float32).sum().item()),
         "candidate_checksum": float(candidate.astype(mx.float32).sum().item()),
         "max_abs": float(delta.max().item()), "mean_abs": float(delta.mean().item()),
+        "gate_warm_median_ms": sorted(gate_timings[1:])[3],
         "cold_ms": timings[0], "warm_median_ms": sorted(timings[1:])[3]}, separators=(",", ":")))
 
 

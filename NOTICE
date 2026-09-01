@@ -3,3 +3,6 @@ Copyright 2026 qwen38-flash.cpp contributors
 
 Portions of the fused selected-MoE Metal kernel design are adapted from MTPLX
 (Copyright 2026 MTPLX), licensed under the Apache License, Version 2.0.
+
+The Q4 down-projection unpacking pattern is adapted from MLX
+(Copyright Apple Inc.), licensed under the MIT License.

@@ -255,6 +255,15 @@ not improve token latency. A dedicated Q4-head/argmax Metal probe was likewise
 rejected: 1.83 ms warm versus MLX's 1.71 ms. The remaining warm bottleneck is
 therefore the repeated layer path, not vocabulary transfer or head selection.
 
+The selected-expert down projection now processes four output rows per SIMD
+group and uses MLX-style 16-bit Q4 mask unpacking. The isolated MoE probe retained
+the exact prior fused checksum/error while improving from roughly 0.85--0.90 ms
+to 0.60--0.67 ms. The guarded eight-token full-model run retained the exact token
+sequence and measured warm steps of `40.8,34.6,36.5,36.5,35.9,36.3 ms`, or
+27.4--28.9 tok/s after the first warm step. Peak RSS fell to 34.3 GiB. The smaller
+end-to-end gain shows that MoE down projection is no longer the only dominant
+kernel; attention, HyperConnection, and the shared expert remain targets.
+
 ## Performance implication
 
 The earlier 21.5 ms head measurement included materializing all logits on the

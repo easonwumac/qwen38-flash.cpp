@@ -114,7 +114,8 @@ On the verified 64 GB configuration, `QWEN38_RESIDENT_EXPERT_RANGE=12:34`
 pins a bounded 22-layer expert tier. It is capped at 22 layers in code and must
 be used with the memory guard during experiments. With fused MoE and device
 routing, the measured peak was 35.9 GiB RSS, outputs were unchanged, and warm
-decode reached about 27 tok/s.
+decode reached about 27 tok/s. The MLX-style Q4 down-projection kernel further
+reduced the verified peak to 34.3 GiB and reached 27.4--28.9 tok/s warm.
 
 Validate a model manifest and lazily map one tensor without loading all weights:
 

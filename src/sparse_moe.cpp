@@ -37,7 +37,7 @@ std::shared_ptr<MlxMetalKernel> fused_down_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
         return std::make_shared<MlxMetalKernel>(
-            "qwen38_moe_down_q4", inputs, "y", moe_metal::down, moe_metal::header);
+            "qwen38_moe_down_q4_qdot", inputs, "y", moe_metal::down, moe_metal::header);
     }();
     return kernel;
 }
@@ -251,9 +251,10 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
             &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
             &experts, &weights};
         const std::vector<int> output_shape{1, 1, 2560};
-        const std::array<int, 3> down_grid{80 * 1024, 1, 1};
+        const std::array<int, 3> down_grid{320 * 64, 1, 1};
+        const std::array<int, 3> down_threadgroup{64, 1, 1};
         expert_sum = fused_down_->apply(
-            down_inputs, output_shape, input.dtype(), down_grid, threadgroup);
+            down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
     } else {
         const RouterSelection selection = route_decode(input);
         bool has_expert = false;
