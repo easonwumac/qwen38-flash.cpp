@@ -3,6 +3,8 @@
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/mtp_verifier.hpp"
 
+#include "../src/gdn_metal_kernels.hpp"
+
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -144,6 +146,66 @@ int main() {
         if (cached_outputs[0].to_float32() != std::vector<float>({4, 5, 6, 7}) ||
             cached_outputs[1].to_float32() != std::vector<float>({3, 6, 9, 12})) {
             std::cerr << "cached MLX Metal configuration mismatch\n";
+            return 1;
+        }
+    }
+    {
+        constexpr int heads = 2;
+        constexpr int width = 128;
+        std::vector<float> y_values(heads * width);
+        std::vector<float> z_values(heads * width);
+        std::vector<float> norm_values(width);
+        for (std::size_t index = 0; index < y_values.size(); ++index) {
+            y_values[index] = static_cast<float>(static_cast<int>(index % 17) - 8) / 8.0F;
+            z_values[index] = static_cast<float>(static_cast<int>(index % 13) - 6) / 7.0F;
+        }
+        for (std::size_t index = 0; index < norm_values.size(); ++index) {
+            norm_values[index] = 0.75F + static_cast<float>(index % 9) / 32.0F;
+        }
+        const std::array<int, 4> y_shape{1, 1, heads, width};
+        const std::array<int, 1> norm_shape{width};
+        auto y = qwen38::MlxArray::from_float32(y_values, y_shape).astype(MLX_BFLOAT16);
+        auto z = qwen38::MlxArray::from_float32(z_values, y_shape).astype(MLX_BFLOAT16);
+        auto norm = qwen38::MlxArray::from_float32(norm_values, norm_shape).astype(MLX_BFLOAT16);
+        constexpr float epsilon_value = 1.0e-6F;
+        const std::array<float, 1> epsilon_values{epsilon_value};
+        const std::array<int, 1> epsilon_shape{1};
+        auto epsilon = qwen38::MlxArray::from_float32(epsilon_values, epsilon_shape);
+        const char* inputs[]{"y", "z", "norm_weight", "epsilon"};
+        const qwen38::MlxMetalKernel kernel(
+            "qwen38_gdn_norm_gate_test", inputs, "output", qwen38::gdn_metal::norm_gate);
+        const std::array<const qwen38::MlxArray*, 4> kernel_inputs{&y, &z, &norm, &epsilon};
+        const std::array<qwen38::MlxMetalOutputSpec, 1> output_specs{{
+            {.shape = {1, 1, heads * width}, .dtype = MLX_BFLOAT16},
+        }};
+        const std::array<int, 3> grid{32, 1, heads};
+        const std::array<int, 3> threadgroup{32, 1, 1};
+        const std::array<qwen38::MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = MLX_BFLOAT16},
+        }};
+        const std::array<qwen38::MlxMetalIntTemplate, 3> int_templates{{
+            {.name = "HV", .value = heads},
+            {.name = "DV", .value = width},
+            {.name = "SWISH", .value = 1},
+        }};
+        auto fused = kernel.apply(
+            kernel_inputs,
+            output_specs,
+            grid,
+            threadgroup,
+            dtype_templates,
+            int_templates);
+        const std::array<int, 3> flat_shape{1, 1, heads * width};
+        const auto reference = qwen38::MlxArray::multiply(
+            y.rms_norm(norm, epsilon_value), z.silu()).reshape(
+                flat_shape).astype(MLX_FLOAT32).to_float32();
+        const auto candidate = fused[0].astype(MLX_FLOAT32).to_float32();
+        float maximum_error = 0.0F;
+        for (std::size_t index = 0; index < reference.size(); ++index) {
+            maximum_error = std::max(maximum_error, std::abs(reference[index] - candidate[index]));
+        }
+        if (maximum_error > 0.015625F) {
+            std::cerr << "GDN norm/gate Metal kernel mismatch: " << maximum_error << '\n';
             return 1;
         }
     }

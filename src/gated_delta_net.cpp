@@ -63,6 +63,15 @@ std::shared_ptr<MlxMetalKernel> prefill_recurrence_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> norm_gate_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"y", "z", "norm_weight", "epsilon"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_gdn_norm_gate", inputs, "output", gdn_metal::norm_gate);
+    }();
+    return kernel;
+}
+
 } // namespace
 
 GatedDeltaNet::GatedDeltaNet(
@@ -213,12 +222,37 @@ MlxArray GatedDeltaNet::forward_decode(
     MlxArray recurrent_output = MlxArray::multiply(
         state.recurrent, query_recurrent).sum_axis(3).reshape(value_shape);
 
-    MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
     MlxArray z = project(input, z_projection_).reshape(value_shape);
-    MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
-    MlxArray gated = MlxArray::multiply(normalized, gate);
     const std::vector<int> flat_shape{1, 1, value_width};
-    return project(gated.reshape(flat_shape), output_projection_);
+    const char* fused_gate = std::getenv("QWEN38_GDN_NORM_GATE");
+    if (fused_gate != nullptr && std::string_view(fused_gate) == "1" &&
+        value_dimension == 128 && recurrent_output.dtype() == MLX_BFLOAT16 &&
+        z.dtype() == MLX_BFLOAT16 && norm_weight_.dtype() == MLX_BFLOAT16) {
+        const std::array<float, 1> epsilon_value{epsilon_};
+        const std::array<int, 1> epsilon_shape{1};
+        MlxArray epsilon = MlxArray::from_float32(epsilon_value, epsilon_shape);
+        const std::array<const MlxArray*, 4> inputs{
+            &recurrent_output, &z, &norm_weight_, &epsilon};
+        const std::array<MlxMetalOutputSpec, 1> outputs{{
+            {.shape = flat_shape, .dtype = recurrent_output.dtype()},
+        }};
+        const std::array<int, 3> grid{32, 1, value_heads};
+        const std::array<int, 3> threadgroup{32, 1, 1};
+        const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = recurrent_output.dtype()},
+        }};
+        const std::array<MlxMetalIntTemplate, 3> int_templates{{
+            {.name = "HV", .value = value_heads},
+            {.name = "DV", .value = value_dimension},
+            {.name = "SWISH", .value = output_gate_type_ == "sigmoid" ? 0 : 1},
+        }};
+        std::vector<MlxArray> fused = norm_gate_kernel()->apply(
+            inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
+        return project(fused[0], output_projection_);
+    }
+    MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
+    MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
+    return project(MlxArray::multiply(normalized, gate).reshape(flat_shape), output_projection_);
 }
 
 MlxArray GatedDeltaNet::forward_verify(

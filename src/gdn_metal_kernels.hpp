@@ -77,4 +77,28 @@ inline constexpr std::string_view recurrence = R"metal(
     }
 )metal";
 
+// Adapted from mlx-serve's MIT-licensed fused GDN norm/gate epilogue.
+inline constexpr std::string_view norm_gate = R"metal(
+    uint lane = thread_position_in_threadgroup.x;
+    uint row = threadgroup_position_in_grid.y;
+    uint head = threadgroup_position_in_grid.z;
+    uint base = (row * uint(HV) + head) * uint(DV) + lane * 4;
+    float values[4];
+    float square_sum = 0.0f;
+    for (uint i = 0; i < 4; ++i) {
+        values[i] = float(y[base + i]);
+        square_sum += values[i] * values[i];
+    }
+    square_sum = simd_sum(square_sum);
+    float inverse_rms = metal::precise::rsqrt(square_sum / float(DV) + epsilon[0]);
+    uint zbase = row * uint(HV * DV) + head * uint(DV) + lane * 4;
+    for (uint i = 0; i < 4; ++i) {
+        T normalized = norm_weight[lane * 4 + i] * T(values[i] * inverse_rms);
+        T z_value = z[zbase + i];
+        T small = T(1) / (T(1) + metal::exp(metal::abs(z_value)));
+        T sigmoid = (z_value < T(0)) ? small : T(1) - small;
+        output[base + i] = SWISH ? (z_value * sigmoid) * normalized : normalized * sigmoid;
+    }
+)metal";
+
 } // namespace qwen38::gdn_metal
