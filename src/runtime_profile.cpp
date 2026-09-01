@@ -16,14 +16,21 @@ void set_environment_default(const char* name, const char* value) {
 
 } // namespace
 
-void apply_runtime_profile(const std::string_view profile) {
-    if (profile == "safe") return;
-    if (profile != "speed" && profile != "latency") {
-        throw std::runtime_error("invalid profile: " + std::string(profile));
+RuntimeProfileConfig runtime_profile_config(const std::string_view profile) {
+    if (profile == "safe") return {};
+    if (profile == "speed") return {.optimized = true, .resident_expert_range = "12:28"};
+    if (profile == "latency") return {.optimized = true, .resident_expert_range = "12:34"};
+    if (profile == "long-context") {
+        return {.optimized = true, .resident_expert_range = ""};
     }
-    const char* resident_range = profile == "latency" ? "12:34" : "12:28";
+    throw std::runtime_error("invalid profile: " + std::string(profile));
+}
+
+void apply_runtime_profile(const std::string_view profile) {
+    const RuntimeProfileConfig config = runtime_profile_config(profile);
+    if (!config.optimized) return;
     const std::pair<const char*, const char*> settings[]{
-        {"QWEN38_RESIDENT_EXPERT_RANGE", resident_range},
+        {"QWEN38_RESIDENT_EXPERT_RANGE", config.resident_expert_range.data()},
         {"QWEN38_FUSED_MOE", "1"},
         {"QWEN38_DEVICE_ROUTER", "1"},
         {"QWEN38_COMPILE_LAYER", "1"},

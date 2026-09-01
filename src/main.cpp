@@ -32,7 +32,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
-        << " [--profile safe|speed|latency]"
+        << " [--profile safe|speed|latency|long-context]"
         << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
         << " [--max-generation-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
@@ -127,9 +127,10 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("unknown argument: " + argument);
             }
         }
+        const qwen38::RuntimeProfileConfig profile_config =
+            qwen38::runtime_profile_config(profile);
         qwen38::apply_runtime_profile(profile);
-        if ((profile == "speed" || profile == "latency") &&
-            !prefill_chunk_explicit) {
+        if (profile_config.optimized && !prefill_chunk_explicit) {
             prefill_chunk_rows = 512;
         }
 

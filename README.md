@@ -16,7 +16,8 @@ a UI and is not a wrapper around `mlx-serve`.
 > causal top-block selection, snapshots, and verifier rollback beyond the
 > 2,048-token selection budget. It is not yet the final optimized release: the
 > non-MTP and mixed-workload decode targets remain unmet. A guarded real-API
-> request now validates 141,275 prompt tokens; the 262K limit remains unverified.
+> request now validates 258,457 prompt tokens, within 3,687 tokens of the
+> declared 262,144-token limit.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -153,6 +154,15 @@ peak RSS, while the next token stayed identical. Use it when cold-start/TTFT and
 uncached prompt speed matter more than the small memory increase. `--profile
 speed` remains the balanced default.
 
+`--profile long-context` keeps the optimized `speed` graph and adaptive
+prefill chunks but leaves the resident-expert range empty, allowing macOS to
+reclaim model pages as QSA/KV state grows. It is the capacity profile for
+requests approaching 262K on the tested 64 GiB machine; existing
+`QWEN38_RESIDENT_EXPERT_RANGE` settings still take precedence. For maximum
+headroom, pair it with `--mtp-depth off --prefix-cache-tokens 0`. It trades
+cold-weight residency and short-request latency for memory capacity, so keep
+`speed` for normal prompts.
+
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote
 to depth 3 only after at least 10 accepted drafts. A promoted request is checked
@@ -269,8 +279,17 @@ the identical uncached request completed at 269.2 prompt tok/s. A six-copy,
 141,275-token request then completed at 172.3 prompt tok/s and generated the
 next token in 114.4 ms with MTP and prefix caching disabled. The server stayed
 at about 35.7 GiB sampled RSS and the lowest manual availability sample was
-7.4 GiB on the 64 GiB M5 Pro. This validates operation beyond 128K, not 262K,
-and shows that long-context prefill remains a performance target.
+7.4 GiB on the 64 GiB M5 Pro.
+
+With resident-expert locking disabled—the behavior now exposed as
+`--profile long-context`—an uncached 258,457-token request completed in
+2,443.71 seconds at 105.77 prompt tok/s and generated one token in 196.5 ms.
+MTP, history drafting, and prefix caching were disabled. The memory guard kept
+at least 6 GiB available; the final sample had 16.4 GiB available and about
+4.4 GiB process RSS after reclaim. This validates the API path within 3,687
+tokens of the model limit on the 64 GiB M5 Pro. It does not establish an exact
+262,144-token boundary test or acceptable sustained decode speed at that
+context; QSA decode and long-context retrieval quality remain open gates.
 
 `QWEN38_SDPA_PREFILL=1` replaces the full-attention token loop with MLX causal
 SDPA at prompt widths of 16 or more. It retains the correct causal offset when

@@ -3,6 +3,28 @@
 #include "test.hpp"
 
 void run_runtime_tests() {
+    const auto safe_profile = qwen38::runtime_profile_config("safe");
+    QWEN38_CHECK(!safe_profile.optimized);
+
+    const auto speed_profile = qwen38::runtime_profile_config("speed");
+    QWEN38_CHECK(speed_profile.optimized);
+    QWEN38_CHECK(speed_profile.resident_expert_range == "12:28");
+
+    const auto latency_profile = qwen38::runtime_profile_config("latency");
+    QWEN38_CHECK(latency_profile.optimized);
+    QWEN38_CHECK(latency_profile.resident_expert_range == "12:34");
+
+    const auto long_context_profile = qwen38::runtime_profile_config("long-context");
+    QWEN38_CHECK(long_context_profile.optimized);
+    QWEN38_CHECK(long_context_profile.resident_expert_range.empty());
+    bool invalid_profile_rejected = false;
+    try {
+        static_cast<void>(qwen38::runtime_profile_config("unknown"));
+    } catch (const std::runtime_error&) {
+        invalid_profile_rejected = true;
+    }
+    QWEN38_CHECK(invalid_profile_rejected);
+
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 512) == 512);
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 513) == 384);
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 6144) == 384);
