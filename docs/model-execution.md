@@ -221,6 +221,26 @@ spend roughly 70--83 ms each. Once the relevant pages are populated, whole-token
 latency falls to the 70 ms range. The next optimization track is therefore a
 bounded resident expert tier, not unsafe whole-file cache prewarming.
 
+The bounded tier is now implemented with page locks on original Q4 expert
+tensors rather than duplicate buffers. `QWEN38_RESIDENT_EXPERT_RANGE=12:34`
+pins at most 22 contiguous layers (the implementation rejects wider ranges).
+On the 64 GB M5 Pro, the progressive guarded sweep was:
+
+| Resident range | Token-two latency | Peak RSS |
+|---|---:|---:|
+| none | 2183.9 ms | 30.2 GiB |
+| 12:16 | 2014.0 ms | 30.8 GiB |
+| 12:24 | 935.9 ms | 32.5 GiB |
+| 12:28 | 713.2 ms | 34.3 GiB |
+| 12:32 | 660.6 ms | 35.0 GiB |
+| 12:34 | 551.7 ms | 35.4 GiB |
+
+All rows retained token sequence `11,271` and logits `13.3125,14.75`. The
+eight-step 12:28 run improved cold-inclusive sustained throughput from 2.48 to
+5.65 tok/s, but its last five steps remained 70--77 ms (about 13--14 tok/s).
+Resident paging therefore solves cold/short-request latency within the desired
+30--36 GiB envelope; warm decode still requires arithmetic/dispatch fusion.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

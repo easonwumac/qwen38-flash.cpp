@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -41,6 +42,42 @@ std::shared_ptr<MlxMetalKernel> fused_down_kernel() {
     return kernel;
 }
 
+std::size_t layer_index(const std::string_view prefix) {
+    constexpr std::string_view marker = ".layers.";
+    const std::size_t begin = prefix.find(marker);
+    if (begin == std::string_view::npos) throw std::runtime_error("MoE layer prefix is invalid");
+    const std::size_t digits = begin + marker.size();
+    const std::size_t end = prefix.find('.', digits);
+    std::size_t result = 0;
+    const auto parsed = std::from_chars(
+        prefix.data() + digits,
+        prefix.data() + (end == std::string_view::npos ? prefix.size() : end),
+        result);
+    if (parsed.ec != std::errc{}) throw std::runtime_error("MoE layer index is invalid");
+    return result;
+}
+
+bool resident_layer_enabled(const std::size_t layer) {
+    const char* raw = std::getenv("QWEN38_RESIDENT_EXPERT_RANGE");
+    if (raw == nullptr || *raw == '\0') return false;
+    const std::string_view value(raw);
+    const std::size_t separator = value.find(':');
+    if (separator == std::string_view::npos) {
+        throw std::runtime_error("QWEN38_RESIDENT_EXPERT_RANGE must be BEGIN:END");
+    }
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    const auto first = std::from_chars(value.data(), value.data() + separator, begin);
+    const auto second = std::from_chars(
+        value.data() + separator + 1, value.data() + value.size(), end);
+    if (first.ec != std::errc{} || second.ec != std::errc{} || begin >= end || end > 48 ||
+        end - begin > 22) {
+        throw std::runtime_error(
+            "QWEN38_RESIDENT_EXPERT_RANGE must be within 0:48 and span at most 22 layers");
+    }
+    return layer >= begin && layer < end;
+}
+
 } // namespace
 
 SparseMoe::SparseMoe(
@@ -68,6 +105,11 @@ SparseMoe::SparseMoe(
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
     }
+    if (resident_layer_enabled(layer_index(prefix))) {
+        make_resident(expert_gate_);
+        make_resident(expert_up_);
+        make_resident(expert_down_);
+    }
     const char* fused = std::getenv("QWEN38_FUSED_MOE");
     if (fused != nullptr && std::string_view(fused) == "1" &&
         expert_count_ >= experts_per_token_ && experts_per_token_ == 10 && bits_ == 4 &&
@@ -86,6 +128,12 @@ SparseMoe::QuantizedProjection SparseMoe::load_projection(
         .scales = tensors.tensor(base + ".scales"),
         .biases = tensors.tensor(base + ".biases"),
     };
+}
+
+void SparseMoe::make_resident(QuantizedProjection& projection) {
+    projection.weight.lock_pages();
+    projection.scales.lock_pages();
+    projection.biases.lock_pages();
 }
 
 MlxArray SparseMoe::project(

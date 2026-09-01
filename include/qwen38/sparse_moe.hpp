@@ -38,6 +38,7 @@ private:
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
         std::string_view name);
+    static void make_resident(QuantizedProjection& projection);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;

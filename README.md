@@ -109,6 +109,11 @@ For per-token warmup evidence rather than a two-token snapshot:
 ./devtools/memory_guard.py -- ./build/qwen38-model-bench /path/to/model 8
 ```
 
+On the verified 64 GB configuration, `QWEN38_RESIDENT_EXPERT_RANGE=12:34`
+pins a bounded 22-layer expert tier. It is capped at 22 layers in code and must
+be used with the memory guard during experiments. The measured peak was
+35.4 GiB RSS; model outputs and logits were unchanged.
+
 Validate a model manifest and lazily map one tensor without loading all weights:
 
 ```bash

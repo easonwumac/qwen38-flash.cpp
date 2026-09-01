@@ -1,7 +1,10 @@
 #include "qwen38/mlx_backend.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
 #include <utility>
 
 namespace qwen38 {
@@ -46,19 +49,30 @@ MlxArray::MlxArray() noexcept : value_(mlx_array_new()) {}
 MlxArray::MlxArray(const mlx_array value) noexcept : value_(value) {}
 
 MlxArray::~MlxArray() {
+    if (locked_address_ != nullptr) {
+        static_cast<void>(munlock(locked_address_, locked_bytes_));
+    }
     if (value_.ctx != nullptr) {
         static_cast<void>(mlx_array_free(value_));
     }
 }
 
-MlxArray::MlxArray(MlxArray&& other) noexcept : value_(std::exchange(other.value_, mlx_array{})) {}
+MlxArray::MlxArray(MlxArray&& other) noexcept
+    : value_(std::exchange(other.value_, mlx_array{})),
+      locked_address_(std::exchange(other.locked_address_, nullptr)),
+      locked_bytes_(std::exchange(other.locked_bytes_, 0)) {}
 
 MlxArray& MlxArray::operator=(MlxArray&& other) noexcept {
     if (this != &other) {
+        if (locked_address_ != nullptr) {
+            static_cast<void>(munlock(locked_address_, locked_bytes_));
+        }
         if (value_.ctx != nullptr) {
             static_cast<void>(mlx_array_free(value_));
         }
         value_ = std::exchange(other.value_, mlx_array{});
+        locked_address_ = std::exchange(other.locked_address_, nullptr);
+        locked_bytes_ = std::exchange(other.locked_bytes_, 0);
     }
     return *this;
 }
@@ -396,6 +410,19 @@ MlxArray MlxArray::astype(const mlx_dtype dtype) const {
     const Stream stream;
     check(mlx_astype(&result.value_, value_, dtype, stream.get()), "astype");
     return result;
+}
+
+void MlxArray::lock_pages() {
+    if (locked_address_ != nullptr || size() == 0) return;
+    eval();
+    const auto* data = mlx_array_data_uint8(value_);
+    if (data == nullptr) throw std::runtime_error("MLX returned null array data for mlock");
+    const std::size_t bytes = mlx_array_nbytes(value_);
+    if (mlock(data, bytes) != 0) {
+        throw std::runtime_error(std::string("mlock failed: ") + std::strerror(errno));
+    }
+    locked_address_ = const_cast<std::uint8_t*>(data);
+    locked_bytes_ = bytes;
 }
 
 MlxArray MlxArray::quantized_matmul(

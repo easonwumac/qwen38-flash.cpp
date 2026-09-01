@@ -75,6 +75,7 @@ public:
         int dilation,
         int groups);
     [[nodiscard]] MlxArray astype(mlx_dtype dtype) const;
+    void lock_pages();
     [[nodiscard]] static MlxArray quantized_matmul(
         const MlxArray& input,
         const MlxArray& weight,
@@ -106,6 +107,8 @@ private:
     friend class MlxSafetensors;
     friend class MlxMetalKernel;
     mlx_array value_{};
+    void* locked_address_{nullptr};
+    std::size_t locked_bytes_{0};
 };
 
 class MlxMetalKernel final {
