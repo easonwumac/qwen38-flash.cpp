@@ -178,6 +178,15 @@ footprint was about 41.3 GB. This is explicitly the unfused correctness graph,
 not the target engine: it exposes the dispatch/synchronization baseline that the
 compiled layer runs, fused selected-expert kernels, and head work must replace.
 
+A materializing per-layer trace narrowed the floor further. First-token layers
+cost roughly 65--115 ms. On token two, hot layers reach 6--11 ms while several
+middle layers still cost 75--111 ms. Sequentially reading every trunk shard into
+the filesystem cache did not improve the result, ruling out ordinary cold file
+pages as the dominant cause. A generic 10-expert batched QMM was element-exact
+for gate, up, hidden, and down projections, but regressed complete token latency
+from 1.33--1.61 s to 2.35 s. Production therefore keeps the exact loop while a
+direct selected-expert Metal path is developed.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

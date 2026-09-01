@@ -20,9 +20,10 @@ int main(int argc, char** argv) {
         const auto first_started = std::chrono::steady_clock::now();
         qwen38::GreedyStep first;
         std::vector<double> trace;
+        std::vector<double> trace_ms;
         if (argc == 3 && std::string(argv[2]) == "--trace") {
             const std::vector<float> logits =
-                model.trace_decode(9419, state, trace).astype(MLX_FLOAT32).to_float32();
+                model.trace_decode(9419, state, trace, trace_ms).astype(MLX_FLOAT32).to_float32();
             const auto best = std::ranges::max_element(logits);
             first.token = static_cast<std::uint32_t>(std::distance(logits.begin(), best));
             first.logit = *best;
@@ -32,7 +33,18 @@ int main(int argc, char** argv) {
         const double first_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - first_started).count();
         const auto second_started = std::chrono::steady_clock::now();
-        const qwen38::GreedyStep second = model.greedy_decode(first.token, state);
+        qwen38::GreedyStep second;
+        std::vector<double> second_trace;
+        std::vector<double> second_trace_ms;
+        if (argc == 3 && std::string(argv[2]) == "--trace") {
+            const std::vector<float> logits = model.trace_decode(
+                first.token, state, second_trace, second_trace_ms).astype(MLX_FLOAT32).to_float32();
+            const auto best = std::ranges::max_element(logits);
+            second.token = static_cast<std::uint32_t>(std::distance(logits.begin(), best));
+            second.logit = *best;
+        } else {
+            second = model.greedy_decode(first.token, state);
+        }
         const double second_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - second_started).count();
         std::cout << "{\"layers\":" << model.layer_count()
@@ -50,6 +62,17 @@ int main(int argc, char** argv) {
             for (std::size_t index = 0; index < trace.size(); ++index) {
                 if (index != 0) std::cout << ',';
                 std::cout << trace[index];
+            }
+            std::cout << "]}\n";
+            std::cout << "{\"first_layer_ms\":[";
+            for (std::size_t index = 0; index < trace_ms.size(); ++index) {
+                if (index != 0) std::cout << ',';
+                std::cout << trace_ms[index];
+            }
+            std::cout << "],\"second_layer_ms\":[";
+            for (std::size_t index = 0; index < second_trace_ms.size(); ++index) {
+                if (index != 0) std::cout << ',';
+                std::cout << second_trace_ms[index];
             }
             std::cout << "]}\n";
         }

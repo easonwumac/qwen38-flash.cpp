@@ -32,7 +32,8 @@ public:
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,
         ModelDecodeState& state,
-        std::vector<double>& layer_checksums) const;
+        std::vector<double>& layer_checksums,
+        std::vector<double>& layer_ms) const;
     [[nodiscard]] GreedyStep greedy_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] std::size_t layer_count() const noexcept { return layers_.size(); }
 
@@ -50,11 +51,13 @@ private:
     [[nodiscard]] MlxArray forward_decode_impl(
         std::uint32_t token,
         ModelDecodeState& state,
-        std::vector<double>* layer_checksums) const;
+        std::vector<double>* layer_checksums,
+        std::vector<double>* layer_ms) const;
     [[nodiscard]] MlxArray forward_hidden_decode_impl(
         std::uint32_t token,
         ModelDecodeState& state,
-        std::vector<double>* layer_checksums) const;
+        std::vector<double>* layer_checksums,
+        std::vector<double>* layer_ms) const;
 
     std::size_t hidden_size_;
     std::size_t stream_count_;

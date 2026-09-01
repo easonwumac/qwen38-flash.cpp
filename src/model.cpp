@@ -1,6 +1,7 @@
 #include "qwen38/model.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -75,23 +76,27 @@ MlxArray QwenModel::embed(const std::uint32_t token) const {
 }
 
 MlxArray QwenModel::forward_decode(const std::uint32_t token, ModelDecodeState& state) const {
-    return forward_decode_impl(token, state, nullptr);
+    return forward_decode_impl(token, state, nullptr, nullptr);
 }
 
 MlxArray QwenModel::trace_decode(
     const std::uint32_t token,
     ModelDecodeState& state,
-    std::vector<double>& layer_checksums) const {
+    std::vector<double>& layer_checksums,
+    std::vector<double>& layer_ms) const {
     layer_checksums.clear();
     layer_checksums.reserve(layers_.size());
-    return forward_decode_impl(token, state, &layer_checksums);
+    layer_ms.clear();
+    layer_ms.reserve(layers_.size());
+    return forward_decode_impl(token, state, &layer_checksums, &layer_ms);
 }
 
 MlxArray QwenModel::forward_decode_impl(
     const std::uint32_t token,
     ModelDecodeState& state,
-    std::vector<double>* layer_checksums) const {
-    MlxArray hidden = forward_hidden_decode_impl(token, state, layer_checksums);
+    std::vector<double>* layer_checksums,
+    std::vector<double>* layer_ms) const {
+    MlxArray hidden = forward_hidden_decode_impl(token, state, layer_checksums, layer_ms);
     return MlxArray::quantized_matmul(
         hidden,
         language_head_.weight,
@@ -104,17 +109,23 @@ MlxArray QwenModel::forward_decode_impl(
 MlxArray QwenModel::forward_hidden_decode_impl(
     const std::uint32_t token,
     ModelDecodeState& state,
-    std::vector<double>* layer_checksums) const {
+    std::vector<double>* layer_checksums,
+    std::vector<double>* layer_ms) const {
     if (state.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");
     }
     MlxArray stream = HyperConnection::initialize_stream(embed(token), stream_count_);
     for (std::size_t index = 0; index < layers_.size(); ++index) {
+        const auto started = std::chrono::steady_clock::now();
         stream = layers_[index]->forward_decode(stream, token, state.layers[index]);
         if (layer_checksums != nullptr) {
             const std::vector<float> values = stream.astype(MLX_FLOAT32).to_float32();
             layer_checksums->push_back(
                 std::accumulate(values.begin(), values.end(), 0.0));
+        }
+        if (layer_ms != nullptr) {
+            layer_ms->push_back(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count());
         }
     }
     HyperConnectionRead final = final_mixer_.read(stream);
@@ -126,7 +137,7 @@ void QwenModel::consume_decode(
     const std::uint32_t token,
     ModelDecodeState& state) const {
     static_cast<void>(
-        forward_hidden_decode_impl(token, state, nullptr).astype(MLX_FLOAT32).to_float32());
+        forward_hidden_decode_impl(token, state, nullptr, nullptr).astype(MLX_FLOAT32).to_float32());
 }
 
 GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelDecodeState& state) const {
