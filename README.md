@@ -103,7 +103,7 @@ acceptance. Prompts longer than 2,048 tokens stay at depth 2. Without an MTP
 companion auto mode stays serial. `3` uses the same adaptive cap explicitly;
 `off`, `2`, and `4` are fixed alternatives. On a 64 GB Mac, auto mode also
 selects the verified
-`12:24` resident-expert safety tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
+`12:28` resident-expert balanced tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
 already set, caps the MLX cache at 256 MiB, and falls back to serial after two
 consecutive zero-accept rounds.
 

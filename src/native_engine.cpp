@@ -36,8 +36,8 @@ ModelManifest prepare_manifest(
     ModelManifest manifest = ModelManifest::load(model_directory);
     if (resolved_mtp_depth(manifest, options) != 0 &&
         std::getenv("QWEN38_RESIDENT_EXPERT_RANGE") == nullptr) {
-        // Verified 64 GiB MTP-safe default. Explicit user policy always wins.
-        if (setenv("QWEN38_RESIDENT_EXPERT_RANGE", "12:24", 0) != 0) {
+        // Verified 64 GiB MTP-balanced default. Explicit user policy always wins.
+        if (setenv("QWEN38_RESIDENT_EXPERT_RANGE", "12:28", 0) != 0) {
             throw std::runtime_error("cannot set the MTP-safe resident expert range");
         }
     }
