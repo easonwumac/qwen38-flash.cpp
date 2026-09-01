@@ -5,6 +5,7 @@ int main() {
     run_chat_template_tests();
     run_safetensors_tests();
     run_model_manifest_tests();
+    run_mtp_lifecycle_tests();
     run_ngram_tests();
     run_runtime_tests();
     run_api_tests();

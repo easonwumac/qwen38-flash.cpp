@@ -223,6 +223,16 @@ reference top-1 (`6765`) on both P185 and P192 traces. The short-context MTP
 head therefore passes its 0.995 parity gate. QSA indexer/cache support remains
 required before contexts exceeding the 2,048-token selection budget.
 
+Prompt priming and round commitment now have a dependency-free lifecycle
+contract. A cold prompt creates only real adjacent
+`(target_stream[r], token[r+1])` pairs; a later chunk may pair its first token
+with the preceding valid carry, while gaps fail closed and position zero resets
+stale request state. The commit planner truncates speculative head rows to the
+round origin and stashes only `t1` plus the accepted draft prefix. Unit tests
+cover cold, chunked, reset, gap, partial-accept, and invalid-accept cases under
+ASan/UBSan. The planner is ready to drive the native head but is not yet wired
+to a batched target verifier.
+
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
 footprint was about 41.3 GB. This is explicitly the unfused correctness graph,
