@@ -1,5 +1,6 @@
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model.hpp"
+#include "qwen38/mtp_head.hpp"
 #include "qwen38/mtp_verifier.hpp"
 
 #include <array>
@@ -147,6 +148,25 @@ int main() {
     }
     if (!rejected_invalid_commit) {
         std::cerr << "MTP verifier accepted an invalid row timeline\n";
+        return 1;
+    }
+
+    qwen38::MtpDecodeState mtp_state;
+    mtp_state.row_count = 19;
+    mtp_state.position_base = 41;
+    mtp_state.layer.linear_attention.initialized = true;
+    mtp_state.layer.linear_attention.convolution =
+        qwen38::MlxArray::from_float32(left_values, shape);
+    mtp_state.layer.linear_attention.recurrent =
+        qwen38::MlxArray::from_float32(right_values, shape);
+    auto mtp_snapshot = qwen38::snapshot_mtp_decode_state(mtp_state);
+    mtp_state = {};
+    if (mtp_snapshot.row_count != 19 || mtp_snapshot.position_base != 41 ||
+        mtp_snapshot.layer.linear_attention.convolution.to_float32() !=
+            std::vector<float>({1, 2, 3, 4}) ||
+        mtp_snapshot.layer.linear_attention.recurrent.to_float32() !=
+            std::vector<float>({5, 6, 7, 8})) {
+        std::cerr << "MTP decode-state snapshot mismatch\n";
         return 1;
     }
     return 0;

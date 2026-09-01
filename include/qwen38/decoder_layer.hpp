@@ -20,6 +20,9 @@ struct DecoderLayerState {
     PleState ple;
 };
 
+[[nodiscard]] DecoderLayerState snapshot_decoder_layer_state(
+    const DecoderLayerState& state);
+
 struct DecoderLayerTrace {
     MlxArray attention_mixed;
     MlxArray attention_injection;

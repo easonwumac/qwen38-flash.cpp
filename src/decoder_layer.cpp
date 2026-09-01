@@ -8,6 +8,28 @@
 
 namespace qwen38 {
 
+DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
+    DecoderLayerState snapshot;
+    snapshot.linear_attention.initialized = state.linear_attention.initialized;
+    if (state.linear_attention.initialized) {
+        snapshot.linear_attention.convolution =
+            state.linear_attention.convolution.share();
+        snapshot.linear_attention.recurrent = state.linear_attention.recurrent.share();
+    }
+    snapshot.full_attention.token_count = state.full_attention.token_count;
+    snapshot.full_attention.position_base = state.full_attention.position_base;
+    if (state.full_attention.token_count != 0) {
+        snapshot.full_attention.keys = state.full_attention.keys.share();
+        snapshot.full_attention.values = state.full_attention.values.share();
+    }
+    snapshot.ple.ngram = state.ple.ngram;
+    snapshot.ple.convolution_initialized = state.ple.convolution_initialized;
+    if (state.ple.convolution_initialized) {
+        snapshot.ple.convolution = state.ple.convolution.share();
+    }
+    return snapshot;
+}
+
 DecoderLayer::DecoderLayer(
     MlxTensorStore& tensors,
     const std::size_t layer_index,

@@ -35,6 +35,14 @@ ModelConfig mtp_layer_config(const ModelConfig& target) {
 
 } // namespace
 
+MtpDecodeState snapshot_mtp_decode_state(const MtpDecodeState& state) {
+    return {
+        .layer = snapshot_decoder_layer_state(state.layer),
+        .row_count = state.row_count,
+        .position_base = state.position_base,
+    };
+}
+
 QwenMtpHead::QuantizedProjection QwenMtpHead::load_projection(
     MlxTensorStore& tensors,
     const char* prefix,

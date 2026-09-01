@@ -15,6 +15,8 @@ struct MtpDecodeState {
     std::optional<std::size_t> position_base;
 };
 
+[[nodiscard]] MtpDecodeState snapshot_mtp_decode_state(const MtpDecodeState& state);
+
 struct MtpDecodeStep {
     MlxArray logits;
     MlxArray pre_mixer_stream;
@@ -31,6 +33,9 @@ public:
     explicit QwenMtpHead(MlxTensorStore& tensors);
 
     [[nodiscard]] MtpDecodeState make_state() const { return {}; }
+    [[nodiscard]] MtpDecodeState snapshot_state(const MtpDecodeState& state) const {
+        return snapshot_mtp_decode_state(state);
+    }
     [[nodiscard]] MtpDecodeStep forward_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
