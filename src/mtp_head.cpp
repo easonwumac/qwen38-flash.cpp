@@ -1,8 +1,10 @@
 #include "qwen38/mtp_head.hpp"
 
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace qwen38 {
@@ -306,10 +308,15 @@ void QwenMtpHead::consume_committed_batch(
     std::vector<DecoderLayerState> checkpoints;
     streams = layer_.forward_verify_dense_batched(
         std::move(streams), tokens, state.layer, checkpoints);
-    std::vector<const MlxArray*> outputs;
-    outputs.reserve(streams.size());
-    for (const MlxArray& stream : streams) outputs.push_back(&stream);
-    MlxArray::eval_all(outputs);
+    const char* defer_eval = std::getenv("QWEN38_DEFER_MTP_COMMIT_EVAL");
+    const bool defer_eval_enabled =
+        defer_eval == nullptr || std::string_view(defer_eval) != "0";
+    if (!defer_eval_enabled) {
+        std::vector<const MlxArray*> outputs;
+        outputs.reserve(streams.size());
+        for (const MlxArray& stream : streams) outputs.push_back(&stream);
+        MlxArray::eval_all(outputs);
+    }
     state.layer = std::move(checkpoints.back());
     state.row_count += tokens.size();
 }

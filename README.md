@@ -206,6 +206,15 @@ throughput improved from 62.34--62.73 to 63.27--63.36 tok/s and total verifier
 time fell from 1686--1696 to 1666--1669 ms. Set
 `QWEN38_BATCH_VERIFY_ARGMAX=0` for the rowwise diagnostic rollback.
 
+Accepted-row MTP head commits remain lazy and are materialized by the next
+proposal instead of forcing an otherwise unnecessary end-of-round barrier. On
+the 128-token fixture this reduced total commit time from about 83 to 26--27 ms
+and improved warm throughput from 63.33 to 64.72 tok/s. Over 256 generated
+tokens, the same 71-round, 185/205 acceptance path improved from 65.14 to
+66.83 tok/s with byte-identical output. Creative and JSON controls also
+improved slightly rather than regressing. Sampled RSS remained about 35.5 GiB.
+Set `QWEN38_DEFER_MTP_COMMIT_EVAL=0` to restore eager materialization.
+
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
