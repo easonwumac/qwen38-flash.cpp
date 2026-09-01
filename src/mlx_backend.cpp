@@ -141,6 +141,13 @@ MlxArray MlxArray::transpose() const {
     return result;
 }
 
+MlxArray MlxArray::swapaxes(const int axis1, const int axis2) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_swapaxes(&result.value_, value_, axis1, axis2, stream.get()), "swapaxes");
+    return result;
+}
+
 MlxArray MlxArray::tile(const std::span<const int> repetitions) const {
     MlxArray result;
     const Stream stream;
@@ -211,6 +218,13 @@ MlxArray MlxArray::negative() const {
     MlxArray result;
     const Stream stream;
     check(mlx_negative(&result.value_, value_, stream.get()), "negative");
+    return result;
+}
+
+MlxArray MlxArray::softmax_axis(const int axis) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_softmax_axis(&result.value_, value_, axis, true, stream.get()), "softmax_axis");
     return result;
 }
 

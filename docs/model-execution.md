@@ -103,6 +103,25 @@ nodes and traverses the recurrent state repeatedly, so the optimized engine will
 replace its prework and recurrence with fused Metal kernels. Multi-token chunked
 prefill remains required before the block is complete.
 
+## Stateful full-attention decode
+
+The layer-3 full-attention path now executes Q4 Q/K/V/O projections, Qwen offset
+RMSNorm, 64-of-256 dimensional partial RoPE, two-key/value-head to 24-query-head
+GQA expansion, growing BF16 KV caches, float32 softmax, and the query-derived
+sigmoid output gate. Two deterministic decode inputs match the independent
+oracle exactly:
+
+| Value | Checksum |
+|---|---:|
+| first output | 5.597035408 |
+| second output | 11.505207062 |
+
+The second step measures around 0.75 ms warm median in isolation. At two tokens,
+the QSA indexer selects the entire visible causal tail, so ordinary attention is
+semantically exact. The compressed-key indexer and block-selection mask for
+contexts above the 2,048-token budget remain outstanding; this limitation is
+explicit rather than silently treating all long-context tokens as selected.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

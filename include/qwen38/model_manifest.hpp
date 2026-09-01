@@ -41,6 +41,8 @@ struct ModelConfig {
     std::size_t linear_key_head_count{0};
     std::size_t linear_value_head_count{0};
     std::string output_gate_type;
+    double rope_theta{0.0};
+    double partial_rotary_factor{0.0};
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
 };

@@ -51,6 +51,7 @@ void run_model_manifest_tests() {
         "linear_conv_kernel_dim":4,"linear_key_head_dim":128,
         "linear_value_head_dim":128,"linear_num_key_heads":16,
         "linear_num_value_heads":48,"output_gate_type":"sigmoid",
+        "partial_rotary_factor":0.25,"rope_parameters":{"rope_theta":10000000},
         "layer_types":["linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
@@ -84,6 +85,7 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().normalize_topk_probability);
     QWEN38_CHECK(manifest.config().linear_value_head_count == 48);
     QWEN38_CHECK(manifest.config().output_gate_type == "sigmoid");
+    QWEN38_CHECK(manifest.config().rope_theta == 10000000.0);
     QWEN38_CHECK(manifest.config().layer_types.at(3) == "full_attention");
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
 

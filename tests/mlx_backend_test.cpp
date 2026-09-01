@@ -65,5 +65,13 @@ int main() {
         std::cerr << "MLX sigmoid mismatch\n";
         return 1;
     }
+    const auto swapped = left.swapaxes(0, 1).to_float32();
+    const auto softmax = left.softmax_axis(-1).to_float32();
+    if (swapped != std::vector<float>({1, 3, 2, 4}) ||
+        std::abs(softmax[0] + softmax[1] - 1.0F) > 1.0e-5F ||
+        std::abs(softmax[2] + softmax[3] - 1.0F) > 1.0e-5F) {
+        std::cerr << "MLX swapaxes/softmax mismatch\n";
+        return 1;
+    }
     return 0;
 }

@@ -86,6 +86,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         src/gated_delta_net.cpp
         src/hyper_connection.cpp
         src/mlx_backend.cpp
+        src/self_attention.cpp
         src/sparse_moe.cpp
     )
     target_include_directories(qwen38_mlx PUBLIC include)
@@ -115,8 +116,12 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-gated-delta-net-smoke src/gated_delta_net_smoke.cpp)
     target_link_libraries(qwen38-gated-delta-net-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-gated-delta-net-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-self-attention-smoke src/self_attention_smoke.cpp)
+    target_link_libraries(qwen38-self-attention-smoke PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-self-attention-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     install(TARGETS qwen38-mlx-smoke qwen38-qmm-smoke qwen38-embedding-smoke
         qwen38-hyper-connection-smoke qwen38-sparse-moe-smoke qwen38-gated-delta-net-smoke
+        qwen38-self-attention-smoke
         RUNTIME DESTINATION bin)
 endif()
 

@@ -13,9 +13,9 @@ a UI and is not a wrapper around `mlx-serve`.
 > Qwen3.8 manifest parsing, native tokenization/chat templating, lazy checkpoint
 > loading, and verified Apple-GPU execution of token embedding, Q4 projections,
 > Qwen3.8's four-stream Hyper-Connection mixers, one-token sparse MoE, and the
-> stateful one-token Gated DeltaNet decode path. Full transformer execution and
-> generation are not implemented yet, so this version is not a usable LLM
-> runtime and makes no end-to-end performance claim.
+> stateful one-token Gated DeltaNet and full-attention decode paths. Full
+> transformer execution and generation are not implemented yet, so this version
+> is not a usable LLM runtime and makes no end-to-end performance claim.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -30,6 +30,9 @@ Q4 experts, and the gated shared expert against a second independent oracle.
 `qwen38-gated-delta-net-smoke MODEL_DIRECTORY` verifies two stateful decode steps,
 including depthwise convolution and recurrent caches, forget/beta gates, Q/K
 normalization, gated RMSNorm, and Q4 output projection against a third oracle.
+`qwen38-self-attention-smoke MODEL_DIRECTORY` verifies two cached layer-3
+full-attention steps, including partial RoPE, grouped-query expansion, and the
+query output gate. QSA contexts above its selection budget are not implemented.
 
 ## Build
 

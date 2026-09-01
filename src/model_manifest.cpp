@@ -89,6 +89,13 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         result.config_.output_gate_type != "silu") {
         throw std::runtime_error("unsupported output_gate_type");
     }
+    result.config_.partial_rotary_factor = text.at("partial_rotary_factor").as_number();
+    result.config_.rope_theta = text.at("rope_parameters").at("rope_theta").as_number();
+    if (!(result.config_.partial_rotary_factor > 0.0 &&
+          result.config_.partial_rotary_factor <= 1.0) ||
+        !(result.config_.rope_theta > 0.0)) {
+        throw std::runtime_error("invalid rotary configuration");
+    }
     result.config_.rms_norm_epsilon = text.at("rms_norm_eps").as_number();
     if (!(result.config_.rms_norm_epsilon > 0.0)) {
         throw std::runtime_error("rms_norm_eps must be positive");

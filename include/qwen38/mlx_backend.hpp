@@ -44,6 +44,7 @@ public:
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
     [[nodiscard]] MlxArray transpose() const;
+    [[nodiscard]] MlxArray swapaxes(int axis1, int axis2) const;
     [[nodiscard]] MlxArray tile(std::span<const int> repetitions) const;
     [[nodiscard]] MlxArray repeat_axis(int repeats, int axis) const;
     [[nodiscard]] MlxArray slice(
@@ -55,6 +56,7 @@ public:
     [[nodiscard]] MlxArray exp() const;
     [[nodiscard]] MlxArray log1p() const;
     [[nodiscard]] MlxArray negative() const;
+    [[nodiscard]] MlxArray softmax_axis(int axis) const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray sum_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray rms_norm(const MlxArray& weight, float epsilon) const;
