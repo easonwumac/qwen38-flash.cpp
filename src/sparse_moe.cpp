@@ -105,6 +105,12 @@ bool resident_layer_enabled(const std::size_t layer) {
     return layer >= begin && layer < end;
 }
 
+bool selected_softmax_router_enabled(const bool normalize_topk_probability) {
+    const char* selected_softmax = std::getenv("QWEN38_SELECTED_SOFTMAX_ROUTER");
+    return normalize_topk_probability && selected_softmax != nullptr &&
+        std::string_view(selected_softmax) == "1";
+}
+
 MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
     const std::vector<int> shape = batch.shape();
     if (shape.size() != 3 || row >= static_cast<std::size_t>(shape[1])) {
@@ -256,8 +262,10 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
         MlxArray weights;
         const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
         if (device_router != nullptr && std::string_view(device_router) == "1") {
-            MlxArray gates =
-                MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+            MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
+            const bool use_selected_softmax =
+                selected_softmax_router_enabled(normalize_topk_probability_);
+            MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
             MlxArray partition =
                 gates.argpartition_axis(-static_cast<int>(experts_per_token_), -1);
             const std::vector<int> start{
@@ -266,11 +274,15 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             const std::vector<int> strides{1, 1, 1};
             experts = partition.slice(start, stop, strides).reshape(
                 std::vector<int>{static_cast<int>(experts_per_token_)});
-            weights = MlxArray::take_along_axis(gates, partition.slice(start, stop, strides), -1)
-                          .reshape(std::vector<int>{static_cast<int>(experts_per_token_)});
-            if (normalize_topk_probability_) {
+            weights = MlxArray::take_along_axis(
+                gates, partition.slice(start, stop, strides), -1);
+            if (use_selected_softmax) {
+                weights = weights.softmax_axis(-1);
+            } else if (normalize_topk_probability_) {
                 weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
             }
+            weights = weights.reshape(
+                std::vector<int>{static_cast<int>(experts_per_token_)});
             weights = weights.astype(MLX_FLOAT32);
         } else {
             const RouterSelection selection = route_decode(input);
@@ -350,7 +362,10 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
     if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
         std::string_view(device_router) == "1") {
         const int rows = shape[1];
-        MlxArray gates = MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+        MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
+        const bool use_selected_softmax =
+            selected_softmax_router_enabled(normalize_topk_probability_);
+        MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
         MlxArray partition = gates.argpartition_axis(-static_cast<int>(experts_per_token_), -1);
         const std::vector<int> start{
             0, 0, static_cast<int>(expert_count_ - experts_per_token_)};
@@ -359,11 +374,14 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
         MlxArray selected = partition.slice(start, stop, strides);
         MlxArray experts = selected.reshape(
             std::vector<int>{rows, static_cast<int>(experts_per_token_)});
-        MlxArray weights = MlxArray::take_along_axis(gates, selected, -1).reshape(
-            std::vector<int>{rows, static_cast<int>(experts_per_token_)});
-        if (normalize_topk_probability_) {
+        MlxArray weights = MlxArray::take_along_axis(gates, selected, -1);
+        if (use_selected_softmax) {
+            weights = weights.softmax_axis(-1);
+        } else if (normalize_topk_probability_) {
             weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
         }
+        weights = weights.reshape(
+            std::vector<int>{rows, static_cast<int>(experts_per_token_)});
         weights = weights.astype(MLX_FLOAT32);
         const MlxArray* gate_inputs[]{
             &input,

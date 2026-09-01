@@ -196,6 +196,13 @@ state pass instead of serially replaying each row. This changes proposal-state
 scheduling only; target verification remains authoritative. Set
 `QWEN38_BATCH_MTP_COMMIT=0` for the serial diagnostic rollback.
 
+`QWEN38_SELECTED_SOFTMAX_ROUTER=1` ranks the 288 router logits before applying
+softmax to only the selected ten experts. This is algebraically equivalent to
+full softmax followed by top-k renormalization, but uses a different BF16
+reduction path. A fixed-input A/B/A improved about 2%, and a three-prompt HTTP
+cohort remained coherent while reaching 35.17/38.15/41.38 tok/s. Keep it as an
+explicit speed mode until a larger quality suite is complete.
+
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
 refuse unguarded execution. The default guard refuses to start below
@@ -208,6 +215,11 @@ For per-token warmup evidence rather than a two-token snapshot:
 ```bash
 ./devtools/memory_guard.py -- ./build/qwen38-model-bench /path/to/model 8
 ```
+
+Set `QWEN38_FIXED_INPUT=1` to hold the benchmark input token constant and
+remove generated-content routing differences from an A/B. Set
+`QWEN38_PROFILE_DECODE=1` to append a materializing per-layer timing sample
+after the requested warmup steps.
 
 On the verified 64 GB configuration, `QWEN38_RESIDENT_EXPERT_RANGE=12:34`
 pins a bounded 22-layer expert tier. It is capped at 22 layers in code and must

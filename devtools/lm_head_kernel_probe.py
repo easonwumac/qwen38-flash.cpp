@@ -10,18 +10,19 @@ from pathlib import Path
 import mlx.core as mx
 
 
-SOURCE = r"""
+SOURCE_TEMPLATE = r"""
     constexpr int K = 2560;
     constexpr int GS = 64;
     constexpr int NG = K / GS;
     constexpr int WPG = GS / 8;
     constexpr int VOCAB = 248320;
-    threadgroup float local_values[32];
-    threadgroup uint local_ids[32];
+    constexpr int NSG = __NSG__;
+    threadgroup float local_values[NSG];
+    threadgroup uint local_ids[NSG];
     const uint tid = thread_position_in_threadgroup.x;
     const uint sg = tid / 32;
     const uint lane = tid % 32;
-    const uint row = threadgroup_position_in_grid.x * 32 + sg;
+    const uint row = threadgroup_position_in_grid.x * NSG + sg;
     float acc = -INFINITY;
     if (row < VOCAB) {
         const device uint32_t* wr = w + (size_t)row * (K / 8);
@@ -50,7 +51,7 @@ SOURCE = r"""
     if (tid == 0) {
         float best = local_values[0];
         uint best_id = local_ids[0];
-        for (int i = 1; i < 32; ++i) {
+        for (int i = 1; i < NSG; ++i) {
             float value = local_values[i];
             uint id = local_ids[i];
             if (value > best || (value == best && id < best_id)) {
@@ -81,12 +82,6 @@ def main() -> None:
     scales = tensor(prefix + ".scales")
     biases = tensor(prefix + ".biases")
     x = (mx.sin(mx.arange(2560, dtype=mx.float32) * 0.01) * 0.01).astype(mx.bfloat16)
-    kernel = mx.fast.metal_kernel(
-        name="qwen38_lm_head_block_argmax",
-        input_names=["x", "w", "scales", "biases"],
-        output_names=["winners"],
-        source=SOURCE,
-    )
 
     def generic():
         logits = mx.quantized_matmul(
@@ -95,21 +90,36 @@ def main() -> None:
         token = mx.argmax(logits)
         return token, logits[token].astype(mx.float32)
 
-    def fused():
-        (winners,) = kernel(
-            inputs=[x, weight, scales, biases],
-            template=[("T", x.dtype)],
-            grid=(7760 * 1024, 1, 1),
-            threadgroup=(1024, 1, 1),
-            output_shapes=[(7760, 2)],
-            output_dtypes=[mx.float32],
+    fused_variants = {}
+    for threads in (128, 256, 512, 1024):
+        simdgroups = threads // 32
+        blocks = math.ceil(248320 / simdgroups)
+        kernel = mx.fast.metal_kernel(
+            name=f"qwen38_lm_head_block_argmax_{threads}",
+            input_names=["x", "w", "scales", "biases"],
+            output_names=["winners"],
+            source=SOURCE_TEMPLATE.replace("__NSG__", str(simdgroups)),
         )
-        block = mx.argmax(winners[:, 0])
-        return winners[block, 1].astype(mx.uint32), winners[block, 0]
+
+        def fused(kernel=kernel, threads=threads, blocks=blocks):
+            (winners,) = kernel(
+                inputs=[x, weight, scales, biases],
+                template=[("T", x.dtype)],
+                grid=(blocks * threads, 1, 1),
+                threadgroup=(threads, 1, 1),
+                output_shapes=[(blocks, 2)],
+                output_dtypes=[mx.float32],
+            )
+            block = mx.argmax(winners[:, 0])
+            return winners[block, 1].astype(mx.uint32), winners[block, 0]
+
+        fused_variants[threads] = fused
 
     generic_token, generic_logit = generic()
-    fused_token, fused_logit = fused()
-    mx.eval(generic_token, generic_logit, fused_token, fused_logit)
+    fused_results = {threads: function() for threads, function in fused_variants.items()}
+    mx.eval(generic_token, generic_logit, *[
+        value for result in fused_results.values() for value in result
+    ])
 
     def timing(function):
         samples = []
@@ -121,17 +131,22 @@ def main() -> None:
         return samples[0], sorted(samples[1:])[3]
 
     generic_cold, generic_warm = timing(generic)
-    fused_cold, fused_warm = timing(fused)
-    print(json.dumps({
+    fused_timings = {
+        threads: timing(function) for threads, function in fused_variants.items()
+    }
+    result = {
         "generic_token": int(generic_token.item()),
-        "fused_token": int(fused_token.item()),
         "generic_logit": float(generic_logit.item()),
-        "fused_logit": float(fused_logit.item()),
         "generic_cold_ms": generic_cold,
         "generic_warm_ms": generic_warm,
-        "fused_cold_ms": fused_cold,
-        "fused_warm_ms": fused_warm,
-    }, separators=(",", ":")))
+    }
+    for threads, (token, logit) in fused_results.items():
+        cold, warm = fused_timings[threads]
+        result[f"fused_{threads}_token"] = int(token.item())
+        result[f"fused_{threads}_logit"] = float(logit.item())
+        result[f"fused_{threads}_cold_ms"] = cold
+        result[f"fused_{threads}_warm_ms"] = warm
+    print(json.dumps(result, separators=(",", ":")))
 
 
 if __name__ == "__main__":
