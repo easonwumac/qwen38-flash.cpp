@@ -28,6 +28,13 @@ Objective-C++ is restricted to Apple framework boundaries and Metal orchestratio
 Metal Shading Language implements GPU kernels. Offline Python tools may inspect,
 convert, or evaluate weights but never serve requests.
 
+The first correctness backend is a narrow RAII C++ wrapper over Apple's MLX C
+API. MLX provides array execution and Metal primitives, but this project owns the
+Qwen3.8 graph, request lifecycle, decode/speculative loops, cache policy, and
+metrics. Backend access is optional at build time so metadata and server tests do
+not require MLX, and hot operations can later move to dedicated Metal kernels
+without changing the server/runtime contract.
+
 ## Correctness policy
 
 Optimization proceeds from fixed parity fixtures. Each specialized operation must

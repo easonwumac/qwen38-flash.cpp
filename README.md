@@ -25,6 +25,23 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
+The optional correctness/Metal backend uses the MLX C API but keeps the model
+graph, decode loop, caches, scheduling, and server in this project. Point CMake
+at a matching MLX C header and library installation:
+
+```bash
+cmake -S . -B build-mlx -DCMAKE_BUILD_TYPE=Release \
+  -DQWEN38_MLXC_INCLUDE_DIR=/path/to/mlx-c/include \
+  -DQWEN38_MLX_LIBRARY_DIR=/path/to/mlx/lib
+cmake --build build-mlx --parallel
+ctest --test-dir build-mlx --output-on-failure
+./build-mlx/qwen38-mlx-smoke
+```
+
+The two paths must come from compatible `mlx`/`mlx-c` revisions. They are not
+downloaded implicitly, so offline and reproducible builds do not silently change
+the compute backend.
+
 Run the server:
 
 ```bash
