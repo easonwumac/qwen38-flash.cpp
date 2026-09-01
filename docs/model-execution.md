@@ -162,6 +162,22 @@ These are isolated component numbers with hot filesystem pages, not end-to-end
 throughput claims. They establish state continuity and graph composition before
 the 48-layer model loop is optimized.
 
+## Full 48-layer greedy decode
+
+The complete native correctness graph now loads all 48 decoder layers, embeds a
+token, carries every recurrent/KV/PLE state, applies the final Hyper-Connection
+mixer and Q4 vocabulary head, and performs greedy argmax. Starting from token
+9419, both the C++ graph and the retained MTPLX reference produce token sequence
+`11, 271`. Their maximum logits differ by 0.375 and 0.125 respectively; a
+per-layer trace shows small BF16 composition differences from layer 0 that
+accumulate through the trunk, while the greedy decisions remain stable.
+
+The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
+second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
+footprint was about 41.3 GB. This is explicitly the unfused correctness graph,
+not the target engine: it exposes the dispatch/synchronization baseline that the
+compiled layer runs, fused selected-expert kernels, and head work must replace.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s
