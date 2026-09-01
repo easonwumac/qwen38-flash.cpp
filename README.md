@@ -109,6 +109,9 @@ early zero-accept rounds or when a full 16-round window averages less than one
 accepted draft per round. This avoids disabling profitable MTP on a random
 empty streak while still ending locally losing speculation. Set
 `QWEN38_ECONOMIC_MTP_FALLBACK=0` to restore the legacy two-empty-round policy.
+The reproduced Q4/g64 L47 sidecar is the recommended production companion. A
+same-target B31 run found the retained Q8 sidecar slower on code, creative, and
+JSON prompts because its higher per-round cost did not buy enough acceptance.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
