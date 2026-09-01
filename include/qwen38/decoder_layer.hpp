@@ -20,6 +20,17 @@ struct DecoderLayerState {
     PleState ple;
 };
 
+struct DecoderLayerTrace {
+    MlxArray attention_mixed;
+    MlxArray attention_injection;
+    MlxArray attention_output;
+    MlxArray post_attention_stream;
+    MlxArray mlp_mixed;
+    MlxArray mlp_injection;
+    MlxArray mlp_output;
+    MlxArray post_mlp_stream;
+};
+
 class DecoderLayer final {
 public:
     DecoderLayer(MlxTensorStore& tensors, std::size_t layer_index, const ModelConfig& config);
@@ -33,7 +44,8 @@ public:
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& stream,
         std::uint32_t token,
-        DecoderLayerState& state) const;
+        DecoderLayerState& state,
+        DecoderLayerTrace* trace = nullptr) const;
 
     [[nodiscard]] std::size_t layer_index() const noexcept { return layer_index_; }
     [[nodiscard]] bool uses_full_attention() const noexcept {
@@ -45,7 +57,8 @@ private:
     [[nodiscard]] MlxArray forward_decode_graph(
         const MlxArray& stream,
         std::uint32_t token,
-        DecoderLayerState& state) const;
+        DecoderLayerState& state,
+        DecoderLayerTrace* trace) const;
     void ensure_compiled() const;
     [[nodiscard]] MlxArray apply_compiled(
         const MlxArray& stream,

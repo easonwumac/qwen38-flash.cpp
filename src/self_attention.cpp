@@ -140,8 +140,9 @@ MlxArray SelfAttention::forward_decode(
     MlxArray key = project(input, key_projection_).reshape(key_value_shape);
     key = key.rms_norm(key_norm_weight_, epsilon_).swapaxes(1, 2);
     MlxArray value = project(input, value_projection_).reshape(key_value_shape).swapaxes(1, 2);
-    query = apply_rope(query, state.token_count);
-    key = apply_rope(key, state.token_count);
+    const std::size_t position = state.position_base + state.token_count;
+    query = apply_rope(query, position);
+    key = apply_rope(key, position);
     if (state.token_count == 0) {
         state.keys = std::move(key);
         state.values = std::move(value);

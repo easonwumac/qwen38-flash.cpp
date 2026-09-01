@@ -20,12 +20,24 @@ struct MtpDecodeStep {
     MlxArray pre_mixer_stream;
 };
 
+struct MtpTrace {
+    MlxArray combined_stream;
+    DecoderLayerTrace layer;
+    MlxArray final_mixed;
+};
+
 class QwenMtpHead final {
 public:
     explicit QwenMtpHead(MlxTensorStore& tensors);
 
     [[nodiscard]] MtpDecodeState make_state() const { return {}; }
     [[nodiscard]] MtpDecodeStep forward_decode(
+        const MlxArray& target_pre_mixer_stream,
+        std::uint32_t next_token,
+        std::size_t query_position,
+        MtpDecodeState& state,
+        MtpTrace* trace = nullptr) const;
+    void consume_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
         std::size_t query_position,
@@ -47,6 +59,12 @@ private:
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
+    [[nodiscard]] MlxArray forward_stream(
+        const MlxArray& target_pre_mixer_stream,
+        std::uint32_t next_token,
+        std::size_t query_position,
+        MtpDecodeState& state,
+        MtpTrace* trace) const;
 
     std::size_t hidden_size_;
     std::size_t stream_count_;

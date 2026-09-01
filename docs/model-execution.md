@@ -210,6 +210,15 @@ parity against the retained fold-capable P73 head remains the promotion gate;
 the current dense short-context attention implementation also lacks MTP QSA
 indexer state and cannot be used beyond its exact visible-history envelope.
 
+The retained P185 fold-capable Zig trace is now an executable parity fixture,
+not merely historical documentation. On its position-99 row, a cold C++ head
+matched the reference top-1 but reached only 0.927642 logit cosine. Priming the
+98 preceding `(stream, token, absolute-position)` rows from the retained trace
+raised cosine to 0.982551. The fusion stream is exact (1.0 cosine) and the first
+material divergence is attention output (0.942299 after priming), isolating the
+remaining gap to the absent QSA indexer/select path. The 0.995 promotion gate
+therefore remains closed until QSA state lands.
+
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
 footprint was about 41.3 GB. This is explicitly the unfused correctness graph,

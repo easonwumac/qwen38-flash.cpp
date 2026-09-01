@@ -11,6 +11,7 @@ struct SelfAttentionState {
     MlxArray keys;
     MlxArray values;
     std::size_t token_count{0};
+    std::size_t position_base{0};
 };
 
 class SelfAttention final {

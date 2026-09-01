@@ -114,11 +114,12 @@ MlxArray QwenMtpHead::embed(const std::uint32_t token) const {
     return value.reshape(shape);
 }
 
-MtpDecodeStep QwenMtpHead::forward_decode(
+MlxArray QwenMtpHead::forward_stream(
     const MlxArray& target_pre_mixer_stream,
     const std::uint32_t next_token,
     const std::size_t query_position,
-    MtpDecodeState& state) const {
+    MtpDecodeState& state,
+    MtpTrace* trace) const {
     const std::vector<int> expected{
         1, 1, dimension(hidden_size_ * stream_count_, "stream width")};
     if (target_pre_mixer_stream.shape() != expected) {
@@ -127,6 +128,9 @@ MtpDecodeStep QwenMtpHead::forward_decode(
     if (!state.position_base.has_value()) state.position_base = query_position;
     if (query_position != *state.position_base + state.row_count) {
         throw std::runtime_error("MTP query positions must be contiguous");
+    }
+    if (state.row_count == 0) {
+        state.layer.full_attention.position_base = query_position;
     }
 
     MlxArray normalized_embedding = embed(next_token).rms_norm(embedding_norm_, epsilon_);
@@ -140,9 +144,41 @@ MtpDecodeStep QwenMtpHead::forward_decode(
     MlxArray combined = MlxArray::add(
         hidden_projection, embedding_projection.reshape(embedding_grouped));
     MlxArray stream = combined.reshape(expected);
-    stream = layer_.forward_decode(stream, next_token, state.layer);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->combined_stream = MlxArray::add(
+            stream, MlxArray::zeros(zero_shape, stream.dtype()));
+    }
+    stream = layer_.forward_decode(
+        stream, next_token, state.layer, trace == nullptr ? nullptr : &trace->layer);
     ++state.row_count;
+    return stream;
+}
+
+void QwenMtpHead::consume_decode(
+    const MlxArray& target_pre_mixer_stream,
+    const std::uint32_t next_token,
+    const std::size_t query_position,
+    MtpDecodeState& state) const {
+    MlxArray stream = forward_stream(
+        target_pre_mixer_stream, next_token, query_position, state, nullptr);
+    static_cast<void>(stream.astype(MLX_FLOAT32).to_float32());
+}
+
+MtpDecodeStep QwenMtpHead::forward_decode(
+    const MlxArray& target_pre_mixer_stream,
+    const std::uint32_t next_token,
+    const std::size_t query_position,
+    MtpDecodeState& state,
+    MtpTrace* trace) const {
+    MlxArray stream = forward_stream(
+        target_pre_mixer_stream, next_token, query_position, state, trace);
     HyperConnectionRead final = final_mixer_.read(stream);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->final_mixed = MlxArray::add(
+            final.mixed, MlxArray::zeros(zero_shape, final.mixed.dtype()));
+    }
     MlxArray logits = project(final.mixed, language_head_);
     return {
         .logits = std::move(logits),

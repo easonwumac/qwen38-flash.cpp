@@ -75,20 +75,22 @@ DecoderLayer::~DecoderLayer() {
 MlxArray DecoderLayer::forward_decode(
     const MlxArray& input_stream,
     const std::uint32_t token,
-    DecoderLayerState& state) const {
+    DecoderLayerState& state,
+    DecoderLayerTrace* trace) const {
     const char* compile = std::getenv("QWEN38_COMPILE_LAYER");
     if (linear_attention_ != nullptr && ple_ == nullptr && state.linear_attention.initialized &&
-        compile != nullptr && std::string_view(compile) == "1") {
+        trace == nullptr && compile != nullptr && std::string_view(compile) == "1") {
         ensure_compiled();
         return apply_compiled(input_stream, state);
     }
-    return forward_decode_graph(input_stream, token, state);
+    return forward_decode_graph(input_stream, token, state, trace);
 }
 
 MlxArray DecoderLayer::forward_decode_graph(
     const MlxArray& input_stream,
     const std::uint32_t token,
-    DecoderLayerState& state) const {
+    DecoderLayerState& state,
+    DecoderLayerTrace* trace) const {
     MlxArray stream;
     if (ple_ != nullptr) {
         stream = MlxArray::add(
@@ -105,12 +107,41 @@ MlxArray DecoderLayer::forward_decode_graph(
     MlxArray attention_output = linear_attention_ != nullptr
         ? linear_attention_->forward_decode(attention.mixed, state.linear_attention)
         : full_attention_->forward_decode(attention.mixed, state.full_attention);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->attention_mixed = MlxArray::add(
+            attention.mixed, MlxArray::zeros(zero_shape, attention.mixed.dtype()));
+        trace->attention_injection = MlxArray::add(
+            attention.injection, MlxArray::zeros(zero_shape, attention.injection.dtype()));
+        trace->attention_output = MlxArray::add(
+            attention_output, MlxArray::zeros(zero_shape, attention_output.dtype()));
+    }
     stream = attention_hyper_connection_.write(
         stream, attention_output, attention.injection);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->post_attention_stream = MlxArray::add(
+            stream, MlxArray::zeros(zero_shape, stream.dtype()));
+    }
 
     HyperConnectionRead mlp = mlp_hyper_connection_.read(stream);
     MlxArray mlp_output = mlp_.forward_decode(mlp.mixed);
-    return mlp_hyper_connection_.write(stream, mlp_output, mlp.injection);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->mlp_mixed = MlxArray::add(
+            mlp.mixed, MlxArray::zeros(zero_shape, mlp.mixed.dtype()));
+        trace->mlp_injection = MlxArray::add(
+            mlp.injection, MlxArray::zeros(zero_shape, mlp.injection.dtype()));
+        trace->mlp_output = MlxArray::add(
+            mlp_output, MlxArray::zeros(zero_shape, mlp_output.dtype()));
+    }
+    MlxArray output = mlp_hyper_connection_.write(stream, mlp_output, mlp.injection);
+    if (trace != nullptr) {
+        const std::vector<int> zero_shape{1};
+        trace->post_mlp_stream = MlxArray::add(
+            output, MlxArray::zeros(zero_shape, output.dtype()));
+    }
+    return output;
 }
 
 int DecoderLayer::compile_callback(
@@ -137,7 +168,7 @@ int DecoderLayer::compile_callback(
         .initialized = true,
     };
     const auto* self = static_cast<const DecoderLayer*>(payload);
-    MlxArray output = self->forward_decode_graph(stream, 0, state);
+    MlxArray output = self->forward_decode_graph(stream, 0, state, nullptr);
     const mlx_array values[]{
         output.get(),
         state.linear_attention.convolution.get(),
