@@ -152,12 +152,12 @@ empty streak while still ending locally losing speculation. Set
 While learned MTP remains active, a request-local suffix cache can replace a
 learned proposal when it has an exact prior continuation of at least two
 tokens. Learned MTP runs first by default: history proposals become eligible
-only after two learned rounds remain below 50% acceptance, and are disabled
-for the rest of that request when their own two-round trial stays below 50%.
+only after an eight-round learned probe remains below 50% acceptance, and are
+disabled for the rest of that request when their own two-round trial stays below 50%.
 This avoids replacing a high-quality native Qwen draft with a merely matching
 but locally weak suffix, or repeatedly retrying a failed history source. When
-both the learned probe and history trial miss that floor, the request switches
-to serial decode immediately instead of paying a longer losing MTP window.
+the history trial misses that floor, learned MTP resumes under its independent
+profitability guard instead of disabling speculation immediately.
 If no exact history continuation is available, the normal learned-MTP
 profitability fallback remains active while the cache waits for one.
 The target verifier remains authoritative. Set `QWEN38_HISTORY_DRAFT=0` to

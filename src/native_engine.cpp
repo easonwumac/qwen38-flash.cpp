@@ -460,13 +460,11 @@ GenerationResult NativeEngine::complete_impl(
         const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
         const bool economic_fallback_enabled = economic_fallback == nullptr ||
             std::string_view(economic_fallback) != "0";
-        const bool history_sources_exhausted = used_history_draft &&
-            history_draft_policy.exhausted();
         const bool should_fallback = !used_history_draft && (economic_fallback_enabled
             ? profitability_guard.should_fallback(options_.zero_accept_fallback_rounds)
             : profitability_guard.zero_accept_streak() >=
                   options_.zero_accept_fallback_rounds);
-        if (history_sources_exhausted || should_fallback) {
+        if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
         }

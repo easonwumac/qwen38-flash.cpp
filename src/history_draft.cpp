@@ -8,7 +8,7 @@ namespace {
 
 constexpr std::uint64_t fnv_offset = 1469598103934665603ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
-constexpr std::size_t learned_probe_rounds = 2;
+constexpr std::size_t learned_probe_rounds = 8;
 constexpr std::size_t history_probe_rounds = 2;
 
 void validate_observation(const std::size_t proposed, const std::size_t accepted) {

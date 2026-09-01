@@ -6,8 +6,10 @@
 void run_history_draft_tests() {
     qwen38::HistoryDraftPolicy adaptive;
     QWEN38_CHECK(!adaptive.should_try());
-    adaptive.observe_learned(2, 0);
-    QWEN38_CHECK(!adaptive.should_try());
+    for (int round = 0; round < 7; ++round) {
+        adaptive.observe_learned(2, round == 0 ? 1 : 0);
+        QWEN38_CHECK(!adaptive.should_try());
+    }
     adaptive.observe_learned(2, 1);
     QWEN38_CHECK(adaptive.should_try());
     QWEN38_CHECK(adaptive.activations() == 1);
@@ -15,14 +17,14 @@ void run_history_draft_tests() {
     QWEN38_CHECK(!adaptive.should_try());
     QWEN38_CHECK(adaptive.exhausted());
     QWEN38_CHECK(adaptive.deactivations() == 1);
-    adaptive.observe_learned(2, 0);
-    adaptive.observe_learned(2, 0);
+    for (int round = 0; round < 8; ++round) adaptive.observe_learned(2, 0);
     QWEN38_CHECK(!adaptive.should_try());
     QWEN38_CHECK(adaptive.activations() == 1);
 
     qwen38::HistoryDraftPolicy strong_learned;
-    strong_learned.observe_learned(2, 2);
-    strong_learned.observe_learned(2, 1);
+    for (int round = 0; round < 8; ++round) {
+        strong_learned.observe_learned(2, round % 2 == 0 ? 2 : 1);
+    }
     QWEN38_CHECK(!strong_learned.should_try());
     QWEN38_CHECK(strong_learned.activations() == 0);
 
