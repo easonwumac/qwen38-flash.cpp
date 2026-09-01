@@ -290,8 +290,15 @@ For multi-chunk prompts, `QWEN38_QMETA_PREFILL_CACHE=1` retains each decoded
 bank only for the duration of prefill and releases all 48 layers before decode.
 It raised the same warm 2,424-token prompt to 367.4 PP tok/s (+9.5% over the
 uncached compact path), then preserved the 89/103 128-token MTP trajectory at
-64.02 tok/s. This cache remains opt-in because its transient long-context peak
-has not yet been validated near the 64 GiB capacity boundary.
+64.02 tok/s. Cached banks also let the routed reduction use the normal
+eight-layer prefill barrier instead of synchronizing every layer. A same-binary
+A/B/A raised warm 2,424-token PP from 362.5/369.8 controls to 384.1 tok/s; a
+repeat reached 382.4. Code, JSON, and prose prompts spanning 2.5K--4.4K tokens
+kept identical first-token hashes, and an 8,664-token request reached 294.85 PP
+with a 24.84 GiB sampled peak. Set
+`QWEN38_QMETA_PREFILL_DEFER_REDUCE=0` to restore the per-layer barrier. The
+request cache remains opt-in because it has not yet been validated near the
+64 GiB capacity boundary at the full 262K context limit.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.

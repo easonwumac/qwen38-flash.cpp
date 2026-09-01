@@ -46,6 +46,11 @@ bool qmeta_prefill_cache_enabled() {
     return value != nullptr && std::string_view(value) == "1";
 }
 
+bool qmeta_prefill_defer_reduce_enabled() {
+    const char* value = std::getenv("QWEN38_QMETA_PREFILL_DEFER_REDUCE");
+    return value == nullptr || std::string_view(value) == "1";
+}
+
 std::shared_ptr<MlxMetalKernel> qmeta_gate_up_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -992,10 +997,18 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray weighted = MlxArray::multiply(
         unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
     MlxArray routed = weighted.sum_axis(2);
-    if (compact_qmeta_) {
-        // The decoded 88 MiB side banks are layer-local. Materialize the
-        // reduced routed output before those temporary arrays leave scope so
-        // they cannot accumulate across the 48-layer lazy prefill graph.
+    const bool defer_cached_qmeta_reduce = compact_qmeta_ &&
+        qmeta_prefill_cache_enabled() && qmeta_prefill_defer_reduce_enabled();
+    if (defer_cached_qmeta_reduce) {
+        static std::once_flag announced;
+        std::call_once(announced, [] {
+            std::cerr << "[qmeta] cached prefill reduction uses grouped layer barriers\n";
+        });
+    }
+    if (compact_qmeta_ && !defer_cached_qmeta_reduce) {
+        // Without request-scoped banks, materialize before the temporary
+        // decoded metadata leaves scope. Cached banks instead use the model's
+        // normal layer-group boundary.
         routed.eval();
     }
     if (timings != nullptr) {
