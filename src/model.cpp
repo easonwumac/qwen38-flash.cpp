@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -16,6 +17,26 @@ int dimension(const std::size_t value, const char* name) {
         throw std::runtime_error(std::string("invalid model dimension: ") + name);
     }
     return static_cast<int>(value);
+}
+
+MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
+    if (rows.empty()) throw std::runtime_error("cannot concatenate an empty model batch");
+    MlxArray result = rows.front().share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, rows[row], 1);
+    }
+    return result;
+}
+
+MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() != 3 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("model batch row is out of range");
+    }
+    const std::vector<int> start{0, static_cast<int>(row), 0};
+    const std::vector<int> stop{shape[0], static_cast<int>(row + 1), shape[2]};
+    const std::vector<int> strides{1, 1, 1};
+    return batch.slice(start, stop, strides);
 }
 
 } // namespace
@@ -197,17 +218,39 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
 
     std::vector<TargetVerifyStep> result;
     result.reserve(tokens.size());
+    const char* batch_head = std::getenv("QWEN38_BATCH_VERIFY_HEAD");
+    if (batch_head != nullptr && std::string_view(batch_head) == "0") {
+        for (std::size_t row = 0; row < tokens.size(); ++row) {
+            HyperConnectionRead final = final_mixer_.read(streams[row]);
+            MlxArray logits = MlxArray::quantized_matmul(
+                final.mixed,
+                language_head_.weight,
+                language_head_.scales,
+                language_head_.biases,
+                group_size_,
+                bits_);
+            result.push_back({
+                .logits = std::move(logits),
+                .pre_mixer_stream = std::move(streams[row]),
+                .state_after = std::move(checkpoints[row]),
+            });
+        }
+        return result;
+    }
+
+    MlxArray stream_batch = concatenate_sequence_rows(streams);
+    HyperConnectionRead final = final_mixer_.read(stream_batch);
+    MlxArray logits_batch = MlxArray::quantized_matmul(
+        final.mixed,
+        language_head_.weight,
+        language_head_.scales,
+        language_head_.biases,
+        group_size_,
+        bits_);
+    logits_batch.eval();
     for (std::size_t row = 0; row < tokens.size(); ++row) {
-        HyperConnectionRead final = final_mixer_.read(streams[row]);
-        MlxArray logits = MlxArray::quantized_matmul(
-            final.mixed,
-            language_head_.weight,
-            language_head_.scales,
-            language_head_.biases,
-            group_size_,
-            bits_);
         result.push_back({
-            .logits = std::move(logits),
+            .logits = slice_sequence_row(logits_batch, row),
             .pre_mixer_stream = std::move(streams[row]),
             .state_after = std::move(checkpoints[row]),
         });

@@ -54,20 +54,31 @@ int main(int argc, char** argv) {
         };
 
         static_cast<void>(measure(serial));
+        static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "0", 1));
         static_cast<void>(measure(layer_major));
         const Sample serial_a = measure(serial);
-        const Sample layer_a = measure(layer_major);
-        const Sample layer_b = measure(layer_major);
+        const Sample control_a = measure(layer_major);
+        static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "1", 1));
+        static_cast<void>(measure(layer_major));
+        const Sample candidate_a = measure(layer_major);
+        const Sample candidate_b = measure(layer_major);
+        static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "0", 1));
+        const Sample control_b = measure(layer_major);
         const Sample serial_b = measure(serial);
-        if (serial_a.tokens != layer_a.tokens || serial_a.tokens != layer_b.tokens ||
+        if (serial_a.tokens != control_a.tokens || serial_a.tokens != control_b.tokens ||
+            serial_a.tokens != candidate_a.tokens || serial_a.tokens != candidate_b.tokens ||
             serial_a.tokens != serial_b.tokens) {
             throw std::runtime_error("interleaved verifier benchmark lost token parity");
         }
         const double serial_ms = (serial_a.milliseconds + serial_b.milliseconds) / 2.0;
-        const double layer_ms = (layer_a.milliseconds + layer_b.milliseconds) / 2.0;
+        const double control_ms = (control_a.milliseconds + control_b.milliseconds) / 2.0;
+        const double candidate_ms =
+            (candidate_a.milliseconds + candidate_b.milliseconds) / 2.0;
         std::cout << "{\"depth\":2,\"rows\":3,\"serial_ms\":" << serial_ms
-                  << ",\"layer_major_ms\":" << layer_ms
-                  << ",\"speedup\":" << serial_ms / layer_ms
+                  << ",\"separate_head_ms\":" << control_ms
+                  << ",\"batched_head_ms\":" << candidate_ms
+                  << ",\"head_speedup\":" << control_ms / candidate_ms
+                  << ",\"serial_speedup\":" << serial_ms / candidate_ms
                   << ",\"parity\":true}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
