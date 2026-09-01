@@ -93,6 +93,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     endif()
 
     add_library(qwen38_mlx
+        src/decode_state_io.cpp
         src/decoder_layer.cpp
         src/gated_delta_net.cpp
         src/hyper_connection.cpp

@@ -1,3 +1,4 @@
+#include "qwen38/decode_state_io.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
@@ -338,6 +339,50 @@ int main() {
         snapshot.layers[0].ple.convolution.to_float32() !=
             std::vector<float>({1, 2, 3, 4})) {
         std::cerr << "model decode-state snapshot mismatch\n";
+        return 1;
+    }
+    qwen38::PersistedPrefixState persisted(1);
+    persisted.target = qwen38::snapshot_decode_state(snapshot);
+    persisted.target.layers[0].full_attention.token_count = 2;
+    persisted.target.layers[0].full_attention.position_base = 5;
+    persisted.target.layers[0].full_attention.keys = left.share();
+    persisted.target.layers[0].full_attention.values = right.share();
+    persisted.target.layers[0].full_attention.qsa_raw_keys = left.share();
+    persisted.target.layers[0].full_attention.qsa_pooled_keys = right.share();
+    persisted.target.layers[0].full_attention.qsa_pooled_count = 1;
+    persisted.previous_target_stream = right.share();
+    persisted.pending_mtp_streams.push_back(left.share());
+    persisted.pending_mtp_tokens.push_back(99);
+    persisted.mtp.row_count = 3;
+    persisted.mtp.position_base = 7;
+    persisted.mtp_profitable = true;
+    persisted.mtp_profitability_current_token = 123;
+    persisted.mtp_cumulative_profitability_keep = true;
+    const std::filesystem::path state_path =
+        std::filesystem::temp_directory_path() /
+        ("qwen38-state-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".safetensors");
+    qwen38::save_prefix_state(state_path, persisted);
+    qwen38::PersistedPrefixState restored = qwen38::load_prefix_state(state_path, 1);
+    std::filesystem::remove(state_path);
+    if (restored.target.token_count != 7 || restored.target.layers.size() != 1 ||
+        restored.target.layers[0].full_attention.position_base != 5 ||
+        restored.target.layers[0].full_attention.qsa_pooled_count != 1 ||
+        restored.target.layers[0].linear_attention.recurrent.to_float32() !=
+            std::vector<float>({5, 6, 7, 8}) ||
+        restored.target.layers[0].full_attention.keys.to_float32() !=
+            std::vector<float>({1, 2, 3, 4}) ||
+        !restored.previous_target_stream.has_value() ||
+        restored.previous_target_stream->to_float32() !=
+            std::vector<float>({5, 6, 7, 8}) ||
+        restored.pending_mtp_tokens != std::vector<std::uint32_t>({99}) ||
+        restored.pending_mtp_streams[0].to_float32() !=
+            std::vector<float>({1, 2, 3, 4}) ||
+        restored.mtp.row_count != 3 || restored.mtp.position_base != 7 ||
+        restored.mtp_profitable != true ||
+        restored.mtp_profitability_current_token != 123 ||
+        !restored.mtp_cumulative_profitability_keep) {
+        std::cerr << "persisted prefix-state roundtrip mismatch\n";
         return 1;
     }
 
