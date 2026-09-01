@@ -146,10 +146,67 @@ void write_response(const int fd, const HttpResponse& response) {
 } // namespace
 
 HttpServer::HttpServer(ServerConfig config, const Api& api)
-    : config_(std::move(config)), api_(api) {}
+    : config_(std::move(config)), api_(api) {
+    if (config_.worker_threads == 0 || config_.worker_threads > 64) {
+        throw std::runtime_error("HTTP worker count must be between 1 and 64");
+    }
+    if (config_.max_pending_connections == 0) {
+        throw std::runtime_error("HTTP pending-connection limit must be positive");
+    }
+}
 
 HttpServer::~HttpServer() {
     stop();
+    stop_workers();
+    join_workers();
+}
+
+void HttpServer::start_workers() {
+    workers_.reserve(config_.worker_threads);
+    try {
+        for (std::size_t index = 0; index < config_.worker_threads; ++index) {
+            workers_.emplace_back([this] { worker_loop(); });
+        }
+    } catch (...) {
+        stop();
+        stop_workers();
+        join_workers();
+        throw;
+    }
+}
+
+void HttpServer::join_workers() noexcept {
+    for (std::thread& worker : workers_) {
+        if (worker.joinable()) worker.join();
+    }
+    workers_.clear();
+}
+
+void HttpServer::worker_loop() {
+    while (true) {
+        int client = -1;
+        {
+            std::unique_lock lock(queue_mutex_);
+            queue_ready_.wait(lock, [this] {
+                return stopping_.load(std::memory_order_acquire) ||
+                    !pending_clients_.empty();
+            });
+            if (pending_clients_.empty()) {
+                if (stopping_.load(std::memory_order_acquire)) return;
+                continue;
+            }
+            client = pending_clients_.front();
+            pending_clients_.pop_front();
+        }
+        FileDescriptor client_fd(client);
+        try {
+            handle_client(client_fd.get());
+        } catch (const std::exception& error) {
+            std::cerr << "qwen38-server: HTTP worker failed: " << error.what() << '\n';
+        } catch (...) {
+            std::cerr << "qwen38-server: HTTP worker failed with an unknown error\n";
+        }
+    }
 }
 
 void HttpServer::run() {
@@ -178,6 +235,13 @@ void HttpServer::run() {
 
     stopping_.store(false, std::memory_order_release);
     listen_fd_.store(socket_fd.get(), std::memory_order_release);
+    try {
+        start_workers();
+    } catch (...) {
+        listen_fd_.store(-1, std::memory_order_release);
+        static_cast<void>(socket_fd.release());
+        throw;
+    }
     std::cerr << "qwen38-server listening on http://" << config_.host << ':' << config_.port << '\n';
 
     while (!stopping_.load(std::memory_order_acquire)) {
@@ -189,14 +253,41 @@ void HttpServer::run() {
             if (stopping_.load(std::memory_order_acquire) && (errno == EBADF || errno == EINVAL)) {
                 break;
             }
-            throw std::runtime_error("accept failed: " + std::string(std::strerror(errno)));
+            const std::string message =
+                "accept failed: " + std::string(std::strerror(errno));
+            stopping_.store(true, std::memory_order_release);
+            listen_fd_.store(-1, std::memory_order_release);
+            socket_fd.reset();
+            stop_workers();
+            join_workers();
+            throw std::runtime_error(message);
         }
-        FileDescriptor client_fd(client);
-        handle_client(client_fd.get());
+        bool queued = false;
+        {
+            std::scoped_lock lock(queue_mutex_);
+            if (pending_clients_.size() < config_.max_pending_connections) {
+                pending_clients_.push_back(client);
+                queued = true;
+            }
+        }
+        if (queued) {
+            queue_ready_.notify_one();
+        } else {
+            FileDescriptor client_fd(client);
+            write_response(client_fd.get(), {
+                .status = 503,
+                .content_type = "application/json",
+                .body = "{\"error\":{\"code\":\"server_busy\","
+                    "\"message\":\"The HTTP request queue is full\","
+                    "\"type\":\"server_error\"}}",
+            });
+        }
     }
 
     listen_fd_.store(-1, std::memory_order_release);
     static_cast<void>(socket_fd.release());
+    stop_workers();
+    join_workers();
 }
 
 void HttpServer::stop() noexcept {
@@ -206,6 +297,18 @@ void HttpServer::stop() noexcept {
         ::shutdown(fd, SHUT_RDWR);
         ::close(fd);
     }
+}
+
+void HttpServer::stop_workers() noexcept {
+    {
+        std::scoped_lock lock(queue_mutex_);
+        for (const int client : pending_clients_) {
+            ::shutdown(client, SHUT_RDWR);
+            ::close(client);
+        }
+        pending_clients_.clear();
+    }
+    queue_ready_.notify_all();
 }
 
 void HttpServer::handle_client(const int client_fd) const {

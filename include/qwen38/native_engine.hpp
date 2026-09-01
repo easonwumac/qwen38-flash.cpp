@@ -75,4 +75,31 @@ private:
         const TextDeltaCallback* on_delta);
 };
 
+// Owns the native engine on one dedicated thread. Recent MLX releases bind
+// default CPU/GPU streams to their creating thread, so model construction,
+// evaluation, cache mutation, and destruction must all remain on that thread.
+class NativeEngineExecutor final : public InferenceEngine {
+public:
+    explicit NativeEngineExecutor(
+        const std::filesystem::path& model_directory,
+        NativeEngineOptions options = {});
+    ~NativeEngineExecutor() override;
+
+    NativeEngineExecutor(const NativeEngineExecutor&) = delete;
+    NativeEngineExecutor& operator=(const NativeEngineExecutor&) = delete;
+
+    [[nodiscard]] GenerationResult complete(
+        std::string_view prompt,
+        std::size_t max_tokens) override;
+    [[nodiscard]] GenerationResult complete_stream(
+        std::string_view prompt,
+        std::size_t max_tokens,
+        const TextDeltaCallback& on_delta) override;
+    void clear_cache() override;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
 } // namespace qwen38

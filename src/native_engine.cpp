@@ -7,10 +7,15 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
+#include <future>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace qwen38 {
@@ -497,6 +502,141 @@ void NativeEngine::clear_cache() {
     // returns unused MLX allocator/cache blocks to the system on demand.
     prefix_cache_.reset();
     MlxArray::clear_cache();
+}
+
+struct NativeEngineExecutor::Impl final {
+    using Task = std::function<void(NativeEngine&)>;
+
+    ~Impl() { stop(); }
+
+    void start(
+        const std::filesystem::path& model_directory,
+        NativeEngineOptions options) {
+        auto started = std::make_shared<std::promise<void>>();
+        std::future<void> ready = started->get_future();
+        worker = std::thread([
+            this, model_directory, options = std::move(options), started]() mutable {
+            try {
+                engine = std::make_unique<NativeEngine>(
+                    model_directory, std::move(options));
+                started->set_value();
+            } catch (...) {
+                started->set_exception(std::current_exception());
+                return;
+            }
+
+            while (true) {
+                Task task;
+                {
+                    std::unique_lock lock(mutex);
+                    ready_for_work.wait(lock, [this] {
+                        return stopping || !tasks.empty();
+                    });
+                    if (tasks.empty()) {
+                        if (stopping) break;
+                        continue;
+                    }
+                    task = std::move(tasks.front());
+                    tasks.pop_front();
+                }
+                task(*engine);
+            }
+            engine.reset();
+        });
+        try {
+            ready.get();
+        } catch (...) {
+            if (worker.joinable()) worker.join();
+            throw;
+        }
+    }
+
+    void enqueue(Task task) {
+        {
+            std::scoped_lock lock(mutex);
+            if (stopping) throw std::runtime_error("inference executor is stopping");
+            tasks.push_back(std::move(task));
+        }
+        ready_for_work.notify_one();
+    }
+
+    GenerationResult generate(
+        std::string prompt,
+        const std::size_t max_tokens,
+        std::optional<TextDeltaCallback> on_delta) {
+        auto result = std::make_shared<std::promise<GenerationResult>>();
+        std::future<GenerationResult> future = result->get_future();
+        enqueue([prompt = std::move(prompt), max_tokens,
+                    on_delta = std::move(on_delta), result](NativeEngine& native) mutable {
+            try {
+                if (on_delta.has_value()) {
+                    result->set_value(native.complete_stream(
+                        prompt, max_tokens, *on_delta));
+                } else {
+                    result->set_value(native.complete(prompt, max_tokens));
+                }
+            } catch (...) {
+                result->set_exception(std::current_exception());
+            }
+        });
+        return future.get();
+    }
+
+    void clear() {
+        auto result = std::make_shared<std::promise<void>>();
+        std::future<void> future = result->get_future();
+        enqueue([result](NativeEngine& native) {
+            try {
+                native.clear_cache();
+                result->set_value();
+            } catch (...) {
+                result->set_exception(std::current_exception());
+            }
+        });
+        future.get();
+    }
+
+    void stop() noexcept {
+        {
+            std::scoped_lock lock(mutex);
+            stopping = true;
+        }
+        ready_for_work.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+
+    std::mutex mutex;
+    std::condition_variable ready_for_work;
+    std::deque<Task> tasks;
+    std::thread worker;
+    std::unique_ptr<NativeEngine> engine;
+    bool stopping{false};
+};
+
+NativeEngineExecutor::NativeEngineExecutor(
+    const std::filesystem::path& model_directory,
+    NativeEngineOptions options)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->start(model_directory, std::move(options));
+}
+
+NativeEngineExecutor::~NativeEngineExecutor() = default;
+
+GenerationResult NativeEngineExecutor::complete(
+    const std::string_view prompt,
+    const std::size_t max_tokens) {
+    return impl_->generate(std::string(prompt), max_tokens, std::nullopt);
+}
+
+GenerationResult NativeEngineExecutor::complete_stream(
+    const std::string_view prompt,
+    const std::size_t max_tokens,
+    const TextDeltaCallback& on_delta) {
+    return impl_->generate(std::string(prompt), max_tokens, on_delta);
+}
+
+void NativeEngineExecutor::clear_cache() {
+    impl_->clear();
 }
 
 } // namespace qwen38

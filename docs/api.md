@@ -1,8 +1,12 @@
 # HTTP API
 
-All endpoints bind to `127.0.0.1` by default. The current foundation handles one
-HTTP/1.1 request per connection and closes it after the response. Native
-inference is serialized through one engine mutex. Authentication and concurrent
+All endpoints bind to `127.0.0.1` by default. The server handles one HTTP/1.1
+request per connection and closes it after the response. Four bounded HTTP
+workers let health, status, and metrics run while generation is active; the
+pending socket queue is capped at 128 and returns `503 server_busy` when full.
+Native inference is serialized through one dedicated MLX executor thread, so
+model construction, evaluation, cache mutation, and destruction retain stream
+affinity without duplicating weights. Authentication and concurrent model
 scheduling remain later milestones.
 
 | Method | Route | Current behavior |

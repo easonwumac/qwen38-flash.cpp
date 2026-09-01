@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
                 engine_options.mtp_depth = mtp_depth;
                 engine_options.prefill_chunk_rows = prefill_chunk_rows;
                 engine_options.prefix_cache_max_tokens = prefix_cache_max_tokens;
-                engine = std::make_unique<qwen38::NativeEngine>(
+                engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
                           << " prefill_chunk=" << prefill_chunk_rows << '\n';
