@@ -103,6 +103,12 @@ On unified-memory Macs, run full-model experiments through
 42 GiB reclaimable memory and terminates the child before it exceeds 38 GiB RSS
 or leaves less than 8 GiB reclaimable, preventing benchmark-driven OOMs.
 
+For per-token warmup evidence rather than a two-token snapshot:
+
+```bash
+./devtools/memory_guard.py -- ./build/qwen38-model-bench /path/to/model 8
+```
+
 Validate a model manifest and lazily map one tensor without loading all weights:
 
 ```bash

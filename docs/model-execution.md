@@ -205,6 +205,22 @@ for gate, up, hidden, and down projections, but regressed complete token latency
 from 1.33--1.61 s to 2.35 s. Production therefore keeps the exact loop while a
 direct selected-expert Metal path is developed.
 
+The guarded eight-step benchmark makes the page-temperature effect explicit.
+For greedy continuation from token 9419 it measured
+`5043.7, 2200.3, 247.1, 75.7, 72.8, 77.7, 75.8, 70.4 ms`. Thus the genuinely
+warm stable path is currently about 13--14 tok/s, while short HTTP requests are
+dominated by the first two expert-page population steps. Peak RSS was 29.0 GiB
+and the guard's minimum reclaimable memory was 10.6 GiB. A second immediate
+16-step cold start hit the Metal watchdog while still above 19 GiB reclaimable;
+it was not an OOM, but establishes that full-model runs must be serialized and
+guarded rather than launched back-to-back.
+
+The layer trace now points to expert residency rather than arithmetic as the
+cold bottleneck: token-two layers 0--11 are mostly 6--11 ms, while layers 12--35
+spend roughly 70--83 ms each. Once the relevant pages are populated, whole-token
+latency falls to the 70 ms range. The next optimization track is therefore a
+bounded resident expert tier, not unsafe whole-file cache prewarming.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s
