@@ -5,7 +5,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace qwen38 {
 
@@ -26,6 +28,11 @@ public:
         const MlxArray& stream,
         std::uint32_t token,
         PleState& state) const;
+    [[nodiscard]] MlxArray forward_verify(
+        const MlxArray& stream,
+        std::span<const std::uint32_t> tokens,
+        const PleState& origin,
+        std::vector<PleState>& checkpoints) const;
 
 private:
     struct QuantizedProjection {

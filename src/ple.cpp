@@ -94,11 +94,11 @@ MlxArray Ple::grouped_norm(const MlxArray& input, const MlxArray& weight) const 
     const auto shape = input.shape();
     const int streams = dimension(stream_count_, "stream count");
     const int hidden = dimension(hidden_size_, "hidden size");
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] != 1 ||
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 ||
         shape[2] != streams * hidden) {
         throw std::runtime_error("PLE grouped norm shape mismatch");
     }
-    const std::vector<int> grouped_shape{1, 1, streams, hidden};
+    const std::vector<int> grouped_shape{1, shape[1], streams, hidden};
     const std::vector<float> ones_data(hidden_size_, 1.0F);
     const std::vector<int> ones_shape{hidden};
     MlxArray ones = MlxArray::from_float32(ones_data, ones_shape).astype(input.dtype());
@@ -150,6 +150,70 @@ MlxArray Ple::forward_decode(
         0,
         3,
         streams * hidden).silu();
+    return MlxArray::add(gated, convolution);
+}
+
+MlxArray Ple::forward_verify(
+    const MlxArray& stream,
+    const std::span<const std::uint32_t> tokens,
+    const PleState& origin,
+    std::vector<PleState>& checkpoints) const {
+    const std::vector<int> stream_shape = stream.shape();
+    if (stream_shape.size() != 3 || stream_shape[0] != 1 || tokens.empty() ||
+        tokens.size() > 5 || stream_shape[1] != static_cast<int>(tokens.size())) {
+        throw std::runtime_error("PLE verifier requires matching [1,S,width] rows, S=1..5");
+    }
+    const int rows = stream_shape[1];
+    const int streams = dimension(stream_count_, "stream count");
+    const int hidden = dimension(hidden_size_, "hidden size");
+    const int width = streams * hidden;
+
+    NgramState ngram = origin.ngram;
+    std::vector<float> embeddings;
+    embeddings.reserve(tokens.size() * hidden_size_);
+    checkpoints.clear();
+    checkpoints.resize(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        const auto row_ids = hash_.row_ids(tokens[row], ngram);
+        std::vector<float> embedding = table_.gather(row_ids);
+        embeddings.insert(embeddings.end(), embedding.begin(), embedding.end());
+        checkpoints[row].ngram = ngram;
+    }
+    MlxArray embedding = MlxArray::from_float32(
+        embeddings, std::vector<int>{1, rows, hidden}).astype(stream.dtype());
+    MlxArray key = grouped_norm(project(embedding, key_projection_), norm_key_);
+    MlxArray query = grouped_norm(stream, norm_query_);
+    MlxArray gate = MlxArray::multiply(key, query).sum_axis(3);
+    gate = MlxArray::multiply(
+        gate, scalar(1.0F / std::sqrt(static_cast<float>(hidden_size_)), gate.dtype()));
+    MlxArray floor = scalar(1.0e-6F, gate.dtype());
+    MlxArray signed_root = MlxArray::multiply(
+        MlxArray::maximum(gate.absolute(), floor).square_root(), gate.sign());
+    MlxArray value = project(embedding, value_projection_);
+    MlxArray gated = MlxArray::multiply(
+        signed_root.sigmoid().reshape(std::vector<int>{1, rows, streams, 1}),
+        value.reshape(std::vector<int>{1, rows, 1, hidden})).reshape(
+            std::vector<int>{1, rows, width});
+    MlxArray normalized = grouped_norm(gated, norm_convolution_).reshape(
+        std::vector<int>{1, rows, width});
+
+    MlxArray convolution_state = origin.convolution_initialized
+        ? origin.convolution.share()
+        : MlxArray::zeros(
+              std::vector<int>{1, dimension(convolution_state_length_, "convolution state"), width},
+              stream.dtype());
+    MlxArray convolution_input = MlxArray::concatenate(convolution_state, normalized, 1);
+    const std::vector<int> strides{1, 1, 1};
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        const int begin = static_cast<int>(row + 1);
+        checkpoints[row].convolution = convolution_input.slice(
+            std::vector<int>{0, begin, 0},
+            std::vector<int>{1, begin + dimension(convolution_state_length_, "state"), width},
+            strides);
+        checkpoints[row].convolution_initialized = true;
+    }
+    MlxArray convolution = MlxArray::conv1d(
+        convolution_input, convolution_weight_, 1, 0, 3, width).silu();
     return MlxArray::add(gated, convolution);
 }
 

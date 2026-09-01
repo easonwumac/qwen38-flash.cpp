@@ -143,14 +143,16 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
     }
     checkpoints.clear();
     checkpoints.resize(streams.size());
-    DecoderLayerState working = snapshot_decoder_layer_state(origin);
 
     if (ple_ != nullptr) {
+        MlxArray stream_batch = concatenate_rows(streams);
+        std::vector<PleState> ple_checkpoints;
+        MlxArray ple_output = ple_->forward_verify(
+            stream_batch, tokens, origin.ple, ple_checkpoints);
+        stream_batch = MlxArray::add(stream_batch, ple_output);
         for (std::size_t row = 0; row < streams.size(); ++row) {
-            streams[row] = MlxArray::add(
-                streams[row], ple_->forward_decode(streams[row], tokens[row], working.ple));
-            DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
-            checkpoints[row].ple = std::move(snapshot.ple);
+            streams[row] = slice_row(stream_batch, row);
+            checkpoints[row].ple = std::move(ple_checkpoints[row]);
         }
     }
 
