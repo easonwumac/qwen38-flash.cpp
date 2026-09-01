@@ -91,10 +91,32 @@ MlxArray MlxArray::add(const MlxArray& left, const MlxArray& right) {
     return result;
 }
 
+MlxArray MlxArray::subtract(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_subtract(&result.value_, left.value_, right.value_, stream.get()), "subtract");
+    return result;
+}
+
 MlxArray MlxArray::multiply(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
     const Stream stream;
     check(mlx_multiply(&result.value_, left.value_, right.value_, stream.get()), "multiply");
+    return result;
+}
+
+MlxArray MlxArray::concatenate(
+    const MlxArray& left,
+    const MlxArray& right,
+    const int axis) {
+    const mlx_array values[]{left.value_, right.value_};
+    const mlx_vector_array vector = mlx_vector_array_new_data(values, 2);
+    if (vector.ctx == nullptr) throw std::runtime_error("MLX could not create concatenate input");
+    MlxArray result;
+    const Stream stream;
+    const int status = mlx_concatenate_axis(&result.value_, vector, axis, stream.get());
+    static_cast<void>(mlx_vector_array_free(vector));
+    check(status, "concatenate_axis");
     return result;
 }
 
@@ -171,6 +193,27 @@ MlxArray MlxArray::silu() const {
     return multiply(*this, gate);
 }
 
+MlxArray MlxArray::exp() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_exp(&result.value_, value_, stream.get()), "exp");
+    return result;
+}
+
+MlxArray MlxArray::log1p() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_log1p(&result.value_, value_, stream.get()), "log1p");
+    return result;
+}
+
+MlxArray MlxArray::negative() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_negative(&result.value_, value_, stream.get()), "negative");
+    return result;
+}
+
 MlxArray MlxArray::mean_axis(const int axis, const bool keep_dimensions) const {
     MlxArray result;
     const Stream stream;
@@ -195,6 +238,35 @@ MlxArray MlxArray::rms_norm(const MlxArray& weight, const float epsilon) const {
     check(mlx_fast_rms_norm(
               &result.value_, value_, weight.value_, epsilon, stream.get()),
         "fast_rms_norm");
+    return result;
+}
+
+MlxArray MlxArray::zeros(const std::span<const int> shape, const mlx_dtype dtype) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_zeros(&result.value_, shape.data(), shape.size(), dtype, stream.get()), "zeros");
+    return result;
+}
+
+MlxArray MlxArray::conv1d(
+    const MlxArray& input,
+    const MlxArray& weight,
+    const int stride,
+    const int padding,
+    const int dilation,
+    const int groups) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_conv1d(
+              &result.value_,
+              input.value_,
+              weight.value_,
+              stride,
+              padding,
+              dilation,
+              groups,
+              stream.get()),
+        "conv1d");
     return result;
 }
 

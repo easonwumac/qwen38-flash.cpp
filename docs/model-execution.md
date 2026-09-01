@@ -80,21 +80,28 @@ was tested but did not preserve per-expert numerical semantics for these gathere
 kernel is required to remove 48 host synchronization points and reduce dispatch
 overhead in the optimized decode graph.
 
-## First-token Gated DeltaNet
+## Stateful Gated DeltaNet decode
 
-The layer-0 linear-attention path now covers the exact zero-state first token:
-four Q4 input projections, the current tap of the width-4 depthwise causal
-convolution, SiLU, Q/K normalization and grouped-query head expansion, beta
-gating, zero-state delta recurrence, sigmoid-gated RMSNorm, and Q4 output
-projection. C++ and the independent MLX-Python oracle both produce checksum
-`-2.5134339333` for the retained fixture. Six component runs measured 22.21 ms
-cold and 0.63 ms warm median.
+The layer-0 linear-attention path covers stateful one-token decode: four Q4 input
+projections, width-4 depthwise causal convolution and its three-row cache, SiLU,
+Q/K normalization and grouped-query expansion, float32 forget-gate construction,
+beta-gated delta recurrence, the BF16 `[1,48,128,128]` recurrent state,
+sigmoid-gated RMSNorm, and Q4 output projection.
 
-The fixture exposed a BF16-sensitive semantic requirement: the recurrence must
-evaluate `(value * beta) * similarity`. Reassociating it to
-`value * (beta * similarity)` changes rounding and the final output. This order
-is now explicit. Stateful convolution/recurrent caches and multi-token chunked
-prefill remain required before this block can serve generation.
+For isolated deterministic inputs derived from token IDs 9419 and 11, C++ and
+the independent MLX-Python oracle agree on all retained checks:
+
+| Value | Checksum |
+|---|---:|
+| first output | -2.499662638 |
+| second output | 1.829259396 |
+| recurrent state after step two | 70.005004883 |
+
+A six-run measurement put the second stateful step near 1.23 ms warm median.
+This composed path is the correctness baseline. It materializes many elementwise
+nodes and traverses the recurrent state repeatedly, so the optimized engine will
+replace its prework and recurrence with fused Metal kernels. Multi-token chunked
+prefill remains required before the block is complete.
 
 ## Performance implication
 

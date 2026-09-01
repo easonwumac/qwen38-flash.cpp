@@ -8,6 +8,12 @@
 
 namespace qwen38 {
 
+struct GatedDeltaNetState {
+    MlxArray convolution;
+    MlxArray recurrent;
+    bool initialized{false};
+};
+
 class GatedDeltaNet final {
 public:
     GatedDeltaNet(
@@ -18,6 +24,9 @@ public:
     // Correct first-token path with zero convolution and recurrent state.
     // Stateful decode and chunked prefill are added on top of this fixture.
     [[nodiscard]] MlxArray forward_first(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_decode(
+        const MlxArray& input,
+        GatedDeltaNetState& state) const;
 
 private:
     struct QuantizedProjection {

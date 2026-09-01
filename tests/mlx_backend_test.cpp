@@ -51,6 +51,15 @@ int main() {
         std::cerr << "MLX repeat/slice mismatch\n";
         return 1;
     }
+    const std::array<int, 2> zero_shape{1, 2};
+    const auto zero = qwen38::MlxArray::zeros(zero_shape, MLX_FLOAT32);
+    const auto joined = qwen38::MlxArray::concatenate(zero, left, 0);
+    if (joined.shape() != std::vector<int>({3, 2}) ||
+        qwen38::MlxArray::subtract(left, right).to_float32() !=
+            std::vector<float>({-4, -4, -4, -4})) {
+        std::cerr << "MLX zeros/concatenate/subtract mismatch\n";
+        return 1;
+    }
     const auto sigmoid = left.sigmoid().to_float32();
     if (std::abs(sigmoid.front() - 0.7310586F) > 1.0e-5F) {
         std::cerr << "MLX sigmoid mismatch\n";

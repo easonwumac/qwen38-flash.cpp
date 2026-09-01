@@ -77,6 +77,13 @@ MlxArray GatedDeltaNet::project(
 }
 
 MlxArray GatedDeltaNet::forward_first(const MlxArray& input) const {
+    GatedDeltaNetState state;
+    return forward_decode(input, state);
+}
+
+MlxArray GatedDeltaNet::forward_decode(
+    const MlxArray& input,
+    GatedDeltaNetState& state) const {
     const auto input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] != 1) {
         throw std::runtime_error("first-token GatedDeltaNet requires shape [1,1,hidden]");
@@ -90,15 +97,26 @@ MlxArray GatedDeltaNet::forward_first(const MlxArray& input) const {
     const int convolution_width = 2 * key_width + value_width;
 
     MlxArray qkv = project(input, qkv_projection_);
-    const std::vector<int> conv_weight_shape{convolution_width, 4};
-    MlxArray conv_weight = convolution_weight_.reshape(conv_weight_shape);
-    const std::vector<int> conv_start{0, 3};
-    const std::vector<int> conv_stop{convolution_width, 4};
-    const std::vector<int> conv_strides{1, 1};
-    const std::vector<int> channel_shape{convolution_width};
-    MlxArray current_weight = conv_weight.slice(
-        conv_start, conv_stop, conv_strides).reshape(channel_shape);
-    MlxArray convolved = MlxArray::multiply(qkv, current_weight).silu();
+    if (!state.initialized) {
+        const std::vector<int> convolution_state_shape{1, 3, convolution_width};
+        const std::vector<int> recurrent_state_shape{
+            1, value_heads, value_dimension, key_dimension};
+        state.convolution = MlxArray::zeros(convolution_state_shape, qkv.dtype());
+        state.recurrent = MlxArray::zeros(recurrent_state_shape, qkv.dtype());
+        state.initialized = true;
+    }
+    MlxArray convolution_input = MlxArray::concatenate(state.convolution, qkv, 1);
+    const std::vector<int> state_start{0, 1, 0};
+    const std::vector<int> state_stop{1, 4, convolution_width};
+    const std::vector<int> state_strides{1, 1, 1};
+    state.convolution = convolution_input.slice(state_start, state_stop, state_strides);
+    MlxArray convolved = MlxArray::conv1d(
+        convolution_input,
+        convolution_weight_,
+        1,
+        0,
+        1,
+        convolution_width).silu();
 
     const std::vector<int> strides{1, 1, 1};
     const std::vector<int> query_start{0, 0, 0};
@@ -130,11 +148,29 @@ MlxArray GatedDeltaNet::forward_first(const MlxArray& input) const {
     key = key.repeat_axis(repetition, 2);
 
     MlxArray beta = project(input, beta_projection_).sigmoid();
-    const std::vector<int> gate_shape{1, 1, value_heads, 1};
-    beta = beta.reshape(gate_shape);
-    MlxArray similarity = MlxArray::multiply(query, key).sum_axis(3).reshape(gate_shape);
-    MlxArray scaled_value = MlxArray::multiply(value, beta);
-    MlxArray recurrent_output = MlxArray::multiply(scaled_value, similarity);
+    const std::vector<int> beta_shape{1, value_heads, 1};
+    beta = beta.reshape(beta_shape);
+    MlxArray decay_input = MlxArray::add(project(input, decay_projection_), decay_bias_);
+    MlxArray softplus = decay_input.astype(MLX_FLOAT32).exp().log1p();
+    MlxArray decay_rate = decay_log_.astype(MLX_FLOAT32).exp();
+    MlxArray decay = MlxArray::multiply(decay_rate, softplus).negative().exp().astype(qkv.dtype());
+    const std::vector<int> decay_shape{1, value_heads, 1, 1};
+    state.recurrent = MlxArray::multiply(state.recurrent, decay.reshape(decay_shape));
+
+    const std::vector<int> qk_recurrent_shape{1, value_heads, 1, key_dimension};
+    const std::vector<int> value_recurrent_shape{1, value_heads, value_dimension};
+    MlxArray query_recurrent = query.reshape(qk_recurrent_shape);
+    MlxArray key_recurrent = key.reshape(qk_recurrent_shape);
+    MlxArray value_recurrent = value.reshape(value_recurrent_shape);
+    MlxArray recalled = MlxArray::multiply(
+        state.recurrent, key_recurrent).sum_axis(3);
+    MlxArray delta = MlxArray::multiply(
+        MlxArray::subtract(value_recurrent, recalled), beta);
+    const std::vector<int> delta_shape{1, value_heads, value_dimension, 1};
+    MlxArray update = MlxArray::multiply(delta.reshape(delta_shape), key_recurrent);
+    state.recurrent = MlxArray::add(state.recurrent, update);
+    MlxArray recurrent_output = MlxArray::multiply(
+        state.recurrent, query_recurrent).sum_axis(3).reshape(value_shape);
 
     MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
     MlxArray z = project(input, z_projection_).reshape(value_shape);

@@ -35,7 +35,12 @@ public:
         std::span<const std::int32_t> values,
         std::span<const int> shape);
     [[nodiscard]] static MlxArray add(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray subtract(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray multiply(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray concatenate(
+        const MlxArray& left,
+        const MlxArray& right,
+        int axis);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
     [[nodiscard]] MlxArray transpose() const;
@@ -47,9 +52,20 @@ public:
         std::span<const int> strides) const;
     [[nodiscard]] MlxArray sigmoid() const;
     [[nodiscard]] MlxArray silu() const;
+    [[nodiscard]] MlxArray exp() const;
+    [[nodiscard]] MlxArray log1p() const;
+    [[nodiscard]] MlxArray negative() const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray sum_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray rms_norm(const MlxArray& weight, float epsilon) const;
+    [[nodiscard]] static MlxArray zeros(std::span<const int> shape, mlx_dtype dtype);
+    [[nodiscard]] static MlxArray conv1d(
+        const MlxArray& input,
+        const MlxArray& weight,
+        int stride,
+        int padding,
+        int dilation,
+        int groups);
     [[nodiscard]] MlxArray astype(mlx_dtype dtype) const;
     [[nodiscard]] static MlxArray quantized_matmul(
         const MlxArray& input,

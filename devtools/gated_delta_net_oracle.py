@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent first-token GatedDeltaNet oracle for the retained checkpoint."""
+"""Independent stateful GatedDeltaNet oracle for the retained checkpoint."""
 
 import argparse
 import json
@@ -34,53 +34,91 @@ def main() -> None:
             bits=4,
         )
 
-    ids = mx.array([9419], dtype=mx.int32)
     embed = "language_model.model.embed_tokens"
-    embedding = mx.dequantize(
-        tensor(embed + ".weight")[ids],
-        tensor(embed + ".scales")[ids],
-        tensor(embed + ".biases")[ids],
-        group_size=64,
-        bits=4,
-    ).reshape(1, 1, 2560)
-    stream = mx.tile(embedding, (1, 1, 4))
     hc = "language_model.model.layers.0.attn_hyper_connection"
-    grouped = stream.reshape(1, 1, 4, 2560)
-    normed = mx.fast.rms_norm(grouped, mx.ones((2560,), dtype=embedding.dtype), 1e-6)
-    normed *= tensor(hc + ".hc_norm.weight").reshape(4, 2560) + 1
-    flat = normed.reshape(1, 1, 10240)
-    down = qmm(flat, hc + ".input_mix_weight_down") / 4
-    up = qmm(down * mx.sigmoid(down), hc + ".input_mix_weight_up")
-    x = (mx.sigmoid(up.reshape(1, 1, 4, 2560)) * normed).mean(axis=2)
-
     prefix = "language_model.model.layers.0.linear_attn"
-    qkv = qmm(x, prefix + ".in_proj_qkv")
-    conv_weight = tensor(prefix + ".conv1d.weight").reshape(10240, 4)[:, 3]
-    conv = qkv * conv_weight
-    conv = conv * mx.sigmoid(conv)
-    query = conv[..., :2048].reshape(1, 1, 16, 128)
-    key = conv[..., 2048:4096].reshape(1, 1, 16, 128)
-    value = conv[..., 4096:].reshape(1, 1, 48, 128)
-    ones = mx.ones((128,), dtype=query.dtype)
-    query = mx.fast.rms_norm(query, ones, 1e-6) * mx.array(1.0 / 128, dtype=query.dtype)
-    key = mx.fast.rms_norm(key, ones, 1e-6) * mx.array(
-        1.0 / math.sqrt(128), dtype=key.dtype
-    )
-    query = mx.repeat(query, 3, axis=2)
-    key = mx.repeat(key, 3, axis=2)
-    beta = mx.sigmoid(qmm(x, prefix + ".in_proj_b")).reshape(1, 1, 48, 1)
-    similarity = (query * key).sum(axis=3, keepdims=True)
-    recurrent = value * beta * similarity
-    normalized = mx.fast.rms_norm(
-        recurrent, tensor(prefix + ".norm.weight"), config["rms_norm_eps"]
-    )
-    z = qmm(x, prefix + ".in_proj_z").reshape(1, 1, 48, 128)
-    gated = normalized * mx.sigmoid(z)
-    output = qmm(gated.reshape(1, 1, 6144), prefix + ".out_proj")
-    mx.eval(output)
+
+    def make_input(token_id):
+        ids = mx.array([token_id], dtype=mx.int32)
+        embedding = mx.dequantize(
+            tensor(embed + ".weight")[ids],
+            tensor(embed + ".scales")[ids],
+            tensor(embed + ".biases")[ids],
+            group_size=64,
+            bits=4,
+        ).reshape(1, 1, 2560)
+        grouped = mx.tile(embedding, (1, 1, 4)).reshape(1, 1, 4, 2560)
+        normed = mx.fast.rms_norm(
+            grouped, mx.ones((2560,), dtype=embedding.dtype), 1e-6
+        )
+        normed *= tensor(hc + ".hc_norm.weight").reshape(4, 2560) + 1
+        flat = normed.reshape(1, 1, 10240)
+        down = qmm(flat, hc + ".input_mix_weight_down") / 4
+        up = qmm(down * mx.sigmoid(down), hc + ".input_mix_weight_up")
+        return (mx.sigmoid(up.reshape(1, 1, 4, 2560)) * normed).mean(axis=2)
+
+    conv_state = mx.zeros((1, 3, 10240), dtype=mx.bfloat16)
+    recurrent_state = mx.zeros((1, 48, 128, 128), dtype=mx.bfloat16)
+
+    def step(x):
+        nonlocal conv_state, recurrent_state
+        qkv = qmm(x, prefix + ".in_proj_qkv")
+        conv_input = mx.concatenate((conv_state, qkv), axis=1)
+        conv_state = conv_input[:, 1:]
+        conv = mx.conv1d(
+            conv_input,
+            tensor(prefix + ".conv1d.weight"),
+            stride=1,
+            padding=0,
+            dilation=1,
+            groups=10240,
+        )
+        conv *= mx.sigmoid(conv)
+        query = conv[..., :2048].reshape(1, 1, 16, 128)
+        key = conv[..., 2048:4096].reshape(1, 1, 16, 128)
+        value = conv[..., 4096:].reshape(1, 1, 48, 128)
+        ones = mx.ones((128,), dtype=query.dtype)
+        query = mx.fast.rms_norm(query, ones, 1e-6) * mx.array(
+            1.0 / 128, dtype=query.dtype
+        )
+        key = mx.fast.rms_norm(key, ones, 1e-6) * mx.array(
+            1.0 / math.sqrt(128), dtype=key.dtype
+        )
+        query = mx.repeat(query, 3, axis=2).reshape(1, 48, 1, 128)
+        key = mx.repeat(key, 3, axis=2).reshape(1, 48, 1, 128)
+        value = value.reshape(1, 48, 128)
+        beta = mx.sigmoid(qmm(x, prefix + ".in_proj_b")).reshape(1, 48, 1)
+        decay_input = qmm(x, prefix + ".in_proj_a") + tensor(prefix + ".dt_bias")
+        decay = mx.exp(
+            -mx.exp(tensor(prefix + ".A_log").astype(mx.float32))
+            * mx.log1p(mx.exp(decay_input.astype(mx.float32)))
+        ).astype(mx.bfloat16)
+        recurrent_state *= decay.reshape(1, 48, 1, 1)
+        recalled = (recurrent_state * key).sum(axis=3)
+        delta = (value - recalled) * beta
+        recurrent_state += delta.reshape(1, 48, 128, 1) * key
+        recurrent = (recurrent_state * query).sum(axis=3).reshape(1, 1, 48, 128)
+        normalized = mx.fast.rms_norm(
+            recurrent, tensor(prefix + ".norm.weight"), config["rms_norm_eps"]
+        )
+        z = qmm(x, prefix + ".in_proj_z").reshape(1, 1, 48, 128)
+        output = qmm(
+            (normalized * mx.sigmoid(z)).reshape(1, 1, 6144),
+            prefix + ".out_proj",
+        )
+        return output
+
+    first = step(make_input(9419))
+    mx.eval(first, conv_state, recurrent_state)
+    second = step(make_input(11))
+    mx.eval(second, conv_state, recurrent_state)
     print(
         json.dumps(
-            {"checksum": float(mx.sum(output.astype(mx.float32)).item())},
+            {
+                "first_checksum": float(mx.sum(first.astype(mx.float32)).item()),
+                "second_checksum": float(mx.sum(second.astype(mx.float32)).item()),
+                "state_checksum": float(mx.sum(recurrent_state.astype(mx.float32)).item()),
+            },
             separators=(",", ":"),
         )
     )
