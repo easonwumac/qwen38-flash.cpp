@@ -2,12 +2,17 @@
 #include "qwen38/http_server.hpp"
 #include "qwen38/model_manifest.hpp"
 #include "qwen38/runtime.hpp"
+#ifdef QWEN38_HAS_INFERENCE
+#include "qwen38/native_engine.hpp"
+#endif
 
 #include <charconv>
 #include <csignal>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -25,7 +30,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program << " [--host IPv4] [--port PORT] [--model PATH]\n"
         << "\n"
-        << "qwen38-flash.cpp server foundation. The inference backend is not yet implemented.\n";
+        << "qwen38-flash.cpp native inference server.\n";
 }
 
 std::uint16_t parse_port(const std::string& value) {
@@ -66,12 +71,23 @@ int main(int argc, char** argv) {
         }
 
         qwen38::RuntimeState runtime;
+        std::unique_ptr<qwen38::InferenceEngine> engine;
         if (model_path.has_value()) {
             runtime.begin_loading(*model_path);
-            static_cast<void>(qwen38::ModelManifest::load(*model_path));
-            runtime.mark_failed("model manifest is valid; inference graph is not implemented yet");
+            try {
+#ifdef QWEN38_HAS_INFERENCE
+                engine = std::make_unique<qwen38::NativeEngine>(*model_path);
+                runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
+#else
+                static_cast<void>(qwen38::ModelManifest::load(*model_path));
+                runtime.mark_failed("server was built without MLX/tokenizer inference support");
+#endif
+            } catch (const std::exception& error) {
+                runtime.mark_failed(error.what());
+                std::cerr << "model load failed: " << error.what() << '\n';
+            }
         }
-        const qwen38::Api api(runtime);
+        const qwen38::Api api(runtime, engine.get());
         qwen38::HttpServer server(config, api);
         active_server = &server;
         std::signal(SIGINT, handle_signal);

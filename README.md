@@ -9,13 +9,11 @@ KV/prefix caches, speculative verification, serving, and observability. It is no
 a UI and is not a wrapper around `mlx-serve`.
 
 > [!IMPORTANT]
-> The current milestone includes the tested C++20 server foundation, strict
-> Qwen3.8 manifest parsing, native tokenization/chat templating, lazy checkpoint
-> loading, and verified Apple-GPU execution of token embedding, Q4 projections,
-> Qwen3.8's four-stream Hyper-Connection mixers, one-token sparse MoE, and the
-> stateful one-token Gated DeltaNet and full-attention decode paths. Full
-> transformer execution and generation are not implemented yet, so this version
-> is not a usable LLM runtime and makes no end-to-end performance claim.
+> The current milestone performs real end-to-end greedy generation through all
+> 48 layers and serves OpenAI-style completion APIs. It is a correctness runtime,
+> not yet the optimized release: the measured unfused decode path is far below
+> the 45 tok/s acceptance target, streaming and chunked prefill are outstanding,
+> and QSA contexts above the 2,048-token selection budget remain unsupported.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -83,13 +81,16 @@ user, and assistant turns, including default/low/medium reasoning controls,
 thinking preservation, and generation prompts. Tool and multimodal content remain
 explicitly unsupported until their exact template branches land.
 
-Run the server:
+With both MLX and tokenizer options enabled, run the native inference server:
 
 ```bash
-./build/qwen38-server --host 127.0.0.1 --port 11438
+./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
+curl -X POST http://127.0.0.1:11438/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Hello","max_tokens":1}'
 ```
 
 Validate a model manifest and lazily map one tensor without loading all weights:

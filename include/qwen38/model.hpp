@@ -11,8 +11,8 @@
 
 namespace qwen38 {
 
-struct ModelState {
-    explicit ModelState(std::size_t layer_count) : layers(layer_count) {}
+struct ModelDecodeState {
+    explicit ModelDecodeState(std::size_t layer_count) : layers(layer_count) {}
     std::vector<DecoderLayerState> layers;
     std::size_t token_count{0};
 };
@@ -26,13 +26,14 @@ class QwenModel final {
 public:
     explicit QwenModel(MlxTensorStore& tensors);
 
-    [[nodiscard]] ModelState make_state() const;
-    [[nodiscard]] MlxArray forward_decode(std::uint32_t token, ModelState& state) const;
+    [[nodiscard]] ModelDecodeState make_state() const;
+    [[nodiscard]] MlxArray forward_decode(std::uint32_t token, ModelDecodeState& state) const;
+    void consume_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,
-        ModelState& state,
+        ModelDecodeState& state,
         std::vector<double>& layer_checksums) const;
-    [[nodiscard]] GreedyStep greedy_decode(std::uint32_t token, ModelState& state) const;
+    [[nodiscard]] GreedyStep greedy_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] std::size_t layer_count() const noexcept { return layers_.size(); }
 
 private:
@@ -48,7 +49,11 @@ private:
     [[nodiscard]] MlxArray embed(std::uint32_t token) const;
     [[nodiscard]] MlxArray forward_decode_impl(
         std::uint32_t token,
-        ModelState& state,
+        ModelDecodeState& state,
+        std::vector<double>* layer_checksums) const;
+    [[nodiscard]] MlxArray forward_hidden_decode_impl(
+        std::uint32_t token,
+        ModelDecodeState& state,
         std::vector<double>* layer_checksums) const;
 
     std::size_t hidden_size_;

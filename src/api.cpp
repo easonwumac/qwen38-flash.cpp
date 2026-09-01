@@ -1,7 +1,13 @@
 #include "qwen38/api.hpp"
+#include "qwen38/chat_template.hpp"
+#include "qwen38/json.hpp"
 
+#include <cstddef>
 #include <iomanip>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
+#include <vector>
 
 namespace qwen38 {
 namespace {
@@ -13,6 +19,51 @@ HttpResponse json_error(const int status, std::string_view code, std::string_vie
         .body = "{\"error\":{\"code\":\"" + json_escape(code) +
             "\",\"message\":\"" + json_escape(message) + "\",\"type\":\"server_error\"}}",
     };
+}
+
+std::size_t max_tokens(const Json& body) {
+    const Json* value = body.find("max_completion_tokens");
+    if (value == nullptr) value = body.find("max_tokens");
+    if (value == nullptr) return 16;
+    const std::int64_t parsed = value->as_integer();
+    if (parsed < 1 || parsed > 256) {
+        throw std::runtime_error("max_tokens must be between 1 and 256");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
+void reject_streaming(const Json& body) {
+    if (const Json* stream = body.find("stream"); stream != nullptr && stream->as_boolean()) {
+        throw std::runtime_error("streaming responses are not implemented yet");
+    }
+}
+
+std::string completion_json(
+    const RuntimeSnapshot& snapshot,
+    const GenerationResult& result,
+    const bool chat) {
+    std::ostringstream out;
+    out << "{\"id\":\"qwen38-native\",\"object\":\""
+        << (chat ? "chat.completion" : "text_completion")
+        << "\",\"model\":\"" << json_escape(snapshot.model_id) << "\",\"choices\":[{";
+    if (chat) {
+        out << "\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
+            << json_escape(result.text) << "\"}";
+    } else {
+        out << "\"index\":0,\"text\":\"" << json_escape(result.text) << '"';
+    }
+    out << ",\"finish_reason\":\"" << json_escape(result.finish_reason)
+        << "\"}],\"usage\":{\"prompt_tokens\":" << result.prompt_tokens
+        << ",\"completion_tokens\":" << result.tokens.size()
+        << ",\"total_tokens\":" << result.prompt_tokens + result.tokens.size()
+        << "},\"performance\":{\"prompt_ms\":" << result.prompt_ms
+        << ",\"generation_ms\":" << result.generation_ms
+        << ",\"generation_tps\":"
+        << (result.generation_ms > 0.0
+                ? 1000.0 * static_cast<double>(result.tokens.size()) / result.generation_ms
+                : 0.0)
+        << "}}";
+    return out.str();
 }
 
 std::string status_json(const RuntimeSnapshot& snapshot) {
@@ -69,13 +120,50 @@ HttpResponse Api::handle(const HttpRequest& request) const {
     }
     if (request.method == "POST" &&
         (request.target == "/v1/chat/completions" || request.target == "/v1/completions")) {
-        return json_error(503, "model_not_ready", "Inference backend is not loaded");
+        if (!runtime_.ready() || engine_ == nullptr) {
+            return json_error(503, "model_not_ready", "Inference backend is not loaded");
+        }
+        try {
+            const Json body = Json::parse(request.body);
+            reject_streaming(body);
+            const bool chat = request.target == "/v1/chat/completions";
+            std::string prompt;
+            if (chat) {
+                std::vector<ChatMessage> messages;
+                for (const Json& item : body.at("messages").as_array()) {
+                    messages.push_back({
+                        .role = parse_chat_role(item.at("role").as_string()),
+                        .content = item.at("content").as_string(),
+                        .reasoning_content = std::nullopt,
+                    });
+                }
+                if (messages.empty()) throw std::runtime_error("messages must not be empty");
+                prompt = render_chat_prompt(messages);
+            } else {
+                prompt = body.at("prompt").as_string();
+            }
+            runtime_.request_started();
+            try {
+                GenerationResult result = engine_->complete(prompt, max_tokens(body));
+                runtime_.request_finished(result.prompt_tokens, result.tokens.size());
+                return {.body = completion_json(snapshot, result, chat)};
+            } catch (...) {
+                runtime_.request_finished(0, 0);
+                throw;
+            }
+        } catch (const std::exception& error) {
+            return json_error(400, "invalid_request", error.what());
+        }
     }
     if (request.method == "POST" && request.target == "/admin/cache/clear") {
         if (!runtime_.ready()) {
             return json_error(503, "model_not_ready", "No loaded model cache to clear");
         }
-        return json_error(501, "not_implemented", "Cache management is not implemented yet");
+        if (engine_ == nullptr) {
+            return json_error(503, "model_not_ready", "Inference backend is not loaded");
+        }
+        engine_->clear_cache();
+        return {.body = "{\"status\":\"cleared\"}"};
     }
     return json_error(404, "not_found", "Route not found");
 }

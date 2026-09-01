@@ -55,8 +55,8 @@ QwenModel::QwenModel(MlxTensorStore& tensors)
     }
 }
 
-ModelState QwenModel::make_state() const {
-    return ModelState(layers_.size());
+ModelDecodeState QwenModel::make_state() const {
+    return ModelDecodeState(layers_.size());
 }
 
 MlxArray QwenModel::embed(const std::uint32_t token) const {
@@ -74,13 +74,13 @@ MlxArray QwenModel::embed(const std::uint32_t token) const {
     return value.reshape(shape);
 }
 
-MlxArray QwenModel::forward_decode(const std::uint32_t token, ModelState& state) const {
+MlxArray QwenModel::forward_decode(const std::uint32_t token, ModelDecodeState& state) const {
     return forward_decode_impl(token, state, nullptr);
 }
 
 MlxArray QwenModel::trace_decode(
     const std::uint32_t token,
-    ModelState& state,
+    ModelDecodeState& state,
     std::vector<double>& layer_checksums) const {
     layer_checksums.clear();
     layer_checksums.reserve(layers_.size());
@@ -89,7 +89,21 @@ MlxArray QwenModel::trace_decode(
 
 MlxArray QwenModel::forward_decode_impl(
     const std::uint32_t token,
-    ModelState& state,
+    ModelDecodeState& state,
+    std::vector<double>* layer_checksums) const {
+    MlxArray hidden = forward_hidden_decode_impl(token, state, layer_checksums);
+    return MlxArray::quantized_matmul(
+        hidden,
+        language_head_.weight,
+        language_head_.scales,
+        language_head_.biases,
+        group_size_,
+        bits_);
+}
+
+MlxArray QwenModel::forward_hidden_decode_impl(
+    const std::uint32_t token,
+    ModelDecodeState& state,
     std::vector<double>* layer_checksums) const {
     if (state.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");
@@ -104,18 +118,18 @@ MlxArray QwenModel::forward_decode_impl(
         }
     }
     HyperConnectionRead final = final_mixer_.read(stream);
-    MlxArray logits = MlxArray::quantized_matmul(
-        final.mixed,
-        language_head_.weight,
-        language_head_.scales,
-        language_head_.biases,
-        group_size_,
-        bits_);
     ++state.token_count;
-    return logits;
+    return std::move(final.mixed);
 }
 
-GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelState& state) const {
+void QwenModel::consume_decode(
+    const std::uint32_t token,
+    ModelDecodeState& state) const {
+    static_cast<void>(
+        forward_hidden_decode_impl(token, state, nullptr).astype(MLX_FLOAT32).to_float32());
+}
+
+GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelDecodeState& state) const {
     const std::vector<float> logits =
         forward_decode(token, state).astype(MLX_FLOAT32).to_float32();
     if (logits.size() != vocabulary_size_) {

@@ -142,6 +142,17 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         qwen38-decoder-layer-smoke
         qwen38-model-smoke
         RUNTIME DESTINATION bin)
+
+    if(TARGET qwen38_tokenizer)
+        add_library(qwen38_inference src/native_engine.cpp)
+        target_include_directories(qwen38_inference PUBLIC include)
+        target_link_libraries(qwen38_inference PUBLIC qwen38_mlx qwen38_tokenizer)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+            target_compile_options(qwen38_inference PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+        endif()
+        target_link_libraries(qwen38-server PRIVATE qwen38_inference)
+        target_compile_definitions(qwen38-server PRIVATE QWEN38_HAS_INFERENCE=1)
+    endif()
 endif()
 
 if(QWEN38_BUILD_TESTS)

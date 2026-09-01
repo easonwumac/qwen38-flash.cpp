@@ -1,6 +1,7 @@
 #pragma once
 
 #include "qwen38/runtime.hpp"
+#include "qwen38/inference.hpp"
 
 #include <string>
 #include <string_view>
@@ -23,12 +24,14 @@ struct HttpResponse {
 
 class Api final {
 public:
-    explicit Api(RuntimeState& runtime) : runtime_(runtime) {}
+    explicit Api(RuntimeState& runtime, InferenceEngine* engine = nullptr)
+        : runtime_(runtime), engine_(engine) {}
 
     [[nodiscard]] HttpResponse handle(const HttpRequest& request) const;
 
 private:
     RuntimeState& runtime_;
+    InferenceEngine* engine_;
 };
 
 [[nodiscard]] std::string json_escape(std::string_view input);
