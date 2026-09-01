@@ -144,7 +144,10 @@ once their cache reaches 512 tokens. The expanded path remains faster below the
 crossover, while SDPA avoids materializing 16 repeated KV heads at longer
 contexts. Set
 `QWEN38_SDPA_DECODE=0` to force the short-context path or `1` to force SDPA for
-diagnostics.
+diagnostics. At the same threshold, an MTP verifier evaluates all S query rows
+in one causal grouped-query SDPA call while retaining a sliced checkpoint after
+each row for partial acceptance and rollback. Set `QWEN38_BATCH_SDPA_VERIFY=0`
+to restore one SDPA call per verifier row.
 
 The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,

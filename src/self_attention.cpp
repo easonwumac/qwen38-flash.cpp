@@ -334,6 +334,66 @@ MlxArray SelfAttention::forward_verify(
     MlxArray value_batch = project(input, value_projection_).reshape(
         std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
 
+    const char* batch_sdpa_verify = std::getenv("QWEN38_BATCH_SDPA_VERIFY");
+    const bool batch_sdpa_enabled = batch_sdpa_verify == nullptr ||
+        std::string_view(batch_sdpa_verify) != "0";
+    if (rows > 1 && batch_sdpa_enabled && use_sdpa_decode(origin.token_count + 1)) {
+        static std::once_flag announced_batch_verify;
+        std::call_once(announced_batch_verify, [rows, origin_tokens = origin.token_count] {
+            std::clog << "qwen38: batched grouped-query SDPA verifier engaged with "
+                      << rows << " rows at " << origin_tokens
+                      << " cached attention tokens\n";
+        });
+        const std::vector<int> strides{1, 1, 1, 1};
+        MlxArray query = query_gate_batch.slice(
+            std::vector<int>{0, 0, 0, 0},
+            std::vector<int>{1, input_shape[1], heads, head_dimension},
+            strides).rms_norm(query_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray gate = query_gate_batch.slice(
+            std::vector<int>{0, 0, 0, head_dimension},
+            std::vector<int>{1, input_shape[1], heads, 2 * head_dimension},
+            strides);
+        MlxArray keys = key_batch.rms_norm(
+            key_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray values = value_batch.swapaxes(1, 2);
+        const std::size_t position = origin.position_base + origin.token_count;
+        query = apply_rope_prefill(query, position);
+        keys = apply_rope_prefill(keys, position);
+
+        MlxArray complete_keys = origin.token_count == 0
+            ? keys.share()
+            : MlxArray::concatenate(origin.keys, keys, 2);
+        MlxArray complete_values = origin.token_count == 0
+            ? values.share()
+            : MlxArray::concatenate(origin.values, values, 2);
+        checkpoints.clear();
+        checkpoints.resize(rows);
+        for (std::size_t row = 0; row < rows; ++row) {
+            const int stop = dimension(
+                origin.token_count + row + 1, "attention checkpoint length");
+            checkpoints[row].keys = complete_keys.slice(
+                std::vector<int>{0, 0, 0, 0},
+                std::vector<int>{1, kv_heads, stop, head_dimension},
+                strides);
+            checkpoints[row].values = complete_values.slice(
+                std::vector<int>{0, 0, 0, 0},
+                std::vector<int>{1, kv_heads, stop, head_dimension},
+                strides);
+            checkpoints[row].token_count = origin.token_count + row + 1;
+            checkpoints[row].position_base = origin.position_base;
+        }
+        MlxArray attended = MlxArray::scaled_dot_product_attention(
+            query,
+            complete_keys,
+            complete_values,
+            1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+            true).swapaxes(1, 2);
+        const std::vector<int> flat_shape{1, input_shape[1], heads * head_dimension};
+        MlxArray gated = MlxArray::multiply(
+            attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
+        return project(gated, output_projection_);
+    }
+
     SelfAttentionState working;
     working.token_count = origin.token_count;
     working.position_base = origin.position_base;
