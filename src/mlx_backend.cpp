@@ -555,6 +555,16 @@ void MlxArray::eval_all(const std::span<const MlxArray* const> arrays) {
     check(status, "eval_all");
 }
 
+void MlxArray::clear_cache() {
+    check(mlx_clear_cache(), "clear_cache");
+}
+
+std::size_t MlxArray::set_cache_limit(const std::size_t bytes) {
+    std::size_t previous = 0;
+    check(mlx_set_cache_limit(&previous, bytes), "set_cache_limit");
+    return previous;
+}
+
 std::vector<float> MlxArray::to_float32() const {
     if (dtype() != MLX_FLOAT32) {
         throw std::runtime_error("MLX array is not float32");
