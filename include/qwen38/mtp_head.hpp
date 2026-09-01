@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace qwen38 {
 
@@ -45,6 +46,11 @@ public:
     void consume_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
+        std::size_t query_position,
+        MtpDecodeState& state) const;
+    void consume_committed_batch(
+        std::span<const MlxArray* const> target_pre_mixer_streams,
+        std::span<const std::uint32_t> tokens,
         std::size_t query_position,
         MtpDecodeState& state) const;
 

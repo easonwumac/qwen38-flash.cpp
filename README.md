@@ -127,6 +127,11 @@ default. This preserves the retained S-row numerics while removing most
 per-layer synchronization overhead. `QWEN38_VERIFY_BARRIER_STRIDE=1` is the
 diagnostic rollback; accepted experimental values are 1 through 48.
 
+Accepted MTP rows are committed back into the drafter with one S=2..4 batched
+state pass instead of serially replaying each row. This changes proposal-state
+scheduling only; target verification remains authoritative. Set
+`QWEN38_BATCH_MTP_COMMIT=0` for the serial diagnostic rollback.
+
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
 refuse unguarded execution. The default guard refuses to start below

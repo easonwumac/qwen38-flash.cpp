@@ -15,6 +15,26 @@ int dimension(const std::size_t value, const char* name) {
     return static_cast<int>(value);
 }
 
+MlxArray concatenate_sequence(const std::span<const MlxArray* const> rows) {
+    if (rows.empty()) throw std::runtime_error("cannot concatenate an empty MTP batch");
+    MlxArray result = rows.front()->share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, *rows[row], 1);
+    }
+    return result;
+}
+
+MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() != 3 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("MTP batch row is out of range");
+    }
+    return batch.slice(
+        std::vector<int>{0, static_cast<int>(row), 0},
+        std::vector<int>{1, static_cast<int>(row + 1), shape[2]},
+        std::vector<int>{1, 1, 1});
+}
+
 MlxArray offset_norm(MlxArray raw, const std::size_t width) {
     const std::vector<float> values(width, 1.0F);
     const std::vector<int> shape{dimension(width, "norm width")};
@@ -210,6 +230,65 @@ void QwenMtpHead::consume_decode(
     MlxArray stream = forward_stream(
         target_pre_mixer_stream, next_token, query_position, state, nullptr);
     stream.eval();
+}
+
+void QwenMtpHead::consume_committed_batch(
+    const std::span<const MlxArray* const> target_pre_mixer_streams,
+    const std::span<const std::uint32_t> tokens,
+    const std::size_t query_position,
+    MtpDecodeState& state) const {
+    if (tokens.size() < 2 || tokens.size() > 4 ||
+        target_pre_mixer_streams.size() != tokens.size()) {
+        throw std::runtime_error("MTP committed batch requires 2 to 4 matching rows");
+    }
+    if (!state.position_base.has_value()) state.position_base = query_position;
+    if (query_position != *state.position_base + state.row_count) {
+        throw std::runtime_error("MTP committed batch positions must be contiguous");
+    }
+    if (state.row_count == 0) {
+        state.layer.full_attention.position_base = query_position;
+    }
+
+    std::vector<MlxArray> embeddings;
+    embeddings.reserve(tokens.size());
+    std::vector<const MlxArray*> embedding_rows;
+    embedding_rows.reserve(tokens.size());
+    for (const std::uint32_t token : tokens) {
+        embeddings.push_back(embed(token));
+        embedding_rows.push_back(&embeddings.back());
+    }
+    MlxArray embedding_batch = concatenate_sequence(embedding_rows);
+    MlxArray normalized_embedding = embedding_batch.rms_norm(embedding_norm_, epsilon_);
+    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
+
+    MlxArray hidden_batch = concatenate_sequence(target_pre_mixer_streams);
+    MlxArray normalized_hidden = hidden_batch.rms_norm(hidden_norm_, epsilon_);
+    const int rows = static_cast<int>(tokens.size());
+    const std::vector<int> grouped{
+        1, rows, dimension(stream_count_, "stream count"),
+        dimension(hidden_size_, "hidden size")};
+    MlxArray hidden_projection = project(normalized_hidden.reshape(grouped), fc_hidden_);
+    MlxArray combined = MlxArray::add(
+        hidden_projection,
+        embedding_projection.reshape(
+            std::vector<int>{1, rows, 1, dimension(hidden_size_, "hidden size")}));
+    MlxArray stream_batch = combined.reshape(
+        std::vector<int>{1, rows, dimension(hidden_size_ * stream_count_, "stream width")});
+
+    std::vector<MlxArray> streams;
+    streams.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        streams.push_back(slice_sequence_row(stream_batch, row));
+    }
+    std::vector<DecoderLayerState> checkpoints;
+    streams = layer_.forward_verify_dense_batched(
+        std::move(streams), tokens, state.layer, checkpoints);
+    std::vector<const MlxArray*> outputs;
+    outputs.reserve(streams.size());
+    for (const MlxArray& stream : streams) outputs.push_back(&stream);
+    MlxArray::eval_all(outputs);
+    state.layer = std::move(checkpoints.back());
+    state.row_count += tokens.size();
 }
 
 MtpDecodeStep QwenMtpHead::forward_decode(

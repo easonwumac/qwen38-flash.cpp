@@ -4,6 +4,7 @@
 #include "qwen38/mtp_verifier.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -74,14 +75,30 @@ MtpRoundStep run_greedy_mtp_round_reference(
     // and accepted draft rows from target-captured hidden streams.
     const auto commit_started = std::chrono::steady_clock::now();
     head_state = std::move(head_origin);
-    head.consume_decode(
-        previous_target_stream, current_token, query_position, head_state);
-    for (std::size_t index = 0; index < decision.accepted; ++index) {
+    const char* batch_commit = std::getenv("QWEN38_BATCH_MTP_COMMIT");
+    const bool batch_commit_enabled =
+        batch_commit == nullptr || std::string_view(batch_commit) != "0";
+    if (decision.accepted != 0 && batch_commit_enabled) {
+        std::vector<const MlxArray*> committed_streams{&previous_target_stream};
+        std::vector<std::uint32_t> committed_tokens{current_token};
+        committed_streams.reserve(decision.accepted + 1);
+        committed_tokens.reserve(decision.accepted + 1);
+        for (std::size_t index = 0; index < decision.accepted; ++index) {
+            committed_streams.push_back(&verification.rows[index].pre_mixer_stream);
+            committed_tokens.push_back(drafts[index]);
+        }
+        head.consume_committed_batch(
+            committed_streams, committed_tokens, query_position, head_state);
+    } else {
         head.consume_decode(
-            verification.rows[index].pre_mixer_stream,
-            drafts[index],
-            query_position + index + 1,
-            head_state);
+            previous_target_stream, current_token, query_position, head_state);
+        for (std::size_t index = 0; index < decision.accepted; ++index) {
+            head.consume_decode(
+                verification.rows[index].pre_mixer_stream,
+                drafts[index],
+                query_position + index + 1,
+                head_state);
+        }
     }
     commit_mtp_target_verification(
         std::move(verification), decision.accepted, target_state);
