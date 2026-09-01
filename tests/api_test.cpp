@@ -66,6 +66,8 @@ void run_api_tests() {
         completion.body.find("\"profitability_cache_skip\":false") != std::string::npos);
     QWEN38_CHECK(
         completion.body.find("\"profitability_cache_keep\":false") != std::string::npos);
+    QWEN38_CHECK(completion.body.find("\"activations\":0") != std::string::npos);
+    QWEN38_CHECK(completion.body.find("\"deactivations\":0") != std::string::npos);
     QWEN38_CHECK(engine.last_prompt == "hello");
     const auto chat = inference_api.handle(post(
         "/v1/chat/completions",

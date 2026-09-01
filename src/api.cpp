@@ -139,7 +139,9 @@ std::string completion_json(
         << ",\"commit_ms\":" << result.mtp_commit_ms << "}"
         << ",\"history_draft\":{\"rounds\":" << result.history_draft_rounds
         << ",\"proposed\":" << result.history_draft_proposed
-        << ",\"accepted\":" << result.history_draft_accepted << "}"
+        << ",\"accepted\":" << result.history_draft_accepted
+        << ",\"activations\":" << result.history_draft_activations
+        << ",\"deactivations\":" << result.history_draft_deactivations << "}"
         << "}}";
     return out.str();
 }

@@ -34,6 +34,8 @@ struct GenerationResult {
     std::size_t history_draft_rounds{0};
     std::size_t history_draft_proposed{0};
     std::size_t history_draft_accepted{0};
+    std::size_t history_draft_activations{0};
+    std::size_t history_draft_deactivations{0};
 };
 
 class InferenceEngine {

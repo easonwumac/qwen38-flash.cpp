@@ -4,6 +4,36 @@
 #include <array>
 
 void run_history_draft_tests() {
+    qwen38::HistoryDraftPolicy adaptive;
+    QWEN38_CHECK(!adaptive.should_try());
+    adaptive.observe_learned(2, 0);
+    QWEN38_CHECK(!adaptive.should_try());
+    adaptive.observe_learned(2, 1);
+    QWEN38_CHECK(adaptive.should_try());
+    QWEN38_CHECK(adaptive.activations() == 1);
+    for (int round = 0; round < 2; ++round) adaptive.observe_history(3, 1);
+    QWEN38_CHECK(!adaptive.should_try());
+    QWEN38_CHECK(adaptive.exhausted());
+    QWEN38_CHECK(adaptive.deactivations() == 1);
+    adaptive.observe_learned(2, 0);
+    adaptive.observe_learned(2, 0);
+    QWEN38_CHECK(!adaptive.should_try());
+    QWEN38_CHECK(adaptive.activations() == 1);
+
+    qwen38::HistoryDraftPolicy strong_learned;
+    strong_learned.observe_learned(2, 2);
+    strong_learned.observe_learned(2, 1);
+    QWEN38_CHECK(!strong_learned.should_try());
+    QWEN38_CHECK(strong_learned.activations() == 0);
+
+    qwen38::HistoryDraftPolicy forced(qwen38::HistoryDraftMode::forced);
+    QWEN38_CHECK(forced.enabled() && forced.should_try() && !forced.exhausted());
+    for (int round = 0; round < 2; ++round) forced.observe_history(3, 0);
+    QWEN38_CHECK(forced.should_try() && !forced.exhausted());
+
+    qwen38::HistoryDraftPolicy disabled(qwen38::HistoryDraftMode::disabled);
+    QWEN38_CHECK(!disabled.enabled() && !disabled.should_try() && !disabled.exhausted());
+
     qwen38::HistoryDraftCache cache(2, 4);
     const std::array<std::uint32_t, 9> history{1, 2, 3, 4, 9, 1, 2, 3, 4};
     cache.append(history);

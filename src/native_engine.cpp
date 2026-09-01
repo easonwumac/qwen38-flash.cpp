@@ -322,8 +322,13 @@ GenerationResult NativeEngine::complete_impl(
     std::vector<std::uint32_t> pending_mtp_tokens;
     std::uint32_t current = prompt_tokens.back();
     const char* history_draft_environment = std::getenv("QWEN38_HISTORY_DRAFT");
-    const bool history_draft_enabled = history_draft_environment == nullptr ||
-        std::string_view(history_draft_environment) != "0";
+    const HistoryDraftMode history_draft_mode = history_draft_environment == nullptr
+        ? HistoryDraftMode::adaptive
+        : (std::string_view(history_draft_environment) == "0"
+                  ? HistoryDraftMode::disabled
+                  : HistoryDraftMode::forced);
+    HistoryDraftPolicy history_draft_policy(history_draft_mode);
+    const bool history_draft_enabled = history_draft_policy.enabled();
     HistoryDraftCache history_draft;
     if (history_draft_enabled) history_draft.append(prompt_tokens);
     MtpProfitabilityGuard profitability_guard;
@@ -387,7 +392,7 @@ GenerationResult NativeEngine::complete_impl(
         }
 
         std::vector<std::uint32_t> history_proposal;
-        if (history_draft_enabled) {
+        if (history_draft_policy.should_try()) {
             const bool try_depth_four = use_long_history_depth_four(state.token_count);
             const std::size_t history_depth = try_depth_four ? 4 : depth_policy.depth();
             history_proposal = history_draft.propose(
@@ -426,10 +431,14 @@ GenerationResult NativeEngine::complete_impl(
             ++result.history_draft_rounds;
             result.history_draft_proposed += step.draft_tokens.size();
             result.history_draft_accepted += step.accepted;
+            history_draft_policy.observe_history(step.draft_tokens.size(), step.accepted);
         } else {
             depth_policy.observe(step.draft_tokens.size(), step.accepted);
             profitability_guard.observe(step.accepted);
+            history_draft_policy.observe_learned(step.draft_tokens.size(), step.accepted);
         }
+        result.history_draft_activations = history_draft_policy.activations();
+        result.history_draft_deactivations = history_draft_policy.deactivations();
         result.mtp_final_depth = depth_policy.depth();
         result.mtp_promotions = depth_policy.promotions();
         result.mtp_demotions = depth_policy.demotions();
@@ -451,11 +460,13 @@ GenerationResult NativeEngine::complete_impl(
         const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
         const bool economic_fallback_enabled = economic_fallback == nullptr ||
             std::string_view(economic_fallback) != "0";
+        const bool history_sources_exhausted = used_history_draft &&
+            history_draft_policy.exhausted();
         const bool should_fallback = !used_history_draft && (economic_fallback_enabled
             ? profitability_guard.should_fallback(options_.zero_accept_fallback_rounds)
             : profitability_guard.zero_accept_streak() >=
                   options_.zero_accept_fallback_rounds);
-        if (should_fallback) {
+        if (history_sources_exhausted || should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
         }

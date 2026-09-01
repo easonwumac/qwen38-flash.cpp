@@ -8,8 +8,55 @@ namespace {
 
 constexpr std::uint64_t fnv_offset = 1469598103934665603ULL;
 constexpr std::uint64_t fnv_prime = 1099511628211ULL;
+constexpr std::size_t learned_probe_rounds = 2;
+constexpr std::size_t history_probe_rounds = 2;
+
+void validate_observation(const std::size_t proposed, const std::size_t accepted) {
+    if (accepted > proposed) {
+        throw std::runtime_error("draft acceptance exceeds proposed tokens");
+    }
+}
 
 } // namespace
+
+void HistoryDraftPolicy::observe_learned(
+    const std::size_t proposed,
+    const std::size_t accepted) {
+    validate_observation(proposed, accepted);
+    if (mode_ != HistoryDraftMode::adaptive || active_ || rejected_ || proposed == 0) {
+        return;
+    }
+    ++learned_rounds_;
+    learned_proposed_ += proposed;
+    learned_accepted_ += accepted;
+    if (learned_rounds_ < learned_probe_rounds) return;
+    if (learned_accepted_ * 2 < learned_proposed_) {
+        active_ = true;
+        ++activations_;
+    }
+    learned_rounds_ = 0;
+    learned_proposed_ = 0;
+    learned_accepted_ = 0;
+}
+
+void HistoryDraftPolicy::observe_history(
+    const std::size_t proposed,
+    const std::size_t accepted) {
+    validate_observation(proposed, accepted);
+    if (mode_ != HistoryDraftMode::adaptive || !active_ || proposed == 0) return;
+    ++history_rounds_;
+    history_proposed_ += proposed;
+    history_accepted_ += accepted;
+    if (history_rounds_ < history_probe_rounds) return;
+    if (history_accepted_ * 2 < history_proposed_) {
+        active_ = false;
+        rejected_ = true;
+        ++deactivations_;
+    }
+    history_rounds_ = 0;
+    history_proposed_ = 0;
+    history_accepted_ = 0;
+}
 
 HistoryDraftCache::HistoryDraftCache(
     const std::size_t minimum_order,
