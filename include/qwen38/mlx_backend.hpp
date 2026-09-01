@@ -7,10 +7,12 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "qwen38/model_manifest.hpp"
@@ -233,6 +235,11 @@ private:
 
 class MlxSafetensors final {
 public:
+    struct NamedArray {
+        std::string name;
+        const MlxArray* array{nullptr};
+    };
+
     explicit MlxSafetensors(const std::filesystem::path& path);
     ~MlxSafetensors();
 
@@ -242,6 +249,11 @@ public:
     MlxSafetensors& operator=(MlxSafetensors&&) = delete;
 
     [[nodiscard]] MlxArray tensor(std::string_view name) const;
+    [[nodiscard]] std::optional<std::string> metadata(std::string_view name) const;
+    static void save(
+        const std::filesystem::path& path,
+        std::span<const NamedArray> arrays,
+        std::span<const std::pair<std::string, std::string>> metadata);
 
 private:
     mlx_map_string_to_array tensors_{};

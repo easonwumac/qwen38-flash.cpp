@@ -6,8 +6,11 @@
 #include "../src/gdn_metal_kernels.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -34,6 +37,28 @@ int main() {
         std::cerr << "MLX multiply mismatch\n";
         return 1;
     }
+    const std::filesystem::path safetensors_path =
+        std::filesystem::temp_directory_path() /
+        ("qwen38-mlx-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + ".safetensors");
+    const std::array<qwen38::MlxSafetensors::NamedArray, 1> saved_arrays{{
+        {.name = "left", .array = &left},
+    }};
+    const std::array<std::pair<std::string, std::string>, 1> saved_metadata{{
+        {"purpose", "roundtrip"},
+    }};
+    qwen38::MlxSafetensors::save(safetensors_path, saved_arrays, saved_metadata);
+    {
+        qwen38::MlxSafetensors saved(safetensors_path);
+        if (saved.tensor("left").to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+            saved.metadata("purpose") != std::optional<std::string>("roundtrip") ||
+            saved.metadata("missing").has_value()) {
+            std::cerr << "MLX safetensors roundtrip mismatch\n";
+            std::filesystem::remove(safetensors_path);
+            return 1;
+        }
+    }
+    std::filesystem::remove(safetensors_path);
     const std::array<int, 3> expanded_shape{1, 2, 2};
     const std::array<int, 3> repetitions{2, 1, 1};
     const auto expanded = left.reshape(expanded_shape).tile(repetitions);

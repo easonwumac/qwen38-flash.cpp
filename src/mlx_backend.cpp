@@ -970,6 +970,56 @@ MlxArray MlxSafetensors::tensor(const std::string_view name) const {
     return result;
 }
 
+std::optional<std::string> MlxSafetensors::metadata(const std::string_view name) const {
+    const char* value = nullptr;
+    const std::string key(name);
+    const int status = mlx_map_string_to_string_get(&value, metadata_, key.c_str());
+    if (status == 2) return std::nullopt;
+    check(status, "map_string_to_string_get");
+    return value == nullptr ? std::optional<std::string>{} : std::string(value);
+}
+
+void MlxSafetensors::save(
+    const std::filesystem::path& path,
+    const std::span<const NamedArray> arrays,
+    const std::span<const std::pair<std::string, std::string>> metadata) {
+    mlx_map_string_to_array tensor_map = mlx_map_string_to_array_new();
+    mlx_map_string_to_string metadata_map = mlx_map_string_to_string_new();
+    if (tensor_map.ctx == nullptr || metadata_map.ctx == nullptr) {
+        if (tensor_map.ctx != nullptr) mlx_map_string_to_array_free(tensor_map);
+        if (metadata_map.ctx != nullptr) mlx_map_string_to_string_free(metadata_map);
+        throw std::runtime_error("MLX could not allocate safetensors maps");
+    }
+    const auto cleanup = [&] {
+        mlx_map_string_to_array_free(tensor_map);
+        mlx_map_string_to_string_free(metadata_map);
+    };
+    try {
+        for (const NamedArray& named : arrays) {
+            if (named.array == nullptr) {
+                throw std::runtime_error("cannot save a null MLX array");
+            }
+            check(
+                mlx_map_string_to_array_insert(
+                    tensor_map, named.name.c_str(), named.array->get()),
+                "map_string_to_array_insert");
+        }
+        for (const auto& [key, value] : metadata) {
+            check(
+                mlx_map_string_to_string_insert(
+                    metadata_map, key.c_str(), value.c_str()),
+                "map_string_to_string_insert");
+        }
+        check(
+            mlx_save_safetensors(path.c_str(), tensor_map, metadata_map),
+            "save_safetensors");
+    } catch (...) {
+        cleanup();
+        throw;
+    }
+    cleanup();
+}
+
 MlxArray MlxTensorStore::tensor(const std::string_view name) {
     std::scoped_lock lock(mutex_);
     const auto mapping = manifest_.weight_map().find(std::string(name));
