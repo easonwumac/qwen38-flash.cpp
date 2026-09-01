@@ -32,3 +32,4 @@ void run_ngram_tests();
 void run_quantization_geometry_tests();
 void run_runtime_tests();
 void run_safetensors_tests();
+void run_tool_call_tests();

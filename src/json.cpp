@@ -1,10 +1,12 @@
 #include "qwen38/json.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <vector>
 
 namespace qwen38 {
 namespace {
@@ -264,11 +266,39 @@ const T& get_or_throw(const Json::Value& value, const std::string_view expected)
     return *result;
 }
 
+std::string quote_json_string(const std::string_view input) {
+    std::string output{"\""};
+    constexpr char hexadecimal[] = "0123456789abcdef";
+    for (const char raw : input) {
+        const auto c = static_cast<unsigned char>(raw);
+        switch (c) {
+        case '"': output += "\\\""; break;
+        case '\\': output += "\\\\"; break;
+        case '\b': output += "\\b"; break;
+        case '\f': output += "\\f"; break;
+        case '\n': output += "\\n"; break;
+        case '\r': output += "\\r"; break;
+        case '\t': output += "\\t"; break;
+        default:
+            if (c < 0x20U) {
+                output += "\\u00";
+                output += hexadecimal[c >> 4U];
+                output += hexadecimal[c & 0x0fU];
+            } else {
+                output += static_cast<char>(c);
+            }
+        }
+    }
+    output += '"';
+    return output;
+}
+
 } // namespace
 
 bool Json::is_null() const noexcept { return std::holds_alternative<std::nullptr_t>(value_); }
 bool Json::is_object() const noexcept { return std::holds_alternative<Object>(value_); }
 bool Json::is_array() const noexcept { return std::holds_alternative<Array>(value_); }
+bool Json::is_string() const noexcept { return std::holds_alternative<std::string>(value_); }
 const Json::Object& Json::as_object() const { return get_or_throw<Object>(value_, "an object"); }
 const Json::Array& Json::as_array() const { return get_or_throw<Array>(value_, "an array"); }
 const std::string& Json::as_string() const { return get_or_throw<std::string>(value_, "a string"); }
@@ -291,6 +321,48 @@ const Json* Json::find(const std::string_view key) const noexcept {
     if (object == nullptr) return nullptr;
     const auto iterator = object->find(std::string(key));
     return iterator == object->end() ? nullptr : &iterator->second;
+}
+
+std::string Json::dump() const {
+    if (is_null()) return "null";
+    if (const auto* value = std::get_if<bool>(&value_)) return *value ? "true" : "false";
+    if (const auto* value = std::get_if<std::int64_t>(&value_)) {
+        return std::to_string(*value);
+    }
+    if (const auto* value = std::get_if<double>(&value_)) {
+        char buffer[64];
+        const auto result = std::to_chars(
+            buffer, buffer + sizeof(buffer), *value, std::chars_format::general,
+            std::numeric_limits<double>::max_digits10);
+        if (result.ec != std::errc{}) throw std::runtime_error("cannot serialize JSON number");
+        return std::string(buffer, result.ptr);
+    }
+    if (const auto* value = std::get_if<std::string>(&value_)) {
+        return quote_json_string(*value);
+    }
+    if (const auto* value = std::get_if<Array>(&value_)) {
+        std::string output{"["};
+        for (std::size_t index = 0; index < value->size(); ++index) {
+            if (index != 0) output += ',';
+            output += (*value)[index].dump();
+        }
+        output += ']';
+        return output;
+    }
+    const auto& object = std::get<Object>(value_);
+    std::vector<std::string_view> keys;
+    keys.reserve(object.size());
+    for (const auto& [key, _] : object) keys.push_back(key);
+    std::sort(keys.begin(), keys.end());
+    std::string output{"{"};
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        if (index != 0) output += ',';
+        output += quote_json_string(keys[index]);
+        output += ':';
+        output += object.at(std::string(keys[index])).dump();
+    }
+    output += '}';
+    return output;
 }
 
 Json Json::parse(const std::string_view source) { return Parser(source).parse_document(); }

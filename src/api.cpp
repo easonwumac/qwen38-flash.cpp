@@ -1,7 +1,9 @@
 #include "qwen38/api.hpp"
 #include "qwen38/chat_template.hpp"
 #include "qwen38/json.hpp"
+#include "qwen38/tool_call.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cctype>
 #include <iomanip>
@@ -69,12 +71,54 @@ ChatTemplateOptions chat_template_options(const Json& body) {
         else if (effort == "low") options.reasoning_effort = ReasoningEffort::low;
         else throw std::runtime_error("reasoning_effort must be xhigh, medium, or low");
     }
+    if (const Json* tools = body.find("tools"); tools != nullptr) {
+        for (const Json& tool : tools->as_array()) {
+            if (!tool.is_object()) throw std::runtime_error("tools entries must be objects");
+            options.tools_json.push_back(tool.dump());
+        }
+    }
     return options;
+}
+
+std::string message_content(const Json& message) {
+    const Json* content = message.find("content");
+    if (content == nullptr || content->is_null()) return {};
+    return content->as_string();
+}
+
+std::vector<ChatToolCall> message_tool_calls(const Json& message) {
+    const Json* calls = message.find("tool_calls");
+    if (calls == nullptr || calls->is_null()) return {};
+    std::vector<ChatToolCall> result;
+    for (const Json& item : calls->as_array()) {
+        const Json* function = item.find("function");
+        if (function == nullptr) function = &item;
+        ChatToolCall call{.name = function->at("name").as_string()};
+        if (const Json* arguments = function->find("arguments"); arguments != nullptr &&
+            !arguments->is_null()) {
+            if (arguments->is_string() && arguments->as_string().empty()) {
+                result.push_back(std::move(call));
+                continue;
+            }
+            const Json parsed = arguments->is_string()
+                ? Json::parse(arguments->as_string())
+                : *arguments;
+            for (const auto& [name, value] : parsed.as_object()) {
+                call.arguments.push_back({
+                    .name = name,
+                    .rendered_value = value.is_string() ? value.as_string() : value.dump(),
+                });
+            }
+        }
+        result.push_back(std::move(call));
+    }
+    return result;
 }
 
 struct ChatOutput {
     std::string content;
     std::optional<std::string> reasoning_content;
+    std::vector<ParsedToolCall> tool_calls;
 };
 
 std::string trim_chat_segment(std::string_view value) {
@@ -87,42 +131,75 @@ std::string trim_chat_segment(std::string_view value) {
     return std::string(value);
 }
 
-ChatOutput split_chat_output(const std::string& text, const bool enable_thinking) {
-    if (!enable_thinking) return {.content = text, .reasoning_content = std::nullopt};
-    constexpr std::string_view close = "</think>";
-    const std::size_t separator = text.find(close);
-    if (separator == std::string::npos) {
-        return {.content = text, .reasoning_content = std::nullopt};
+ChatOutput split_chat_output(
+    const std::string& text,
+    const bool enable_thinking,
+    const std::vector<std::string>& tool_schemas) {
+    ChatOutput output{.content = text};
+    if (enable_thinking) {
+        constexpr std::string_view close = "</think>";
+        const std::size_t separator = text.find(close);
+        if (separator != std::string::npos) {
+            output.content = trim_chat_segment(
+                std::string_view(text).substr(separator + close.size()));
+            output.reasoning_content = trim_chat_segment(
+                std::string_view(text).substr(0, separator));
+        }
     }
-    return {
-        .content = trim_chat_segment(std::string_view(text).substr(separator + close.size())),
-        .reasoning_content = trim_chat_segment(
-            std::string_view(text).substr(0, separator)),
-    };
+    if (!tool_schemas.empty()) {
+        ParsedToolOutput parsed = parse_qwen_tool_output(output.content, tool_schemas);
+        output.content = std::move(parsed.content);
+        output.tool_calls = std::move(parsed.calls);
+    }
+    return output;
+}
+
+void append_tool_calls_json(
+    std::ostringstream& out,
+    const std::vector<ParsedToolCall>& calls,
+    const bool streaming) {
+    out << "\"tool_calls\":[";
+    for (std::size_t index = 0; index < calls.size(); ++index) {
+        if (index != 0) out << ',';
+        out << '{';
+        if (streaming) out << "\"index\":" << index << ',';
+        out << "\"id\":\"call_qwen38_" << index
+            << "\",\"type\":\"function\",\"function\":{\"name\":\""
+            << json_escape(calls[index].name) << "\",\"arguments\":\""
+            << json_escape(calls[index].arguments_json) << "\"}}";
+    }
+    out << ']';
 }
 
 std::string completion_json(
     const RuntimeSnapshot& snapshot,
     const GenerationResult& result,
     const bool chat,
-    const bool enable_thinking) {
+    const bool enable_thinking,
+    const std::vector<std::string>& tool_schemas) {
     std::ostringstream out;
+    std::string finish_reason = result.finish_reason;
     out << "{\"id\":\"qwen38-native\",\"object\":\""
         << (chat ? "chat.completion" : "text_completion")
         << "\",\"model\":\"" << json_escape(snapshot.model_id) << "\",\"choices\":[{";
     if (chat) {
-        const ChatOutput output = split_chat_output(result.text, enable_thinking);
+        const ChatOutput output = split_chat_output(result.text, enable_thinking, tool_schemas);
         out << "\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
             << json_escape(output.content) << '"';
         if (output.reasoning_content.has_value()) {
             out << ",\"reasoning_content\":\""
                 << json_escape(*output.reasoning_content) << '"';
         }
+        if (!output.tool_calls.empty()) {
+            out << ',';
+            append_tool_calls_json(out, output.tool_calls, false);
+            finish_reason = "tool_calls";
+        }
         out << '}';
     } else {
         out << "\"index\":0,\"text\":\"" << json_escape(result.text) << '"';
     }
-    out << ",\"finish_reason\":\"" << json_escape(result.finish_reason)
+    out << ",\"finish_reason\":\"" << json_escape(finish_reason)
         << "\"}],\"usage\":{\"prompt_tokens\":" << result.prompt_tokens
         << ",\"completion_tokens\":" << result.tokens.size()
         << ",\"total_tokens\":" << result.prompt_tokens + result.tokens.size()
@@ -199,6 +276,18 @@ std::string stream_finish_json(
             << result.cached_prompt_tokens << "}}";
     }
     out << '}';
+    return out.str();
+}
+
+std::string stream_tool_calls_json(
+    const RuntimeSnapshot& snapshot,
+    const std::vector<ParsedToolCall>& calls) {
+    std::ostringstream out;
+    out << "{\"id\":\"qwen38-native\",\"object\":\"chat.completion.chunk\",\"model\":\""
+        << json_escape(snapshot.model_id)
+        << "\",\"choices\":[{\"index\":0,\"delta\":{";
+    append_tool_calls_json(out, calls, true);
+    out << "},\"finish_reason\":null}]}";
     return out.str();
 }
 
@@ -281,10 +370,11 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                     const Json* reasoning = item.find("reasoning_content");
                     messages.push_back({
                         .role = parse_chat_role(item.at("role").as_string()),
-                        .content = item.at("content").as_string(),
+                        .content = message_content(item),
                         .reasoning_content = reasoning == nullptr
                             ? std::nullopt
                             : std::optional<std::string>(reasoning->as_string()),
+                        .tool_calls = message_tool_calls(item),
                     });
                 }
                 if (messages.empty()) throw std::runtime_error("messages must not be empty");
@@ -317,10 +407,42 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                         }
                         std::string thinking_carry;
                         bool in_reasoning = chat && template_options.enable_thinking;
+                        const bool parse_tools = chat && !template_options.tools_json.empty();
+                        std::string tool_carry;
+                        bool capturing_tool_calls = false;
+                        std::size_t captured_tool_deltas = 0;
                         const auto emit_text = [&](const std::string_view field,
                                                    const std::string_view text) {
                             if (!text.empty()) {
                                 emit_json(stream_delta_json(snapshot, chat, field, text));
+                            }
+                            return connected;
+                        };
+                        const auto emit_content = [&](const std::string_view text) {
+                            if (!parse_tools) return emit_text("content", text);
+                            tool_carry.append(text);
+                            constexpr std::string_view marker = "<tool_call>";
+                            if (capturing_tool_calls) {
+                                ++captured_tool_deltas;
+                                if (connected && captured_tool_deltas % 16 == 0) {
+                                    connected = sink(": qwen38 tool-call\n\n");
+                                }
+                                return connected;
+                            }
+                            if (const std::size_t start = tool_carry.find(marker);
+                                start != std::string::npos) {
+                                emit_text("content",
+                                    std::string_view(tool_carry).substr(0, start));
+                                tool_carry.erase(0, start);
+                                capturing_tool_calls = true;
+                                return connected;
+                            }
+                            if (tool_carry.size() >= marker.size()) {
+                                const std::size_t ready =
+                                    tool_carry.size() - (marker.size() - 1);
+                                emit_text("content",
+                                    std::string_view(tool_carry).substr(0, ready));
+                                tool_carry.erase(0, ready);
                             }
                             return connected;
                         };
@@ -331,10 +453,11 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                                 return connected;
                             }
                             if (!in_reasoning) {
-                                emit_text("content", raw_delta);
+                                emit_content(raw_delta);
                                 return connected;
                             }
                             constexpr std::string_view close = "</think>";
+                            constexpr std::string_view tool_marker = "<tool_call>";
                             thinking_carry.append(raw_delta);
                             if (const std::size_t separator = thinking_carry.find(close);
                                 separator != std::string::npos) {
@@ -346,12 +469,26 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                                     static_cast<unsigned char>(content.front()))) {
                                     content.remove_prefix(1);
                                 }
-                                emit_text("content", content);
+                                emit_content(content);
                                 thinking_carry.clear();
                                 in_reasoning = false;
-                            } else if (thinking_carry.size() >= close.size()) {
+                            } else if (parse_tools &&
+                                thinking_carry.find(tool_marker) != std::string::npos) {
+                                const std::size_t tool_separator =
+                                    thinking_carry.find(tool_marker);
+                                emit_text("reasoning_content",
+                                    std::string_view(thinking_carry).substr(0, tool_separator));
+                                std::string calls = thinking_carry.substr(tool_separator);
+                                thinking_carry.clear();
+                                in_reasoning = false;
+                                emit_content(calls);
+                            } else {
+                                const std::size_t holdback = parse_tools
+                                    ? std::max(close.size(), tool_marker.size()) - 1
+                                    : close.size() - 1;
+                                if (thinking_carry.size() <= holdback) return connected;
                                 const std::size_t ready =
-                                    thinking_carry.size() - (close.size() - 1);
+                                    thinking_carry.size() - holdback;
                                 emit_text("reasoning_content",
                                     std::string_view(thinking_carry).substr(0, ready));
                                 thinking_carry.erase(0, ready);
@@ -363,8 +500,24 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                             GenerationResult result = engine_->complete_stream(
                                 prompt, requested_tokens, on_delta);
                             if (!thinking_carry.empty()) {
-                                emit_text(in_reasoning ? "reasoning_content" : "content",
-                                    thinking_carry);
+                                if (in_reasoning) emit_text("reasoning_content", thinking_carry);
+                                else emit_content(thinking_carry);
+                            }
+                            if (parse_tools && !tool_carry.empty()) {
+                                if (capturing_tool_calls) {
+                                    ParsedToolOutput parsed =
+                                        parse_qwen_tool_output(
+                                            tool_carry, template_options.tools_json);
+                                    if (parsed.calls.empty()) {
+                                        emit_text("content", parsed.content);
+                                    } else {
+                                        emit_text("content", parsed.content);
+                                        emit_json(stream_tool_calls_json(snapshot, parsed.calls));
+                                        result.finish_reason = "tool_calls";
+                                    }
+                                } else {
+                                    emit_text("content", tool_carry);
+                                }
                             }
                             runtime_.request_finished(
                                 result.prompt_tokens, result.tokens.size(),
@@ -386,7 +539,8 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                 GenerationResult result = engine_->complete(prompt, requested_tokens);
                 runtime_.request_finished(result.prompt_tokens, result.tokens.size());
                 return {.body = completion_json(
-                    snapshot, result, chat, template_options.enable_thinking)};
+                    snapshot, result, chat, template_options.enable_thinking,
+                    template_options.tools_json)};
             } catch (...) {
                 runtime_.request_finished(0, 0);
                 throw;

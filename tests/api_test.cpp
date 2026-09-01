@@ -99,6 +99,32 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"max_completion_tokens":2})"));
     QWEN38_CHECK(chat.status == 200);
     QWEN38_CHECK(engine.last_prompt.find("<|im_start|>user") != std::string::npos);
+    const auto tool_followup = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"tools":[{"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"messages":[{"role":"user","content":"read it"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/a\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"done"}]})"));
+    QWEN38_CHECK(tool_followup.status == 200);
+    QWEN38_CHECK(engine.last_prompt.find("# Tools\n\nYou have access") !=
+        std::string::npos);
+    QWEN38_CHECK(engine.last_prompt.find(
+        "<function=read>\n<parameter=path>\n/tmp/a\n</parameter>") !=
+        std::string::npos);
+    QWEN38_CHECK(engine.last_prompt.find(
+        "<|im_start|>user\n<tool_response>\ndone\n</tool_response><|im_end|>") !=
+        std::string::npos);
+    engine.response_text =
+        "<tool_call>\n<function=read>\n<parameter=path>\n/tmp/b\n</parameter>\n"
+        "</function>\n</tool_call>";
+    const auto tool_call_response = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"read b"}]})"));
+    QWEN38_CHECK(tool_call_response.status == 200);
+    QWEN38_CHECK(tool_call_response.body.find("\"finish_reason\":\"tool_calls\"") !=
+        std::string::npos);
+    QWEN38_CHECK(tool_call_response.body.find("\"content\":\"\"") !=
+        std::string::npos);
+    QWEN38_CHECK(tool_call_response.body.find(
+        "\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/b\\\"}\"") !=
+        std::string::npos);
     engine.response_text = "brief reasoning</think>\n\nfinal answer";
     const auto reasoning_chat = inference_api.handle(post(
         "/v1/chat/completions",
@@ -158,6 +184,27 @@ void run_api_tests() {
         std::string::npos);
     QWEN38_CHECK(chat_stream_wire.ends_with("data: [DONE]\n\n"));
 
+    engine.response_text =
+        "<tool_call>\n<function=read>\n<parameter=path>\n/tmp/c\n</parameter>\n"
+        "</function>\n</tool_call>";
+    const auto tool_stream = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"stream":true,"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"read c"}]})"));
+    std::string tool_stream_wire;
+    tool_stream.body_stream([&](const std::string_view fragment) {
+        tool_stream_wire.append(fragment);
+        return true;
+    });
+    QWEN38_CHECK(tool_stream_wire.find("\"tool_calls\":[{\"index\":0") !=
+        std::string::npos);
+    QWEN38_CHECK(tool_stream_wire.find(
+        "\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/c\\\"}\"") !=
+        std::string::npos);
+    QWEN38_CHECK(tool_stream_wire.find("\"finish_reason\":\"tool_calls\"") !=
+        std::string::npos);
+    QWEN38_CHECK(tool_stream_wire.find("<tool_call>") == std::string::npos);
+    QWEN38_CHECK(tool_stream_wire.ends_with("data: [DONE]\n\n"));
+
     engine.response_text = "cancel me";
     const auto disconnected_stream = inference_api.handle(post(
         "/v1/completions", R"({"prompt":"x","stream":true})"));
@@ -171,7 +218,7 @@ void run_api_tests() {
         [](const std::string_view) { return false; });
     QWEN38_CHECK(engine.stream_calls == stream_calls_before_early_disconnect);
     QWEN38_CHECK(runtime.snapshot().requests_cancelled == 2);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 18);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 24);
     QWEN38_CHECK(inference_api.handle(get("/v1/status")).body.find(
         "\"cancelled\":2") != std::string::npos);
     QWEN38_CHECK(inference_api.handle(get("/metrics")).body.find(

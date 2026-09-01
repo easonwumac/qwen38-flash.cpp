@@ -15,6 +15,9 @@ void run_json_tests() {
     QWEN38_CHECK(value.at("array").as_array().at(1).as_string() == "中文");
     QWEN38_CHECK(value.at("array").as_array().at(2).as_string() == "🚀");
     QWEN38_CHECK(value.find("missing") == nullptr);
+    QWEN38_CHECK(value.dump() ==
+        R"({"array":[1,"中文","🚀"],"float":1.25,"integer":42,"name":"Qwen\nFlash","none":null,"ok":true})");
+    QWEN38_CHECK(qwen38::Json::parse(value.dump()).at("integer").as_integer() == 42);
 
     bool rejected_duplicate = false;
     try {

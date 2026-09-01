@@ -29,6 +29,7 @@ add_library(qwen38_core
     src/quantization_geometry.cpp
     src/runtime.cpp
     src/safetensors.cpp
+    src/tool_call.cpp
 )
 target_include_directories(qwen38_core PUBLIC include)
 target_compile_features(qwen38_core PUBLIC cxx_std_20)
@@ -218,6 +219,7 @@ if(QWEN38_BUILD_TESTS)
         tests/runtime_test.cpp
         tests/safetensors_test.cpp
         tests/test_main.cpp
+        tests/tool_call_test.cpp
     )
     target_link_libraries(qwen38-tests PRIVATE qwen38_core)
     add_test(NAME qwen38-tests COMMAND qwen38-tests)

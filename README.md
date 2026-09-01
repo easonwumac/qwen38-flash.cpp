@@ -79,8 +79,10 @@ emoji, CRLF, combining marks, and chat control tokens.
 
 The core also implements the checkpoint's text chat-template behavior for system,
 user, and assistant turns, including default/low/medium reasoning controls,
-thinking preservation, and generation prompts. Tool and multimodal content remain
-explicitly unsupported until their exact template branches land.
+thinking preservation, generation prompts, OpenAI function declarations,
+assistant `tool_calls`, and grouped tool-result turns. Canonical Qwen3.8 XML is
+converted back to OpenAI tool-call objects for streaming and non-streaming
+responses without exposing the XML. Multimodal content remains unsupported.
 
 With both MLX and tokenizer options enabled, run the native inference server:
 

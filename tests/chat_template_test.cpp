@@ -41,6 +41,32 @@ void run_chat_template_tests() {
     QWEN38_CHECK(qwen38::render_chat_prompt({{qwen38::ChatRole::user, "Hi", {}}}, medium) ==
         "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n");
 
+    qwen38::ChatTemplateOptions tools;
+    tools.reasoning_effort = qwen38::ReasoningEffort::medium;
+    tools.tools_json = {
+        R"({"function":{"description":"Read a file","name":"read","parameters":{"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"}},"type":"function"})",
+    };
+    const std::string tool_prompt = qwen38::render_chat_prompt({
+        {qwen38::ChatRole::system, "Use the workspace.", {}, {}},
+        {qwen38::ChatRole::user, "Inspect it", {}, {}},
+        {qwen38::ChatRole::assistant, "", {}, {{"read", {{"path", "/tmp/a"}}}}},
+        {qwen38::ChatRole::tool, "first result", {}, {}},
+        {qwen38::ChatRole::tool, "second result", {}, {}},
+    }, tools);
+    QWEN38_CHECK(tool_prompt.starts_with(
+        "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n"
+        "<tools>\n{\"function\":"));
+    QWEN38_CHECK(tool_prompt.find(
+        "</IMPORTANT>\n\nUse the workspace.<|im_end|>\n") != std::string::npos);
+    QWEN38_CHECK(tool_prompt.find(
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n"
+        "<function=read>\n<parameter=path>\n/tmp/a\n</parameter>\n"
+        "</function>\n</tool_call><|im_end|>\n") != std::string::npos);
+    QWEN38_CHECK(tool_prompt.find(
+        "<|im_start|>user\n<tool_response>\nfirst result\n</tool_response>\n"
+        "<tool_response>\nsecond result\n</tool_response><|im_end|>\n") != std::string::npos);
+    QWEN38_CHECK(tool_prompt.ends_with("<|im_start|>assistant\n<think>\n"));
+
     bool rejected = false;
     try {
         static_cast<void>(qwen38::render_chat_prompt({

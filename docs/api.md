@@ -27,6 +27,11 @@ requests accept a non-empty OpenAI-style `messages` array and either
 `max_completion_tokens` or `max_tokens`. The current engine is greedy-only;
 `enable_thinking` and the mlx-serve-compatible alias `thinking` select the Qwen
 thinking template; when both are present they must agree.
+OpenAI-style `tools`, assistant `tool_calls`, and `role: "tool"` results follow
+the checkpoint's native Qwen3.8 XML template. Responses translate valid calls
+back to OpenAI `tool_calls` with `finish_reason: "tool_calls"`; parameter values
+use the declared JSON schema to preserve string IDs and paths. Consecutive tool
+results are grouped into the single user turn expected by the model.
 `stream: true` returns live HTTP/1.1 chunked SSE for both completion routes.
 Confirmed target-token text is emitted from the decode path, the final event
 contains `finish_reason`, and the stream terminates with `data: [DONE]`.

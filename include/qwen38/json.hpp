@@ -20,6 +20,7 @@ public:
     [[nodiscard]] bool is_null() const noexcept;
     [[nodiscard]] bool is_object() const noexcept;
     [[nodiscard]] bool is_array() const noexcept;
+    [[nodiscard]] bool is_string() const noexcept;
     [[nodiscard]] const Object& as_object() const;
     [[nodiscard]] const Array& as_array() const;
     [[nodiscard]] const std::string& as_string() const;
@@ -28,6 +29,7 @@ public:
     [[nodiscard]] bool as_boolean() const;
     [[nodiscard]] const Json& at(std::string_view key) const;
     [[nodiscard]] const Json* find(std::string_view key) const noexcept;
+    [[nodiscard]] std::string dump() const;
 
     [[nodiscard]] static Json parse(std::string_view source);
 
