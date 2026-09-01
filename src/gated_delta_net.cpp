@@ -22,6 +22,28 @@ MlxArray scalar(const float value, const mlx_dtype dtype) {
     return MlxArray::from_float32(values, shape).astype(dtype);
 }
 
+MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() < 2 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("GatedDeltaNet verifier row is out of range");
+    }
+    std::vector<int> start(shape.size(), 0);
+    std::vector<int> stop = shape;
+    std::vector<int> strides(shape.size(), 1);
+    start[1] = static_cast<int>(row);
+    stop[1] = static_cast<int>(row + 1);
+    return batch.slice(start, stop, strides);
+}
+
+MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
+    if (rows.empty()) throw std::runtime_error("GatedDeltaNet verifier has no outputs");
+    MlxArray result = rows.front().share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, rows[row], 1);
+    }
+    return result;
+}
+
 } // namespace
 
 GatedDeltaNet::GatedDeltaNet(
@@ -178,6 +200,117 @@ MlxArray GatedDeltaNet::forward_decode(
     MlxArray gated = MlxArray::multiply(normalized, gate);
     const std::vector<int> flat_shape{1, 1, value_width};
     return project(gated.reshape(flat_shape), output_projection_);
+}
+
+MlxArray GatedDeltaNet::forward_verify(
+    const MlxArray& input,
+    const GatedDeltaNetState& origin,
+    std::vector<GatedDeltaNetState>& checkpoints) const {
+    const std::vector<int> input_shape = input.shape();
+    if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1 ||
+        input_shape[1] > 5) {
+        throw std::runtime_error("GatedDeltaNet verifier requires shape [1,S,hidden], S=1..5");
+    }
+    const std::size_t rows = static_cast<std::size_t>(input_shape[1]);
+    const int key_heads = dimension(key_head_count_, "key_head_count");
+    const int value_heads = dimension(value_head_count_, "value_head_count");
+    const int key_dimension = dimension(key_head_dimension_, "key_head_dimension");
+    const int value_dimension = dimension(value_head_dimension_, "value_head_dimension");
+    const int key_width = key_heads * key_dimension;
+    const int value_width = value_heads * value_dimension;
+    const int convolution_width = 2 * key_width + value_width;
+
+    MlxArray qkv = project(input, qkv_projection_);
+    MlxArray convolution_state;
+    MlxArray recurrent;
+    if (origin.initialized) {
+        convolution_state = origin.convolution.share();
+        recurrent = origin.recurrent.share();
+    } else {
+        convolution_state = MlxArray::zeros(
+            std::vector<int>{1, 3, convolution_width}, qkv.dtype());
+        recurrent = MlxArray::zeros(
+            std::vector<int>{1, value_heads, value_dimension, key_dimension}, qkv.dtype());
+    }
+    MlxArray convolution_input = MlxArray::concatenate(convolution_state, qkv, 1);
+    MlxArray convolved = MlxArray::conv1d(
+        convolution_input, convolution_weight_, 1, 0, 1, convolution_width).silu();
+
+    const std::vector<int> strides{1, 1, 1};
+    MlxArray query = convolved.slice(
+        std::vector<int>{0, 0, 0},
+        std::vector<int>{1, input_shape[1], key_width},
+        strides).reshape(std::vector<int>{1, input_shape[1], key_heads, key_dimension});
+    MlxArray key = convolved.slice(
+        std::vector<int>{0, 0, key_width},
+        std::vector<int>{1, input_shape[1], 2 * key_width},
+        strides).reshape(std::vector<int>{1, input_shape[1], key_heads, key_dimension});
+    MlxArray value = convolved.slice(
+        std::vector<int>{0, 0, 2 * key_width},
+        std::vector<int>{1, input_shape[1], convolution_width},
+        strides).reshape(std::vector<int>{1, input_shape[1], value_heads, value_dimension});
+    const std::vector<float> ones_data(key_head_dimension_, 1.0F);
+    MlxArray ones = MlxArray::from_float32(
+        ones_data, std::vector<int>{key_dimension}).astype(query.dtype());
+    query = query.rms_norm(ones, 1.0e-6F);
+    key = key.rms_norm(ones, 1.0e-6F);
+    query = MlxArray::multiply(
+        query, scalar(1.0F / static_cast<float>(key_head_dimension_), query.dtype()));
+    key = MlxArray::multiply(
+        key,
+        scalar(1.0F / std::sqrt(static_cast<float>(key_head_dimension_)), key.dtype()));
+    const int repetition = value_heads / key_heads;
+    query = query.repeat_axis(repetition, 2);
+    key = key.repeat_axis(repetition, 2);
+
+    MlxArray beta = project(input, beta_projection_).sigmoid();
+    MlxArray decay_input = MlxArray::add(project(input, decay_projection_), decay_bias_);
+    MlxArray softplus = decay_input.astype(MLX_FLOAT32).exp().log1p();
+    MlxArray decay_rate = decay_log_.astype(MLX_FLOAT32).exp();
+    MlxArray decay = MlxArray::multiply(decay_rate, softplus).negative().exp().astype(qkv.dtype());
+    MlxArray z = project(input, z_projection_).reshape(
+        std::vector<int>{1, input_shape[1], value_heads, value_dimension});
+
+    checkpoints.clear();
+    checkpoints.resize(rows);
+    std::vector<MlxArray> gated_rows;
+    gated_rows.reserve(rows);
+    for (std::size_t row = 0; row < rows; ++row) {
+        MlxArray query_row = slice_sequence_row(query, row).reshape(
+            std::vector<int>{1, value_heads, 1, key_dimension});
+        MlxArray key_row = slice_sequence_row(key, row).reshape(
+            std::vector<int>{1, value_heads, 1, key_dimension});
+        MlxArray value_row = slice_sequence_row(value, row).reshape(
+            std::vector<int>{1, value_heads, value_dimension});
+        MlxArray beta_row = slice_sequence_row(beta, row).reshape(
+            std::vector<int>{1, value_heads, 1});
+        MlxArray decay_row = slice_sequence_row(decay, row).reshape(
+            std::vector<int>{1, value_heads, 1, 1});
+        recurrent = MlxArray::multiply(recurrent, decay_row);
+        MlxArray recalled = MlxArray::multiply(recurrent, key_row).sum_axis(3);
+        MlxArray delta = MlxArray::multiply(
+            MlxArray::subtract(value_row, recalled), beta_row);
+        MlxArray update = MlxArray::multiply(
+            delta.reshape(std::vector<int>{1, value_heads, value_dimension, 1}), key_row);
+        recurrent = MlxArray::add(recurrent, update);
+        MlxArray recurrent_output = MlxArray::multiply(recurrent, query_row).sum_axis(3).reshape(
+            std::vector<int>{1, 1, value_heads, value_dimension});
+        MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
+        MlxArray z_row = slice_sequence_row(z, row).reshape(
+            std::vector<int>{1, 1, value_heads, value_dimension});
+        MlxArray gate = output_gate_type_ == "sigmoid" ? z_row.sigmoid() : z_row.silu();
+        gated_rows.push_back(MlxArray::multiply(normalized, gate).reshape(
+            std::vector<int>{1, 1, value_width}));
+
+        const int begin = static_cast<int>(row + 1);
+        checkpoints[row].convolution = convolution_input.slice(
+            std::vector<int>{0, begin, 0},
+            std::vector<int>{1, begin + 3, convolution_width},
+            strides);
+        checkpoints[row].recurrent = recurrent.share();
+        checkpoints[row].initialized = true;
+    }
+    return project(concatenate_sequence_rows(gated_rows), output_projection_);
 }
 
 } // namespace qwen38

@@ -3,6 +3,7 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cstddef>
+#include <vector>
 #include <string>
 #include <string_view>
 
@@ -27,6 +28,10 @@ public:
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& input,
         GatedDeltaNetState& state) const;
+    [[nodiscard]] MlxArray forward_verify(
+        const MlxArray& input,
+        const GatedDeltaNetState& origin,
+        std::vector<GatedDeltaNetState>& checkpoints) const;
 
 private:
     struct QuantizedProjection {

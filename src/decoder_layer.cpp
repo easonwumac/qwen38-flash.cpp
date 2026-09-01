@@ -158,14 +158,21 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
     HyperConnectionRead attention = attention_hyper_connection_.read(attention_streams);
     std::vector<MlxArray> attention_outputs;
     attention_outputs.reserve(streams.size());
-    for (std::size_t row = 0; row < streams.size(); ++row) {
-        MlxArray mixed = slice_row(attention.mixed, row);
-        attention_outputs.push_back(linear_attention_ != nullptr
-            ? linear_attention_->forward_decode(mixed, working.linear_attention)
-            : full_attention_->forward_decode(mixed, working.full_attention));
-        DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
-        checkpoints[row].linear_attention = std::move(snapshot.linear_attention);
-        checkpoints[row].full_attention = std::move(snapshot.full_attention);
+    if (linear_attention_ != nullptr) {
+        std::vector<GatedDeltaNetState> linear_checkpoints;
+        MlxArray outputs = linear_attention_->forward_verify(
+            attention.mixed, origin.linear_attention, linear_checkpoints);
+        for (std::size_t row = 0; row < streams.size(); ++row) {
+            attention_outputs.push_back(slice_row(outputs, row));
+            checkpoints[row].linear_attention = std::move(linear_checkpoints[row]);
+        }
+    } else {
+        for (std::size_t row = 0; row < streams.size(); ++row) {
+            attention_outputs.push_back(full_attention_->forward_decode(
+                slice_row(attention.mixed, row), working.full_attention));
+            DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
+            checkpoints[row].full_attention = std::move(snapshot.full_attention);
+        }
     }
     MlxArray post_attention = attention_hyper_connection_.write(
         attention_streams, concatenate_rows(attention_outputs), attention.injection);
