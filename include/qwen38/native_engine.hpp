@@ -49,6 +49,8 @@ private:
         ModelDecodeState target_state;
         MtpDecodeState mtp_state;
         std::optional<MlxArray> previous_target_stream;
+        std::vector<MlxArray> pending_mtp_streams;
+        std::vector<std::uint32_t> pending_mtp_tokens;
         std::optional<bool> mtp_profitable;
         std::optional<std::uint32_t> mtp_profitability_current_token;
     };
@@ -60,6 +62,7 @@ private:
     std::unique_ptr<QwenMtpHead> mtp_head_;
     std::unique_ptr<PrefixCacheEntry> prefix_cache_;
     std::size_t mtp_depth_{0};
+    std::uint32_t chat_end_token_{0};
     std::mutex inference_mutex_;
 };
 

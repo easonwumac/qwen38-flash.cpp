@@ -99,7 +99,10 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
 the fused Q4 MoE/device router, compiled linear layers, fused HC/GDN paths,
 selected-expert decode softmax, grouped SDPA prefill, the `12:28` resident
 expert tier, chunk 512 for short prompts, and the bounded tiered long-prompt
-policy. Existing environment variables and an explicit `--prefill-chunk`
+policy. It also extends a successful prefix-cache entry through generated
+assistant tokens, including lazily batched MTP-state catch-up after a fallback.
+Set `QWEN38_EXTEND_PREFIX_CACHE=0` for the prompt-only cache. Existing
+environment variables and an explicit `--prefill-chunk`
 override the preset. It normally settles around 35--37 GiB on the validated
 64 GiB M5 Pro and should be launched through the memory guard. `--profile safe`
 is the default conservative graph with chunk 64.
@@ -127,6 +130,18 @@ tokens. The target verifier remains authoritative, but the matching rounds pay
 no learned-drafter cost. Set `QWEN38_HISTORY_DRAFT=0` to disable this hybrid
 path. The cache stores token IDs and suffix indices only, so its memory is tiny
 relative to model and KV residency even at long context.
+
+Extended cache hits preserve the continuous decode state instead of rebuilding
+the old assistant response through wide prefill. This is token-exact when those
+numerical paths agree; otherwise a later greedy trajectory may differ while the
+target model remains authoritative. In the retained code/creative/JSON chat
+cohort, all responses remained coherent and prompt time improved by about
+1.6--3.1x at a 34.7 GiB peak. The `safe` profile does not enable extension.
+
+Thinking chat responses stop cleanly at either Qwen EOS marker. When a generated
+`</think>` delimiter is present, `/v1/chat/completions` returns the answer in
+`content` and the preceding trace in `reasoning_content`; clients should send
+both fields back on subsequent assistant messages to reproduce the chat prefix.
 The reproduced Q4/g64 L47 sidecar is the recommended production companion. A
 same-target B31 run found the retained Q8 sidecar slower on code, creative, and
 JSON prompts because its higher per-round cost did not buy enough acceptance.

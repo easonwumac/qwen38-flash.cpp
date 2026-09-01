@@ -23,6 +23,13 @@ Completion requests accept a string `prompt` and `max_tokens` from 1 through
 object with prompt time, generation time, measured generation tok/s, and an
 `mtp` object containing round, proposal, acceptance, and fallback counts.
 
+Thinking responses expose the text before `</think>` as `reasoning_content` and
+the final answer as `content`. Send both fields back on assistant messages in a
+later request so the native Qwen chat template can reproduce the prior turn.
+Both configured Qwen EOS IDs terminate generation and are omitted from response
+content. The `speed` profile extends its one-entry prefix cache through generated
+assistant tokens; `QWEN38_EXTEND_PREFIX_CACHE=0` restores prompt-only caching.
+
 Errors use an OpenAI-style envelope:
 
 ```json

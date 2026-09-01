@@ -3,6 +3,7 @@
 #include "qwen38/json.hpp"
 
 #include <cstddef>
+#include <cctype>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -53,17 +54,53 @@ ChatTemplateOptions chat_template_options(const Json& body) {
     return options;
 }
 
+struct ChatOutput {
+    std::string content;
+    std::optional<std::string> reasoning_content;
+};
+
+std::string trim_chat_segment(std::string_view value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.remove_suffix(1);
+    }
+    return std::string(value);
+}
+
+ChatOutput split_chat_output(const std::string& text, const bool enable_thinking) {
+    if (!enable_thinking) return {.content = text, .reasoning_content = std::nullopt};
+    constexpr std::string_view close = "</think>";
+    const std::size_t separator = text.find(close);
+    if (separator == std::string::npos) {
+        return {.content = text, .reasoning_content = std::nullopt};
+    }
+    return {
+        .content = trim_chat_segment(std::string_view(text).substr(separator + close.size())),
+        .reasoning_content = trim_chat_segment(
+            std::string_view(text).substr(0, separator)),
+    };
+}
+
 std::string completion_json(
     const RuntimeSnapshot& snapshot,
     const GenerationResult& result,
-    const bool chat) {
+    const bool chat,
+    const bool enable_thinking) {
     std::ostringstream out;
     out << "{\"id\":\"qwen38-native\",\"object\":\""
         << (chat ? "chat.completion" : "text_completion")
         << "\",\"model\":\"" << json_escape(snapshot.model_id) << "\",\"choices\":[{";
     if (chat) {
+        const ChatOutput output = split_chat_output(result.text, enable_thinking);
         out << "\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
-            << json_escape(result.text) << "\"}";
+            << json_escape(output.content) << '"';
+        if (output.reasoning_content.has_value()) {
+            out << ",\"reasoning_content\":\""
+                << json_escape(*output.reasoning_content) << '"';
+        }
+        out << '}';
     } else {
         out << "\"index\":0,\"text\":\"" << json_escape(result.text) << '"';
     }
@@ -160,18 +197,23 @@ HttpResponse Api::handle(const HttpRequest& request) const {
             const Json body = Json::parse(request.body);
             reject_streaming(body);
             const bool chat = request.target == "/v1/chat/completions";
+            ChatTemplateOptions template_options;
             std::string prompt;
             if (chat) {
+                template_options = chat_template_options(body);
                 std::vector<ChatMessage> messages;
                 for (const Json& item : body.at("messages").as_array()) {
+                    const Json* reasoning = item.find("reasoning_content");
                     messages.push_back({
                         .role = parse_chat_role(item.at("role").as_string()),
                         .content = item.at("content").as_string(),
-                        .reasoning_content = std::nullopt,
+                        .reasoning_content = reasoning == nullptr
+                            ? std::nullopt
+                            : std::optional<std::string>(reasoning->as_string()),
                     });
                 }
                 if (messages.empty()) throw std::runtime_error("messages must not be empty");
-                prompt = render_chat_prompt(messages, chat_template_options(body));
+                prompt = render_chat_prompt(messages, template_options);
             } else {
                 prompt = body.at("prompt").as_string();
             }
@@ -179,7 +221,8 @@ HttpResponse Api::handle(const HttpRequest& request) const {
             try {
                 GenerationResult result = engine_->complete(prompt, max_tokens(body));
                 runtime_.request_finished(result.prompt_tokens, result.tokens.size());
-                return {.body = completion_json(snapshot, result, chat)};
+                return {.body = completion_json(
+                    snapshot, result, chat, template_options.enable_thinking)};
             } catch (...) {
                 runtime_.request_finished(0, 0);
                 throw;

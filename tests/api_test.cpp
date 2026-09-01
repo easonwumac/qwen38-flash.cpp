@@ -15,7 +15,7 @@ public:
     qwen38::GenerationResult complete(std::string_view prompt, std::size_t) override {
         last_prompt = std::string(prompt);
         return {
-            .text = "answer",
+            .text = response_text,
             .tokens = {1, 2},
             .prompt_tokens = 3,
             .cached_prompt_tokens = 2,
@@ -26,6 +26,7 @@ public:
     }
     void clear_cache() override { cleared = true; }
     std::string last_prompt;
+    std::string response_text{"answer"};
     bool cleared{false};
 };
 
@@ -69,6 +70,17 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"max_completion_tokens":2})"));
     QWEN38_CHECK(chat.status == 200);
     QWEN38_CHECK(engine.last_prompt.find("<|im_start|>user") != std::string::npos);
+    engine.response_text = "brief reasoning</think>\n\nfinal answer";
+    const auto reasoning_chat = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"assistant","content":"prior","reasoning_content":"prior thought"},{"role":"user","content":"next"}]})"));
+    QWEN38_CHECK(reasoning_chat.status == 200);
+    QWEN38_CHECK(reasoning_chat.body.find("\"content\":\"final answer\"") != std::string::npos);
+    QWEN38_CHECK(reasoning_chat.body.find(
+        "\"reasoning_content\":\"brief reasoning\"") != std::string::npos);
+    QWEN38_CHECK(engine.last_prompt.find(
+        "<think>\nprior thought\n</think>\n\nprior") != std::string::npos);
+    engine.response_text = "answer";
     const auto no_think = inference_api.handle(post(
         "/v1/chat/completions",
         R"({"messages":[{"role":"user","content":"hello"}],"enable_thinking":false})"));
@@ -76,7 +88,7 @@ void run_api_tests() {
     QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
     QWEN38_CHECK(inference_api.handle(post("/admin/cache/clear", "{}")).status == 200);
     QWEN38_CHECK(engine.cleared);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 6);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 8);
     QWEN38_CHECK(inference_api.handle(post(
         "/v1/completions", R"({"prompt":"x","stream":true})")).status == 400);
 

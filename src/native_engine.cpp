@@ -60,6 +60,50 @@ bool is_prefix(
         std::equal(prefix.begin(), prefix.end(), tokens.begin());
 }
 
+bool mtp_state_matches_target(
+    const MtpDecodeState& mtp_state,
+    const std::size_t target_token_count) {
+    return mtp_state.position_base.has_value() &&
+        *mtp_state.position_base <= target_token_count &&
+        mtp_state.row_count == target_token_count - *mtp_state.position_base;
+}
+
+void consume_pending_mtp_rows(
+    const QwenMtpHead& head,
+    const std::vector<MlxArray>& streams,
+    const std::vector<std::uint32_t>& tokens,
+    MtpDecodeState& state) {
+    if (streams.size() != tokens.size()) {
+        throw std::runtime_error("cached MTP rows must have matching streams and tokens");
+    }
+    if (!tokens.empty() && !state.position_base.has_value()) {
+        throw std::runtime_error("cached MTP rows require an initialized position base");
+    }
+    std::size_t offset = 0;
+    while (offset < tokens.size()) {
+        const std::size_t remaining = tokens.size() - offset;
+        if (remaining == 1) {
+            const std::size_t position = *state.position_base + state.row_count;
+            head.consume_decode(streams[offset], tokens[offset], position, state);
+            ++offset;
+            continue;
+        }
+        const std::size_t count = std::min<std::size_t>(remaining, 5);
+        std::vector<const MlxArray*> rows;
+        rows.reserve(count);
+        for (std::size_t row = 0; row < count; ++row) {
+            rows.push_back(&streams[offset + row]);
+        }
+        const std::size_t position = *state.position_base + state.row_count;
+        head.consume_committed_batch(
+            rows,
+            std::span<const std::uint32_t>(tokens.data() + offset, count),
+            position,
+            state);
+        offset += count;
+    }
+}
+
 bool use_long_history_depth_four(const std::size_t token_count) {
     if (token_count < 512) return false;
     const char* enabled = std::getenv("QWEN38_LONG_HISTORY_DEPTH4");
@@ -80,6 +124,11 @@ NativeEngine::NativeEngine(
       tokenizer_(Tokenizer::load(model_directory)),
       model_(tensors_),
       mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)) {
+    const std::vector<std::uint32_t> chat_end = tokenizer_.encode("<|im_end|>");
+    if (chat_end.size() != 1) {
+        throw std::runtime_error("chat end marker must encode to one token");
+    }
+    chat_end_token_ = chat_end.front();
     if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 512) {
         throw std::runtime_error("prefill chunk rows must be between 1 and 512");
     }
@@ -123,12 +172,18 @@ GenerationResult NativeEngine::complete(
         options_.prefill_chunk_rows > 256 && prefill_rows > 512
         ? (prefill_rows <= 6144 ? 384 : (prefill_rows <= 8192 ? 256 : 128))
         : options_.prefill_chunk_rows;
+    const auto prompt_started = std::chrono::steady_clock::now();
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,
             std::span<const std::uint32_t>(prompt_tokens.data(), prefill_rows))) {
         state = model_.snapshot_state(prefix_cache_->target_state);
         if (mtp_head_ != nullptr) {
             mtp_state = mtp_head_->snapshot_state(prefix_cache_->mtp_state);
+            consume_pending_mtp_rows(
+                *mtp_head_,
+                prefix_cache_->pending_mtp_streams,
+                prefix_cache_->pending_mtp_tokens,
+                mtp_state);
         }
         if (prefix_cache_->previous_target_stream.has_value()) {
             previous_target_stream = prefix_cache_->previous_target_stream->share();
@@ -139,7 +194,6 @@ GenerationResult NativeEngine::complete(
             cached_mtp_profitability = prefix_cache_->mtp_profitable;
         }
     }
-    const auto prompt_started = std::chrono::steady_clock::now();
     for (std::size_t offset = prefill_offset; offset < prefill_rows;
          offset += request_prefill_chunk) {
         const std::size_t count = std::min(
@@ -177,11 +231,19 @@ GenerationResult NativeEngine::complete(
             .previous_target_stream = previous_target_stream.has_value()
                 ? std::optional<MlxArray>(previous_target_stream->share())
                 : std::nullopt,
+            .pending_mtp_streams = {},
+            .pending_mtp_tokens = {},
             .mtp_profitable = std::nullopt,
             .mtp_profitability_current_token = std::nullopt,
         });
     }
     result.tokens.reserve(max_tokens);
+    const char* extend_cache = std::getenv("QWEN38_EXTEND_PREFIX_CACHE");
+    const bool extend_cache_enabled =
+        extend_cache != nullptr && std::string_view(extend_cache) == "1";
+    bool mtp_cache_extendable = true;
+    std::vector<MlxArray> pending_mtp_streams;
+    std::vector<std::uint32_t> pending_mtp_tokens;
     std::uint32_t current = prompt_tokens.back();
     const char* history_draft_environment = std::getenv("QWEN38_HISTORY_DRAFT");
     const bool history_draft_enabled = history_draft_environment == nullptr ||
@@ -201,20 +263,45 @@ GenerationResult NativeEngine::complete(
     }
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
     result.mtp_final_depth = depth_policy.depth();
+    bool stopped_on_terminator = false;
+    const auto is_stop_token = [&](const std::uint32_t token) {
+        return token == tensors_.manifest().config().end_of_sequence_token ||
+            token == chat_end_token_;
+    };
     const auto generation_started = std::chrono::steady_clock::now();
     while (result.tokens.size() < max_tokens) {
         const std::size_t remaining = max_tokens - result.tokens.size();
-        if (!mtp_profitable || !previous_target_stream.has_value() || remaining == 1) {
+        if (!mtp_profitable || !previous_target_stream.has_value() ||
+            remaining == 1 || (extend_cache_enabled && remaining == 2)) {
+            if (mtp_head_ != nullptr) {
+                if (extend_cache_enabled && mtp_profitable &&
+                    previous_target_stream.has_value() &&
+                    mtp_state_matches_target(mtp_state, state.token_count)) {
+                    mtp_head_->consume_decode(
+                        *previous_target_stream, current, state.token_count, mtp_state);
+                } else if (extend_cache_enabled && previous_target_stream.has_value() &&
+                    ((pending_mtp_streams.empty() &&
+                         mtp_state_matches_target(mtp_state, state.token_count)) ||
+                     (!pending_mtp_streams.empty() && mtp_state.position_base.has_value() &&
+                         *mtp_state.position_base + mtp_state.row_count +
+                             pending_mtp_streams.size() == state.token_count))) {
+                    pending_mtp_streams.push_back(previous_target_stream->share());
+                    pending_mtp_tokens.push_back(current);
+                } else {
+                    mtp_cache_extendable = false;
+                }
+            }
             TargetDecodeStep step = model_.forward_decode_capture(current, state);
             const std::uint32_t token = argmax_token(step.logits);
             previous_target_stream = std::move(step.pre_mixer_stream);
-            result.tokens.push_back(token);
-            if (history_draft_enabled) history_draft.append(token);
             current = token;
-            if (token == tensors_.manifest().config().end_of_sequence_token) {
+            if (is_stop_token(token)) {
                 result.finish_reason = "stop";
+                stopped_on_terminator = true;
                 break;
             }
+            result.tokens.push_back(token);
+            if (history_draft_enabled) history_draft.append(token);
             continue;
         }
 
@@ -268,12 +355,13 @@ GenerationResult NativeEngine::complete(
         previous_target_stream = std::move(step.next_target_stream);
         for (const std::uint32_t token : step.emitted_tokens) {
             if (result.tokens.size() == max_tokens) break;
-            result.tokens.push_back(token);
-            if (history_draft_enabled) history_draft.append(token);
-            if (token == tensors_.manifest().config().end_of_sequence_token) {
+            if (is_stop_token(token)) {
                 result.finish_reason = "stop";
+                stopped_on_terminator = true;
                 break;
             }
+            result.tokens.push_back(token);
+            if (history_draft_enabled) history_draft.append(token);
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
@@ -296,6 +384,45 @@ GenerationResult NativeEngine::complete(
             prompt_tokens.begin()) && result.mtp_rounds >= 2) {
         prefix_cache_->mtp_profitable = result.mtp_fallbacks == 0;
         prefix_cache_->mtp_profitability_current_token = prompt_tokens.back();
+    }
+    const std::size_t complete_token_count = prompt_tokens.size() + result.tokens.size();
+    const bool target_matches_output = stopped_on_terminator
+        ? state.token_count == complete_token_count
+        : (state.token_count < complete_token_count &&
+              state.token_count + 1 == complete_token_count);
+    const bool pending_mtp_matches_output = mtp_state.position_base.has_value() &&
+        *mtp_state.position_base + mtp_state.row_count + pending_mtp_streams.size() ==
+            state.token_count;
+    const bool mtp_matches_output = mtp_head_ == nullptr || (mtp_cache_extendable &&
+        (mtp_state_matches_target(mtp_state, state.token_count) ||
+            pending_mtp_matches_output));
+    if (extend_cache_enabled && options_.prefix_cache_max_tokens != 0 &&
+        target_matches_output && mtp_matches_output && previous_target_stream.has_value() &&
+        state.token_count <= options_.prefix_cache_max_tokens) {
+        std::vector<std::uint32_t> consumed_tokens;
+        consumed_tokens.reserve(state.token_count);
+        consumed_tokens.insert(
+            consumed_tokens.end(), prompt_tokens.begin(), prompt_tokens.end());
+        consumed_tokens.insert(
+            consumed_tokens.end(), result.tokens.begin(), result.tokens.end());
+        consumed_tokens.resize(state.token_count);
+        const std::optional<bool> extended_profitability = result.mtp_rounds >= 2
+            ? std::optional<bool>(result.mtp_fallbacks == 0)
+            : std::nullopt;
+        prefix_cache_ = std::make_unique<PrefixCacheEntry>(PrefixCacheEntry{
+            .tokens = std::move(consumed_tokens),
+            .target_state = model_.snapshot_state(state),
+            .mtp_state = mtp_head_ == nullptr
+                ? MtpDecodeState{}
+                : mtp_head_->snapshot_state(mtp_state),
+            .previous_target_stream = previous_target_stream->share(),
+            .pending_mtp_streams = std::move(pending_mtp_streams),
+            .pending_mtp_tokens = std::move(pending_mtp_tokens),
+            .mtp_profitable = extended_profitability,
+            .mtp_profitability_current_token = extended_profitability.has_value()
+                ? std::optional<std::uint32_t>(current)
+                : std::nullopt,
+        });
     }
     result.text = tokenizer_.decode(result.tokens);
     return result;
