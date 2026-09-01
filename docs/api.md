@@ -31,6 +31,9 @@ thinking template; when both are present they must agree.
 Confirmed target-token text is emitted from the decode path, the final event
 contains `finish_reason`, and the stream terminates with `data: [DONE]`.
 `stream_options: {"include_usage": true}` adds usage to the finish event.
+Closing an SSE connection cancels native generation at the next committed-token
+boundary. The `requests.cancelled` status field and
+`qwen38_requests_cancelled_total` metric count these requests.
 Non-streaming responses include a non-standard `performance` object with prompt
 time, generation time, measured generation tok/s, and an `mtp` object containing
 round, proposal, acceptance, and fallback counts.

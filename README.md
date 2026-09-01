@@ -103,6 +103,9 @@ Streaming uses HTTP/1.1 chunked `text/event-stream`. Confirmed target tokens are
 sent directly from the native decode/MTP path, followed by a finish chunk and
 `data: [DONE]`; this is not post-generation response slicing. Set
 `stream_options.include_usage` to `true` to include usage in the finish chunk.
+If the client disconnects, the sink propagates cancellation into native decode
+at the next committed-token boundary instead of occupying the executor for the
+rest of `max_tokens`. `/v1/status` and `/metrics` expose cancelled requests.
 The listener uses four bounded HTTP workers and a 128-connection queue, while a
 dedicated executor owns the MLX engine for its entire lifetime. Health, status,
 and metrics therefore remain responsive during generation without evaluating

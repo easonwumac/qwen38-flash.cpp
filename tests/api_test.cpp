@@ -27,11 +27,25 @@ public:
             .finish_reason = "stop",
         };
     }
+    qwen38::GenerationResult complete_stream(
+        std::string_view prompt,
+        const std::size_t max_tokens,
+        const qwen38::TextDeltaCallback& on_delta) override {
+        ++stream_calls;
+        qwen38::GenerationResult result = complete(prompt, max_tokens);
+        if (!on_delta(result.text)) {
+            stream_cancelled = true;
+            result.finish_reason = "cancelled";
+        }
+        return result;
+    }
     void clear_cache() override { cleared = true; }
     std::string last_prompt;
     std::size_t last_max_tokens{0};
     std::string response_text{"answer"};
     bool cleared{false};
+    std::size_t stream_calls{0};
+    bool stream_cancelled{false};
 };
 
 qwen38::HttpRequest post(std::string target, std::string body) {
@@ -143,7 +157,25 @@ void run_api_tests() {
     QWEN38_CHECK(chat_stream_wire.find("\"content\":\"final answer\"") !=
         std::string::npos);
     QWEN38_CHECK(chat_stream_wire.ends_with("data: [DONE]\n\n"));
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 16);
+
+    engine.response_text = "cancel me";
+    const auto disconnected_stream = inference_api.handle(post(
+        "/v1/completions", R"({"prompt":"x","stream":true})"));
+    disconnected_stream.body_stream([](const std::string_view) { return false; });
+    QWEN38_CHECK(engine.stream_cancelled);
+    const std::size_t stream_calls_before_early_disconnect = engine.stream_calls;
+    const auto early_disconnected_chat = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"stream":true})"));
+    early_disconnected_chat.body_stream(
+        [](const std::string_view) { return false; });
+    QWEN38_CHECK(engine.stream_calls == stream_calls_before_early_disconnect);
+    QWEN38_CHECK(runtime.snapshot().requests_cancelled == 2);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 18);
+    QWEN38_CHECK(inference_api.handle(get("/v1/status")).body.find(
+        "\"cancelled\":2") != std::string::npos);
+    QWEN38_CHECK(inference_api.handle(get("/metrics")).body.find(
+        "qwen38_requests_cancelled_total 2") != std::string::npos);
 
     QWEN38_CHECK(qwen38::json_escape("a\n\"b") == "a\\n\\\"b");
 }

@@ -291,17 +291,25 @@ GenerationResult NativeEngine::complete_impl(
     result.prompt_ms = prompt_ms;
     std::size_t streamed_tokens = 0;
     std::string pending_stream_bytes;
+    bool stream_connected = true;
     const auto emit_new_tokens = [&] {
-        if (on_delta == nullptr || streamed_tokens == result.tokens.size()) return;
+        if (on_delta == nullptr || streamed_tokens == result.tokens.size()) return true;
+        if (!stream_connected) {
+            streamed_tokens = result.tokens.size();
+            pending_stream_bytes.clear();
+            return false;
+        }
         pending_stream_bytes += tokenizer_.decode(std::span<const std::uint32_t>(
             result.tokens.data() + streamed_tokens,
             result.tokens.size() - streamed_tokens));
         streamed_tokens = result.tokens.size();
         const std::size_t complete = complete_utf8_prefix(pending_stream_bytes);
         if (complete != 0) {
-            (*on_delta)(std::string_view(pending_stream_bytes).substr(0, complete));
+            stream_connected = (*on_delta)(
+                std::string_view(pending_stream_bytes).substr(0, complete));
             pending_stream_bytes.erase(0, complete);
         }
+        return stream_connected;
     };
 
     if (options_.prefix_cache_max_tokens != 0 && prefill_rows != 0 &&
@@ -398,7 +406,10 @@ GenerationResult NativeEngine::complete_impl(
                 break;
             }
             result.tokens.push_back(token);
-            emit_new_tokens();
+            if (!emit_new_tokens()) {
+                result.finish_reason = "cancelled";
+                break;
+            }
             if (history_draft_enabled) history_draft.append(token);
             continue;
         }
@@ -456,6 +467,7 @@ GenerationResult NativeEngine::complete_impl(
         result.mtp_demotions = depth_policy.demotions();
         current = step.next_current_token;
         previous_target_stream = std::move(step.next_target_stream);
+        bool cancel_after_committed_round = false;
         for (const std::uint32_t token : step.emitted_tokens) {
             if (result.tokens.size() == max_tokens) break;
             if (is_stop_token(token)) {
@@ -464,11 +476,15 @@ GenerationResult NativeEngine::complete_impl(
                 break;
             }
             result.tokens.push_back(token);
-            emit_new_tokens();
+            if (!emit_new_tokens()) cancel_after_committed_round = true;
             if (history_draft_enabled) history_draft.append(token);
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
+        if (cancel_after_committed_round) {
+            result.finish_reason = "cancelled";
+            break;
+        }
         const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
         const bool economic_fallback_enabled = economic_fallback == nullptr ||
             std::string_view(economic_fallback) != "0";
@@ -534,8 +550,9 @@ GenerationResult NativeEngine::complete_impl(
                 result.mtp_fallbacks != 0 && extended_profitability.value_or(false),
         });
     }
-    if (on_delta != nullptr && !pending_stream_bytes.empty()) {
-        (*on_delta)(pending_stream_bytes);
+    if (on_delta != nullptr && stream_connected && !pending_stream_bytes.empty() &&
+        !(*on_delta)(pending_stream_bytes)) {
+        result.finish_reason = "cancelled";
     }
     result.text = tokenizer_.decode(result.tokens);
     return result;

@@ -9,7 +9,8 @@
 
 namespace qwen38 {
 
-using TextDeltaCallback = std::function<void(std::string_view)>;
+// Returning false requests cancellation at the next committed-token boundary.
+using TextDeltaCallback = std::function<bool(std::string_view)>;
 
 struct GenerationResult {
     std::string text;
@@ -49,7 +50,9 @@ public:
         std::size_t max_tokens,
         const TextDeltaCallback& on_delta) {
         GenerationResult result = complete(prompt, max_tokens);
-        if (!result.text.empty()) on_delta(result.text);
+        if (!result.text.empty() && !on_delta(result.text)) {
+            result.finish_reason = "cancelled";
+        }
         return result;
     }
     virtual void clear_cache() = 0;

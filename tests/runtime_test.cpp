@@ -20,6 +20,11 @@ void run_runtime_tests() {
     const auto snapshot = runtime.snapshot();
     QWEN38_CHECK(snapshot.requests_total == 1);
     QWEN38_CHECK(snapshot.requests_active == 0);
+    QWEN38_CHECK(snapshot.requests_cancelled == 0);
     QWEN38_CHECK(snapshot.prompt_tokens_total == 7);
     QWEN38_CHECK(snapshot.generated_tokens_total == 3);
+
+    runtime.request_started();
+    runtime.request_finished(2, 1, true);
+    QWEN38_CHECK(runtime.snapshot().requests_cancelled == 1);
 }

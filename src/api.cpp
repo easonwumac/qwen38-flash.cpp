@@ -216,6 +216,7 @@ std::string status_json(const RuntimeSnapshot& snapshot) {
         << json_escape(snapshot.last_error) << "\",\"uptime_seconds\":"
         << snapshot.uptime_seconds << ",\"requests\":{\"total\":"
         << snapshot.requests_total << ",\"active\":" << snapshot.requests_active
+        << ",\"cancelled\":" << snapshot.requests_cancelled
         << "},\"tokens\":{\"prompt\":" << snapshot.prompt_tokens_total
         << ",\"generated\":" << snapshot.generated_tokens_total << "}}";
     return out.str();
@@ -252,6 +253,9 @@ HttpResponse Api::handle(const HttpRequest& request) const {
             << snapshot.requests_total
             << "\n# TYPE qwen38_requests_active gauge\nqwen38_requests_active "
             << snapshot.requests_active
+            << "\n# TYPE qwen38_requests_cancelled_total counter\n"
+               "qwen38_requests_cancelled_total "
+            << snapshot.requests_cancelled
             << "\n# TYPE qwen38_prompt_tokens_total counter\nqwen38_prompt_tokens_total "
             << snapshot.prompt_tokens_total
             << "\n# TYPE qwen38_generated_tokens_total counter\nqwen38_generated_tokens_total "
@@ -300,10 +304,16 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                         bool connected = true;
                         const auto emit_json = [&](const std::string_view json) {
                             if (connected) connected = sink(sse_data(json));
+                            return connected;
                         };
+                        runtime_.request_started();
                         if (chat) {
                             emit_json(stream_delta_json(
                                 snapshot, true, "role", "assistant"));
+                        }
+                        if (!connected) {
+                            runtime_.request_finished(0, 0, true);
+                            return;
                         }
                         std::string thinking_carry;
                         bool in_reasoning = chat && template_options.enable_thinking;
@@ -312,16 +322,17 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                             if (!text.empty()) {
                                 emit_json(stream_delta_json(snapshot, chat, field, text));
                             }
+                            return connected;
                         };
                         const auto on_delta = [&](const std::string_view raw_delta) {
-                            if (!connected) return;
+                            if (!connected) return false;
                             if (!chat) {
                                 emit_text("text", raw_delta);
-                                return;
+                                return connected;
                             }
                             if (!in_reasoning) {
                                 emit_text("content", raw_delta);
-                                return;
+                                return connected;
                             }
                             constexpr std::string_view close = "</think>";
                             thinking_carry.append(raw_delta);
@@ -345,9 +356,9 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                                     std::string_view(thinking_carry).substr(0, ready));
                                 thinking_carry.erase(0, ready);
                             }
+                            return connected;
                         };
 
-                        runtime_.request_started();
                         try {
                             GenerationResult result = engine_->complete_stream(
                                 prompt, requested_tokens, on_delta);
@@ -356,7 +367,8 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                                     thinking_carry);
                             }
                             runtime_.request_finished(
-                                result.prompt_tokens, result.tokens.size());
+                                result.prompt_tokens, result.tokens.size(),
+                                result.finish_reason == "cancelled");
                             emit_json(stream_finish_json(
                                 snapshot, result, chat, include_stream_usage));
                         } catch (const std::exception& error) {

@@ -11,6 +11,7 @@ RuntimeSnapshot RuntimeState::snapshot() const {
     result.model_state = model_state_.load(std::memory_order_acquire);
     result.requests_total = requests_total_.load(std::memory_order_relaxed);
     result.requests_active = requests_active_.load(std::memory_order_relaxed);
+    result.requests_cancelled = requests_cancelled_.load(std::memory_order_relaxed);
     result.prompt_tokens_total = prompt_tokens_total_.load(std::memory_order_relaxed);
     result.generated_tokens_total = generated_tokens_total_.load(std::memory_order_relaxed);
     result.uptime_seconds = std::chrono::duration<double>(
@@ -62,8 +63,10 @@ void RuntimeState::request_started() noexcept {
 
 void RuntimeState::request_finished(
     const std::uint64_t prompt_tokens,
-    const std::uint64_t generated_tokens) noexcept {
+    const std::uint64_t generated_tokens,
+    const bool cancelled) noexcept {
     requests_active_.fetch_sub(1, std::memory_order_relaxed);
+    if (cancelled) requests_cancelled_.fetch_add(1, std::memory_order_relaxed);
     prompt_tokens_total_.fetch_add(prompt_tokens, std::memory_order_relaxed);
     generated_tokens_total_.fetch_add(generated_tokens, std::memory_order_relaxed);
 }
