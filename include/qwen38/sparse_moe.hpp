@@ -3,6 +3,7 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -58,6 +59,8 @@ private:
     QuantizedProjection shared_up_;
     QuantizedProjection shared_down_;
     MlxArray shared_router_weight_;
+    std::unique_ptr<MlxMetalKernel> fused_gate_up_;
+    std::unique_ptr<MlxMetalKernel> fused_down_;
 };
 
 } // namespace qwen38

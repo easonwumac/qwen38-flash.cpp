@@ -1,6 +1,7 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace qwen38 {
@@ -50,6 +51,74 @@ MlxArray& MlxArray::operator=(MlxArray&& other) noexcept {
         value_ = std::exchange(other.value_, mlx_array{});
     }
     return *this;
+}
+
+MlxMetalKernel::MlxMetalKernel(
+    const std::string_view name,
+    const std::span<const char* const> input_names,
+    const std::string_view output_name,
+    const std::string_view source,
+    const std::string_view header) {
+    std::vector<const char*> mutable_input_names(input_names.begin(), input_names.end());
+    const char* output_names[]{output_name.data()};
+    mlx_vector_string inputs = mlx_vector_string_new_data(
+        mutable_input_names.data(), mutable_input_names.size());
+    mlx_vector_string outputs = mlx_vector_string_new_data(output_names, 1);
+    kernel_ = mlx_fast_metal_kernel_new(
+        std::string(name).c_str(),
+        inputs,
+        outputs,
+        std::string(source).c_str(),
+        std::string(header).c_str(),
+        false,
+        false);
+    static_cast<void>(mlx_vector_string_free(inputs));
+    static_cast<void>(mlx_vector_string_free(outputs));
+    if (kernel_.ctx == nullptr) throw std::runtime_error("MLX could not create Metal kernel");
+}
+
+MlxMetalKernel::~MlxMetalKernel() {
+    if (kernel_.ctx != nullptr) mlx_fast_metal_kernel_free(kernel_);
+}
+
+MlxArray MlxMetalKernel::apply(
+    const std::span<const MlxArray* const> inputs,
+    const std::span<const int> output_shape,
+    const mlx_dtype output_dtype,
+    const std::span<const int, 3> grid,
+    const std::span<const int, 3> threadgroup) const {
+    std::vector<mlx_array> raw_inputs;
+    raw_inputs.reserve(inputs.size());
+    for (const MlxArray* input : inputs) {
+        if (input == nullptr) throw std::runtime_error("null Metal kernel input");
+        raw_inputs.push_back(input->value_);
+    }
+    mlx_vector_array input_vector = mlx_vector_array_new_data(raw_inputs.data(), raw_inputs.size());
+    mlx_vector_array output_vector = mlx_vector_array_new();
+    mlx_fast_metal_kernel_config config = mlx_fast_metal_kernel_config_new();
+    if (input_vector.ctx == nullptr || output_vector.ctx == nullptr || config.ctx == nullptr) {
+        throw std::runtime_error("MLX could not create Metal kernel arguments");
+    }
+    check(mlx_fast_metal_kernel_config_add_output_arg(
+              config, output_shape.data(), output_shape.size(), output_dtype),
+        "metal_kernel output");
+    check(mlx_fast_metal_kernel_config_set_grid(config, grid[0], grid[1], grid[2]),
+        "metal_kernel grid");
+    check(mlx_fast_metal_kernel_config_set_thread_group(
+              config, threadgroup[0], threadgroup[1], threadgroup[2]),
+        "metal_kernel threadgroup");
+    check(mlx_fast_metal_kernel_config_add_template_arg_dtype(config, "T", output_dtype),
+        "metal_kernel dtype");
+    const Stream stream;
+    const int status = mlx_fast_metal_kernel_apply(
+        &output_vector, kernel_, input_vector, config, stream.get());
+    MlxArray result;
+    if (status == 0) check(mlx_vector_array_get(&result.value_, output_vector, 0), "metal_kernel get");
+    static_cast<void>(mlx_vector_array_free(input_vector));
+    static_cast<void>(mlx_vector_array_free(output_vector));
+    mlx_fast_metal_kernel_config_free(config);
+    check(status, "metal_kernel apply");
+    return result;
 }
 
 MlxArray MlxArray::from_float32(

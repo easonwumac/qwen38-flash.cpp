@@ -1,7 +1,11 @@
 #include "qwen38/sparse_moe.hpp"
 
+#include "moe_metal_kernels.hpp"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <numeric>
@@ -45,6 +49,24 @@ SparseMoe::SparseMoe(
     static_cast<void>(checked_int(expert_count_, "expert_count"));
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
+    }
+    const char* fused = std::getenv("QWEN38_FUSED_MOE");
+    if (fused != nullptr && std::string_view(fused) == "1" &&
+        expert_count_ == 512 && experts_per_token_ == 10 && bits_ == 4 && group_size_ == 64) {
+        const char* gate_inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts"};
+        fused_gate_up_ = std::make_unique<MlxMetalKernel>(
+            "qwen38_moe_gate_up_q4",
+            gate_inputs,
+            "h",
+            moe_metal::gate_up,
+            moe_metal::header);
+        const char* down_inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        fused_down_ = std::make_unique<MlxMetalKernel>(
+            "qwen38_moe_down_q4",
+            down_inputs,
+            "y",
+            moe_metal::down,
+            moe_metal::header);
     }
 }
 
@@ -128,22 +150,51 @@ RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
 MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
     const RouterSelection selection = route_decode(input);
     MlxArray expert_sum;
-    bool has_expert = false;
-    for (std::size_t index = 0; index < selection.experts.size(); ++index) {
-        const std::size_t expert = selection.experts[index];
-        MlxArray gate = project_expert(input, expert_gate_, expert).silu();
-        MlxArray up = project_expert(input, expert_up_, expert);
-        MlxArray hidden = MlxArray::multiply(gate, up);
-        MlxArray output = project_expert(hidden, expert_down_, expert);
-        const std::vector<float> weight_value{selection.weights[index]};
-        const std::vector<int> scalar_shape{};
-        MlxArray weight = MlxArray::from_float32(weight_value, scalar_shape).astype(output.dtype());
-        MlxArray weighted = MlxArray::multiply(output, weight);
-        if (!has_expert) {
-            expert_sum = std::move(weighted);
-            has_expert = true;
-        } else {
-            expert_sum = MlxArray::add(expert_sum, weighted);
+    if (fused_gate_up_ && fused_down_) {
+        std::vector<std::int32_t> expert_values;
+        expert_values.reserve(selection.experts.size());
+        for (const std::size_t expert : selection.experts) {
+            expert_values.push_back(static_cast<std::int32_t>(expert));
+        }
+        const std::vector<int> selected_shape{static_cast<int>(experts_per_token_)};
+        MlxArray experts = MlxArray::from_int32(expert_values, selected_shape);
+        MlxArray weights = MlxArray::from_float32(selection.weights, selected_shape);
+        const MlxArray* gate_inputs[]{
+            &input,
+            &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases,
+            &experts};
+        const std::vector<int> hidden_shape{10, 640};
+        const std::array<int, 3> gate_grid{200 * 1024, 1, 1};
+        const std::array<int, 3> threadgroup{1024, 1, 1};
+        MlxArray hidden = fused_gate_up_->apply(
+            gate_inputs, hidden_shape, input.dtype(), gate_grid, threadgroup);
+        const MlxArray* down_inputs[]{
+            &hidden,
+            &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
+            &experts, &weights};
+        const std::vector<int> output_shape{1, 1, 2560};
+        const std::array<int, 3> down_grid{80 * 1024, 1, 1};
+        expert_sum = fused_down_->apply(
+            down_inputs, output_shape, input.dtype(), down_grid, threadgroup);
+    } else {
+        bool has_expert = false;
+        for (std::size_t index = 0; index < selection.experts.size(); ++index) {
+            const std::size_t expert = selection.experts[index];
+            MlxArray gate = project_expert(input, expert_gate_, expert).silu();
+            MlxArray up = project_expert(input, expert_up_, expert);
+            MlxArray hidden = MlxArray::multiply(gate, up);
+            MlxArray output = project_expert(hidden, expert_down_, expert);
+            const std::vector<float> weight_value{selection.weights[index]};
+            const std::vector<int> scalar_shape{};
+            MlxArray weight = MlxArray::from_float32(weight_value, scalar_shape).astype(output.dtype());
+            MlxArray weighted = MlxArray::multiply(output, weight);
+            if (!has_expert) {
+                expert_sum = std::move(weighted);
+                has_expert = true;
+            } else {
+                expert_sum = MlxArray::add(expert_sum, weighted);
+            }
         }
     }
 

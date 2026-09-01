@@ -17,6 +17,8 @@
 
 namespace qwen38 {
 
+class MlxMetalKernel;
+
 class MlxArray final {
 public:
     MlxArray() noexcept;
@@ -102,7 +104,34 @@ public:
 
 private:
     friend class MlxSafetensors;
+    friend class MlxMetalKernel;
     mlx_array value_{};
+};
+
+class MlxMetalKernel final {
+public:
+    MlxMetalKernel(
+        std::string_view name,
+        std::span<const char* const> input_names,
+        std::string_view output_name,
+        std::string_view source,
+        std::string_view header = {});
+    ~MlxMetalKernel();
+
+    MlxMetalKernel(const MlxMetalKernel&) = delete;
+    MlxMetalKernel& operator=(const MlxMetalKernel&) = delete;
+    MlxMetalKernel(MlxMetalKernel&&) = delete;
+    MlxMetalKernel& operator=(MlxMetalKernel&&) = delete;
+
+    [[nodiscard]] MlxArray apply(
+        std::span<const MlxArray* const> inputs,
+        std::span<const int> output_shape,
+        mlx_dtype output_dtype,
+        std::span<const int, 3> grid,
+        std::span<const int, 3> threadgroup) const;
+
+private:
+    mlx_fast_metal_kernel kernel_{};
 };
 
 class MlxSafetensors final {

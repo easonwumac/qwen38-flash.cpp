@@ -72,13 +72,25 @@ C++ and MLX-Python select experts
 `[78,62,113,257,137,249,232,239,254,51]` and produce output checksum
 `0.0970327854`.
 
-The correctness implementation currently materializes router scores on the host
-and launches projections per selected expert. A six-run component measurement
-was 31.95 ms cold and 1.68 ms warm median. MLX's generic batched quantized matmul
-was tested but did not preserve per-expert numerical semantics for these gathered
-3D weights, so that path was rejected. A fused device-side top-k and selected-QMM
-kernel is required to remove 48 host synchronization points and reduce dispatch
-overhead in the optimized decode graph.
+The stable implementation currently materializes router scores on the host and
+launches projections per selected expert. A six-run component measurement was
+31.95 ms cold and 1.68 ms warm median. MLX's generic device-side routing plus
+`gather_qmm` preserved the generated tokens but regressed a full-model second
+step from the 1.3--1.6 second range to 2.30 seconds, so it was rejected.
+
+An opt-in two-dispatch Q4 Metal route is available with
+`QWEN38_FUSED_MOE=1`. Its structure is adapted from MTPLX's Apache-2.0
+`moe_glu_decode` work, modified to consume the checkpoint's separate gate/up
+packs. On the layer-0 fixture it retained the same expert IDs and output
+checksum at ten-digit reporting precision. A cold-process full-model A/B kept
+the exact `9419 -> 11 -> 271` trajectory and final logits while measuring
+2175.9 ms versus 1294.5 ms for token two (1.68x). This result is directionally
+useful but remains opt-in because filesystem cache and memory-pressure variance
+is high. A more representative fresh-server, eight-token greedy HTTP A/B on a
+64 GB M5 Pro used prompt `Hello`, an empty context cache, and the retained
+REAP-288 Q4 checkpoint. Output text was byte-identical; the stable route
+measured 1.050 tok/s and fused MoE measured 1.399 tok/s (+33.2%). Thermals were
+not pinned, so this is a development receipt rather than a release claim.
 
 ## Stateful Gated DeltaNet decode
 

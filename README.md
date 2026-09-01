@@ -93,6 +93,10 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
   -d '{"prompt":"Hello","max_tokens":1}'
 ```
 
+For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
+attributed two-dispatch selected-MoE Metal path. It remains opt-in while
+sustained quality and thermal benchmarking continues.
+
 Validate a model manifest and lazily map one tensor without loading all weights:
 
 ```bash

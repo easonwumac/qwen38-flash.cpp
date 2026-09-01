@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <vector>
@@ -90,7 +91,8 @@ int main(int argc, char** argv) {
             if (index != 0) std::cout << ',';
             std::cout << selection.weights[index];
         }
-        std::cout << "],\"checksum\":" << checksum << ",\"cold_ms\":" << timings.front()
+        std::cout << std::setprecision(10)
+                  << "],\"checksum\":" << checksum << ",\"cold_ms\":" << timings.front()
                   << ",\"warm_median_ms\":" << warm[warm.size() / 2]
                   << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";
         return EXIT_SUCCESS;
