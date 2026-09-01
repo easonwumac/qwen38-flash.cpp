@@ -222,6 +222,16 @@ if(QWEN38_BUILD_TESTS)
     target_link_libraries(qwen38-tests PRIVATE qwen38_core)
     add_test(NAME qwen38-tests COMMAND qwen38-tests)
 
+    if(APPLE)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(
+                NAME qwen38-memory-guard-tests
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/memory_guard_test.py
+            )
+        endif()
+    endif()
+
     if(TARGET qwen38_mlx)
         add_executable(qwen38-mlx-tests tests/mlx_backend_test.cpp)
         target_link_libraries(qwen38-mlx-tests PRIVATE qwen38_mlx)

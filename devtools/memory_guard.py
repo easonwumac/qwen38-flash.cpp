@@ -127,8 +127,25 @@ def main() -> int:
     child = subprocess.Popen(command, start_new_session=True, env=child_environment)
     peak_rss = 0.0
     minimum_available = start_available
+    handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous_handlers = {
+        signum: signal.getsignal(signum) for signum in handled_signals
+    }
+    shutdown_signal = 0
+
+    def request_shutdown(signum: int, _frame: object) -> None:
+        nonlocal shutdown_signal
+        if shutdown_signal == 0:
+            shutdown_signal = signum
+
+    for signum in handled_signals:
+        signal.signal(signum, request_shutdown)
     try:
         while child.poll() is None:
+            if shutdown_signal != 0:
+                stop_tree(child.pid)
+                child.wait()
+                return 128 + shutdown_signal
             current_rss = guarded_tree_rss_gib(child.pid)
             current_available = available_gib()
             peak_rss = max(peak_rss, current_rss)
@@ -143,10 +160,13 @@ def main() -> int:
                 child.wait()
                 return 76
             time.sleep(args.interval)
-    except KeyboardInterrupt:
+    except BaseException:
         stop_tree(child.pid)
         child.wait()
-        return 130
+        raise
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
     print(
         f"memory_guard: peak_rss={peak_rss:.1f} GiB "
         f"minimum_available={minimum_available:.1f} GiB",

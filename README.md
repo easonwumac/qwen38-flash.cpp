@@ -319,7 +319,9 @@ On unified-memory Macs, run full-model experiments through
 refuse unguarded execution. The default guard refuses to start below
 42 GiB reclaimable memory and terminates the process group plus recursively
 spawned descendants before they exceed 38 GiB aggregate RSS or leave less than
-8 GiB reclaimable. A system-wide lock prevents overlapping guarded model runs.
+8 GiB reclaimable. SIGINT, SIGTERM, and SIGHUP drain the isolated child process
+group before the guard exits, including when a terminal wrapper sends multiple
+shutdown signals. A system-wide lock prevents overlapping guarded model runs.
 
 For per-token warmup evidence rather than a two-token snapshot:
 
