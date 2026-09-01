@@ -26,7 +26,9 @@ struct NativeEngineOptions {
     std::optional<std::size_t> mtp_depth;
     std::size_t mtp_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};
     std::size_t zero_accept_fallback_rounds{2};
-    bool clear_cache_each_mtp_round{true};
+    // The allocator cache already has a strict byte cap. Per-round clearing
+    // forces a GPU synchronization and is reserved for diagnostic fallback.
+    bool clear_cache_each_mtp_round{false};
 };
 
 class NativeEngine final : public InferenceEngine {
