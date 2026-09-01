@@ -67,8 +67,14 @@ NativeEngine::NativeEngine(
       tokenizer_(Tokenizer::load(model_directory)),
       model_(tensors_),
       mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)) {
-    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 64) {
-        throw std::runtime_error("prefill chunk rows must be between 1 and 64");
+    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 256) {
+        throw std::runtime_error("prefill chunk rows must be between 1 and 256");
+    }
+    const char* metal_prefill = std::getenv("QWEN38_GDN_METAL_PREFILL");
+    if (options_.prefill_chunk_rows > 64 &&
+        (metal_prefill == nullptr || std::string_view(metal_prefill) != "1")) {
+        throw std::runtime_error(
+            "prefill chunks above 64 require QWEN38_GDN_METAL_PREFILL=1");
     }
     if (mtp_depth_ != 0) {
         if (options_.mtp_cache_limit_bytes == 0) {

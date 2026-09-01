@@ -108,8 +108,10 @@ already set, caps the MLX cache at 256 MiB, and falls back to serial after two
 consecutive zero-accept rounds.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
-temporary prompt batch while preserving the model's production batched
-numerics; accepted values are 1 through 64.
+temporary prompt batch while preserving the retained production numerics.
+Values through 256 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
+oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
+startup instead of failing partway through a request.
 
 The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,
