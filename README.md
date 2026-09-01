@@ -147,8 +147,11 @@ is the default conservative graph with chunk 64.
 `--profile latency` enables the same optimized path but expands the resident
 expert tier from `12:28` to `12:34`. On the tested 64 GiB M5 Pro this used about
 0.9 GiB more memory and reduced the first cold decode step by 12--17%; sustained
-warm decode was unchanged. Use it when cold-start/TTFT matters more than the
-small memory increase. `--profile speed` remains the balanced default.
+warm decode was unchanged. On a separate 3,506-token expert-diverse prompt it
+also improved cold prefill from 310.7--311.4 to 332.5 tok/s (+6.9%) at 35.9 GiB
+peak RSS, while the next token stayed identical. Use it when cold-start/TTFT and
+uncached prompt speed matter more than the small memory increase. `--profile
+speed` remains the balanced default.
 
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote
