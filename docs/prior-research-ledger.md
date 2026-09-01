@@ -33,6 +33,7 @@ reference evidence, not measurements of this C++ runtime.
 | C++ batched verifier final head | A/B/A in guarded processes reduced the exact 3-row verifier by 3--5% to about 57 ms, versus about 94.5 ms serial; token parity held. Profiling attributed 42.59 ms to 36 GDN layers, 11.60 ms to 12 full-attention layers, and only 1.50 ms to the batched final head | The final mixer and LM head should consume `[1,S,H]` once, but 95% of remaining verifier cost is now the 48-layer trunk | A warmed 64-token HTTP run still reached just 31.98 tok/s with 22/38 accepted and one fallback; trunk/round cost remains dominant |
 | C++ compiled-vs-batched numerical audit | On the 64-token P73 continuation, eager serial and the fast S=3 verifier emitted byte-identical text; compiled S=1 serial emitted a different valid greedy continuation. Warm decode was 29.87 / 31.98 / 32.07 tok/s for eager serial / fast MTP / compiled serial | The production MTP lifecycle is not the source of the observed text difference. MLX graph shape and whole-layer fusion change borderline argmax decisions, so a compiled S=1 run is not a valid bitwise oracle for an eager S=3 graph | Quality promotion still requires corpus-level scoring; exact-token parity must compare like-for-like numerical execution modes |
 | C++ opt-in fused-GDN + sorted-MoE prefill | 185 prefill rows in 608.8 ms, about 304 tok/s and 9.10x over its row-serial diagnostic; 34.8 GiB peak; batched token matched that diagnostic | Cached Metal configurations remove repeated FFI setup and the recovered whole-prompt strategy is directionally correct | Still far below P124 and differs from the retained production token; both kernels remain opt-in |
+| C++ read-only fused HC A/B/A | Control 29.84 tok/s, candidate 33.58, reverse control 32.12; candidate was +8.53% versus pooled controls and repeated at 33.95 tok/s. All four 16-token sequences were identical; peak was 33.7--34.8 GiB | The mlx-serve HC read design transfers to the independent C++/MLX engine and removes real decode overhead without extra resident memory | Synthetic position-0 decode trace, 14 steady steps per arm; still opt-in pending mixed-prompt quality and HTTP production cohorts |
 
 P73's 59.866 tok/s is explained by `(1 + 1.57) / 43.95 ms`, approximately
 58.5 tok/s. It is not evidence of a universal 59 tok/s target path. The serial
@@ -130,9 +131,13 @@ The implementation order is deliberately narrow:
    complete QSA state or rebuild from a freshly forwarded tail.
 5. **Verifier-wide fusion only after profiling.** The remaining plausible
    kernel opportunity is a fused, exact S=2..4 verifier path that removes
-   model-byte movement, intermediates, and dispatches across multiple
-   consumers. Improving one projection in isolation is explicitly excluded.
-6. **Branch-local shallow tree only after linear MTP is profitable.** A B=2,
+    model-byte movement, intermediates, and dispatches across multiple
+    consumers. Improving one projection in isolation is explicitly excluded.
+6. **Complete fused HC promotion.** The read-only port has an A/B/A win. Add
+   per-layer numerical oracles, mixed-prompt decode cohorts, then fold the
+   preceding HC write into the next read with explicit PLE/capture/final-head
+   flush barriers.
+7. **Branch-local shallow tree only after linear MTP is profitable.** A B=2,
    depth-2 shadow implementation is justified only if measured extra verify-row
    cost is lower than its acceptance benefit and all recurrent/QSA state is
    branch-local.

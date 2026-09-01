@@ -52,6 +52,10 @@ int main(int argc, char** argv) {
         }
         const double sustained_ms =
             std::accumulate(timings.begin() + 1, timings.end(), 0.0);
+        const double steady_ms = timings.size() > 2
+            ? std::accumulate(timings.begin() + 2, timings.end(), 0.0)
+            : sustained_ms;
+        const std::size_t steady_steps = timings.size() > 2 ? timings.size() - 2 : steps - 1;
         std::cout << "{\"tokens\":[";
         for (std::size_t index = 0; index < tokens.size(); ++index) {
             if (index != 0) std::cout << ',';
@@ -64,6 +68,8 @@ int main(int argc, char** argv) {
         }
         std::cout << "],\"sustained_tps\":"
                   << (1000.0 * static_cast<double>(steps - 1) / sustained_ms)
+                  << ",\"steady_tps\":"
+                  << (1000.0 * static_cast<double>(steady_steps) / steady_ms)
                   << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

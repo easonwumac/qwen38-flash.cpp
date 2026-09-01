@@ -1,6 +1,11 @@
 #include "qwen38/hyper_connection.hpp"
 
+#include "hc_metal_kernels.hpp"
+
+#include <array>
+#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -19,6 +24,33 @@ MlxArray scalar_like(const float value, const mlx_dtype dtype) {
     const std::vector<float> data{value};
     const std::vector<int> shape{};
     return MlxArray::from_float32(data, shape).astype(dtype);
+}
+
+std::shared_ptr<MlxMetalKernel> hc_normalize_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "norm_weight", "eps"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_read_normalize", inputs, "xn", hc_metal::normalize);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_down_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"xn", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_read_down", inputs, "activation", hc_metal::down);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_up_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"xn", "activation", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_read_up", inputs, "mixed", hc_metal::up);
+    }();
+    return kernel;
 }
 
 } // namespace
@@ -111,6 +143,103 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
     const int hidden = checked_dimension(hidden_size_, "hidden_size");
     const std::vector<int> grouped_shape{batch, sequence, streams, hidden};
     const std::vector<int> flat_shape{batch, sequence, streams * hidden};
+
+    const char* fused_flag = std::getenv("QWEN38_HC_FUSED");
+    const bool fused_enabled = fused_flag != nullptr && std::string_view(fused_flag) == "1";
+    const int values_per_word = 32 / bits_;
+    const std::vector<int> down_shape = down_.weight.shape();
+    const std::vector<int> up_shape = up_.weight.shape();
+    const bool fused_supported =
+        fused_enabled && batch == 1 && sequence == 1 &&
+        (stream.dtype() == MLX_BFLOAT16 || stream.dtype() == MLX_FLOAT16) &&
+        down_.quantized && up_.quantized && bits_ > 0 && 32 % bits_ == 0 &&
+        hidden % 256 == 0 && group_size_ % values_per_word == 0 &&
+        down_shape.size() == 2 && up_shape.size() == 2 &&
+        down_shape[1] * values_per_word == streams * hidden &&
+        up_shape[0] == streams * hidden &&
+        up_shape[1] * values_per_word == down_shape[0] &&
+        down_shape[1] % 256 == 0 && down_shape[0] % values_per_word == 0;
+    if (fused_supported) {
+        const int rank = down_shape[0];
+        const std::array<float, 1> epsilon_value{rms_norm_epsilon_};
+        const std::array<int, 1> epsilon_shape{1};
+        MlxArray epsilon = MlxArray::from_float32(epsilon_value, epsilon_shape);
+        const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = stream.dtype()},
+        }};
+        const std::array<MlxMetalIntTemplate, 5> int_templates{{
+            {.name = "HC", .value = streams},
+            {.name = "H", .value = hidden},
+            {.name = "R", .value = rank},
+            {.name = "GS", .value = group_size_},
+            {.name = "BITS", .value = bits_},
+        }};
+
+        const std::array<const MlxArray*, 3> normalize_inputs{
+            &stream, &norm_weight_, &epsilon};
+        const std::array<MlxMetalOutputSpec, 1> normalize_output{{
+            {.shape = {streams * hidden}, .dtype = stream.dtype()},
+        }};
+        const std::array<int, 3> normalize_grid{256 * streams, 1, 1};
+        const std::array<int, 3> normalize_group{256, 1, 1};
+        std::vector<MlxArray> normalized_outputs = hc_normalize_kernel()->apply(
+            normalize_inputs,
+            normalize_output,
+            normalize_grid,
+            normalize_group,
+            dtype_templates,
+            int_templates);
+        MlxArray normalized = std::move(normalized_outputs[0]);
+
+        const std::array<const MlxArray*, 4> down_inputs{
+            &normalized, &down_.weight, &down_.scales, &down_.biases};
+        const std::array<MlxMetalOutputSpec, 1> down_output{{
+            {.shape = {rank}, .dtype = stream.dtype()},
+        }};
+        const std::array<int, 3> down_grid{256, rank, 1};
+        const std::array<int, 3> down_group{256, 1, 1};
+        std::vector<MlxArray> down_outputs = hc_down_kernel()->apply(
+            down_inputs,
+            down_output,
+            down_grid,
+            down_group,
+            dtype_templates,
+            int_templates);
+        MlxArray activation = std::move(down_outputs[0]);
+
+        const std::array<const MlxArray*, 5> up_inputs{
+            &normalized, &activation, &up_.weight, &up_.scales, &up_.biases};
+        const std::array<MlxMetalOutputSpec, 1> up_output{{
+            {.shape = {hidden}, .dtype = stream.dtype()},
+        }};
+        const std::array<int, 3> up_grid{32, hidden, 1};
+        const std::array<int, 3> up_group{32, 8, 1};
+        std::vector<MlxArray> up_outputs = hc_up_kernel()->apply(
+            up_inputs,
+            up_output,
+            up_grid,
+            up_group,
+            dtype_templates,
+            int_templates);
+        MlxArray mixed = std::move(up_outputs[0]).reshape(
+            std::vector<int>{1, 1, hidden});
+
+        if (!with_injection_) {
+            return {.mixed = std::move(mixed), .injection = MlxArray{}, .has_injection = false};
+        }
+        MlxArray normalized_flat = normalized.reshape(flat_shape);
+        MlxArray raw_injection = project(normalized_flat, injection_);
+        MlxArray inv_streams = scalar_like(
+            1.0F / static_cast<float>(stream_count_), raw_injection.dtype());
+        MlxArray injection_gate = MlxArray::multiply(raw_injection, inv_streams).sigmoid();
+        MlxArray doubled = MlxArray::multiply(
+            injection_gate, scalar_like(2.0F, injection_gate.dtype()));
+        return {
+            .mixed = std::move(mixed),
+            .injection = doubled.reshape(std::vector<int>{1, 1, streams, 1}),
+            .has_injection = true,
+        };
+    }
 
     MlxArray grouped = stream.reshape(grouped_shape);
     const std::vector<float> ones_data(hidden_size_, 1.0F);

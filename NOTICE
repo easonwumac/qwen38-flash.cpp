@@ -11,5 +11,6 @@ The fused GatedDeltaNet prefill recurrence is adapted from oMLX
 (Copyright 2026 oMLX contributors), licensed under the Apache License,
 Version 2.0. oMLX's implementation follows MLX-LM.
 
-The sorted multi-row MoE dispatch design is adapted from mlx-serve
+The sorted multi-row MoE dispatch design and fused hyper-connection read
+kernels are adapted from mlx-serve
 (Copyright 2026 David Dalcu), licensed under the MIT License.
