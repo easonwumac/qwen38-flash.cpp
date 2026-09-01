@@ -16,6 +16,9 @@ struct MtpRoundStep {
     std::uint32_t next_current_token{0};
     std::size_t next_query_position{0};
     MlxArray next_target_stream;
+    double draft_ms{0.0};
+    double verify_ms{0.0};
+    double commit_ms{0.0};
 };
 
 // current_token has already been emitted but is not yet present in target_state.

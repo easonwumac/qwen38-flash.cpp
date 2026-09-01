@@ -179,6 +179,9 @@ GenerationResult NativeEngine::complete(
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
+        result.mtp_draft_ms += step.draft_ms;
+        result.mtp_verify_ms += step.verify_ms;
+        result.mtp_commit_ms += step.commit_ms;
         depth_policy.observe(step.draft_tokens.size(), step.accepted);
         result.mtp_final_depth = depth_policy.depth();
         result.mtp_promotions = depth_policy.promotions();

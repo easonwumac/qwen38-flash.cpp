@@ -86,7 +86,10 @@ std::string completion_json(
         << ",\"fallbacks\":" << result.mtp_fallbacks
         << ",\"depth\":" << result.mtp_final_depth
         << ",\"promotions\":" << result.mtp_promotions
-        << ",\"demotions\":" << result.mtp_demotions << "}"
+        << ",\"demotions\":" << result.mtp_demotions
+        << ",\"draft_ms\":" << result.mtp_draft_ms
+        << ",\"verify_ms\":" << result.mtp_verify_ms
+        << ",\"commit_ms\":" << result.mtp_commit_ms << "}"
         << "}}";
     return out.str();
 }
