@@ -325,8 +325,9 @@ GenerationResult NativeEngine::complete_impl(
     bool cached_mtp_cumulative_keep = false;
     std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
-    const std::size_t request_prefill_chunk = qwen38::select_prefill_chunk_rows(
-        options_.prefill_chunk_rows, prefill_rows);
+    const std::size_t request_prefill_chunk = options_.adaptive_prefill_chunks
+        ? qwen38::select_prefill_chunk_rows(options_.prefill_chunk_rows, prefill_rows)
+        : options_.prefill_chunk_rows;
     model_.clear_prefill_qmeta_cache();
     model_.set_prefill_qmeta_cache_allowed(
         options_.qmeta_cache_max_prompt_tokens != 0 &&

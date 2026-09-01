@@ -34,7 +34,8 @@ void print_usage(const char* program) {
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
         << " [--profile safe|speed|latency|long-context]"
-        << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
+        << " [--prefill-chunk 1..512] [--prefill-chunk-fixed]"
+        << " [--prefix-cache-tokens N]"
         << " [--qmeta-cache-max-prompt-tokens N]"
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
         << " [--max-generation-tokens N]"
@@ -90,6 +91,7 @@ int main(int argc, char** argv) {
         std::optional<std::size_t> mtp_depth;
         std::size_t prefill_chunk_rows = 64;
         bool prefill_chunk_explicit = false;
+        bool adaptive_prefill_chunks = true;
         std::size_t prefix_cache_max_tokens = 8192;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
         std::uint64_t ssd_prefix_cache_max_bytes = 0;
@@ -125,6 +127,8 @@ int main(int argc, char** argv) {
             } else if (argument == "--prefill-chunk") {
                 prefill_chunk_rows = parse_prefill_chunk(argv[++i]);
                 prefill_chunk_explicit = true;
+            } else if (argument == "--prefill-chunk-fixed") {
+                adaptive_prefill_chunks = false;
             } else if (argument == "--prefix-cache-tokens") {
                 prefix_cache_max_tokens = parse_size(argv[++i], "prefix cache token limit");
             } else if (argument == "--qmeta-cache-max-prompt-tokens") {
@@ -165,6 +169,7 @@ int main(int argc, char** argv) {
                 engine_options.max_generation_tokens = max_generation_tokens;
                 engine_options.mtp_depth = mtp_depth;
                 engine_options.prefill_chunk_rows = prefill_chunk_rows;
+                engine_options.adaptive_prefill_chunks = adaptive_prefill_chunks;
                 engine_options.prefix_cache_max_tokens = prefix_cache_max_tokens;
                 engine_options.qmeta_cache_max_prompt_tokens =
                     qmeta_cache_max_prompt_tokens;
@@ -176,6 +181,8 @@ int main(int argc, char** argv) {
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
                           << " prefill_chunk=" << prefill_chunk_rows
+                          << " adaptive_prefill_chunks="
+                          << (adaptive_prefill_chunks ? "true" : "false")
                           << " qmeta_cache_max_prompt_tokens="
                           << qmeta_cache_max_prompt_tokens
                           << " ssd_prefix_cache_gib="

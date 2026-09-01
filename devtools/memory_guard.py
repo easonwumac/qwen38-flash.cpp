@@ -132,7 +132,7 @@ def main() -> int:
     parser.add_argument("--min-start-gib", type=float, default=42.0)
     parser.add_argument("--min-available-gib", type=float, default=8.0)
     parser.add_argument("--max-rss-gib", type=float, default=38.0)
-    parser.add_argument("--max-footprint-gib", type=float, default=44.0)
+    parser.add_argument("--max-footprint-gib", type=float, default=48.0)
     parser.add_argument("--interval", type=float, default=0.25)
     parser.add_argument("--lock-file", default="/tmp/qwen38-memory-guard.lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)

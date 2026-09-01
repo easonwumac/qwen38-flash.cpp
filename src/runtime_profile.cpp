@@ -60,9 +60,7 @@ std::size_t select_prefill_chunk_rows(
     if (configured_rows == 0 || configured_rows > 512) {
         throw std::runtime_error("prefill chunk rows must be between 1 and 512");
     }
-    if (configured_rows <= 256 || prompt_rows <= 512) return configured_rows;
-    if (prompt_rows <= 6144) return 384;
-    if (prompt_rows <= 8192) return 256;
+    if (configured_rows <= 256 || prompt_rows <= 32768) return configured_rows;
     return 128;
 }
 

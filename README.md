@@ -310,11 +310,15 @@ flag is set.
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
 oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
-startup instead of failing partway through a request. A configured chunk 512
-is used only when the complete prompt has at most 512 tokens. Prompts through
-6,144 forwarded tokens automatically use chunk 384, prompts through 8,192 use
-chunk 256, and longer prompts use chunk 128 to retain the validated 64 GiB
-memory bound.
+startup instead of failing partway through a request. The optimized profiles
+retain the configured chunk 512 through 32,768 forwarded tokens, then reduce to
+chunk 128 for longer prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
+from 463.7 tok/s with the old chunk-128 crossover to 655.45/638.38 tok/s, while
+a 32,760-token prompt reached 532.67 tok/s and ended at a 36.66 GiB physical
+footprint. The first-token output hash was unchanged. `--prefill-chunk-fixed`
+disables the long-prompt adaptive reduction for
+guarded throughput experiments; it must remain behind the memory guard because
+larger long-prompt batches increase the Metal working set.
 
 The native engine caps the MLX allocator cache at 256 MiB in serial as well as
 MTP mode. Before this bound covered serial inference, a 23,555-token request was
@@ -332,7 +336,7 @@ MTP, history drafting, and prefix caching were disabled. The earlier RSS-only
 memory guard kept at least 6 GiB available; the final sample had 16.4 GiB
 available and about 4.4 GiB process RSS after reclaim. Those RSS figures exclude
 Metal allocations and are retained only as historical throughput evidence;
-current runs enforce a 44 GiB physical-footprint limit. This validates the API
+current runs enforce a 48 GiB physical-footprint limit. This validates the API
 path within 3,687
 tokens of the model limit on the 64 GiB M5 Pro. It does not establish an exact
 262,144-token boundary test or acceptable sustained decode speed at that
@@ -443,11 +447,13 @@ On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
 refuse unguarded execution. The default guard refuses to start below
 42 GiB reclaimable memory and terminates the process group plus recursively
-spawned descendants before they exceed a 44 GiB aggregate macOS physical
+spawned descendants before they exceed a 48 GiB aggregate macOS physical
 footprint, exceed 38 GiB aggregate RSS, or leave less than 8 GiB reclaimable.
 Physical footprint is the authoritative 64 GiB safety limit because it includes
 Metal/IOAccelerator allocations that `ps` RSS omits. Override it only for a
-controlled experiment with `--max-footprint-gib`. SIGINT, SIGTERM, and SIGHUP
+controlled experiment with `--max-footprint-gib`. The 48 GiB default leaves an
+8 GiB reclaimable floor on the tested 64 GiB Mac; 52 GiB is not a stable
+default. SIGINT, SIGTERM, and SIGHUP
 drain the isolated child process group before the guard exits, including when a
 terminal wrapper sends multiple shutdown signals. A system-wide lock prevents
 overlapping guarded model runs.

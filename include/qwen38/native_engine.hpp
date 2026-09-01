@@ -24,6 +24,9 @@ struct NativeEngineOptions {
     // Layer-major prompt ingestion. 64 matched the retained oMLX production
     // path while keeping the temporary batch bounded on 64 GiB machines.
     std::size_t prefill_chunk_rows{64};
+    // Fixed chunks are useful for throughput tuning within an external memory
+    // guard. Adaptive sizing remains the conservative default.
+    bool adaptive_prefill_chunks{true};
     // Retain one exact complete-state prefix. Zero disables caching.
     std::size_t prefix_cache_max_tokens{8192};
     // Decoded compact-qmeta materially accelerates short prefill but competes
