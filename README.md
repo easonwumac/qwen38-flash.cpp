@@ -189,6 +189,11 @@ disable history or `QWEN38_HISTORY_DRAFT=1` to force the legacy eager policy.
 The cache stores token IDs and suffix indices only, so its memory is tiny
 relative to model and KV residency even at long context.
 
+The retained high-acceptance MTP path has a standalone regression client and a
+memory-guarded launch recipe in [docs/mtp-benchmark.md](docs/mtp-benchmark.md).
+It checks per-length warm throughput, proposal acceptance, completion length,
+and whether MTP actually engaged; it does not use prefix-cache hits.
+
 Extended cache hits preserve the continuous decode state instead of rebuilding
 the old assistant response through wide prefill. This is token-exact when those
 numerical paths agree; otherwise a later greedy trajectory may differ while the
