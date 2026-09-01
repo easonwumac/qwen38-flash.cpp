@@ -1,5 +1,6 @@
 #include "qwen38/native_engine.hpp"
 #include "qwen38/mtp_depth_policy.hpp"
+#include "qwen38/mtp_profitability.hpp"
 #include "qwen38/mtp_runner.hpp"
 
 #include <algorithm>
@@ -163,7 +164,7 @@ GenerationResult NativeEngine::complete(
     }
     result.tokens.reserve(max_tokens);
     std::uint32_t current = prompt_tokens.back();
-    std::size_t zero_accept_streak = 0;
+    MtpProfitabilityGuard profitability_guard;
     bool mtp_profitable = mtp_head_ != nullptr;
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
     result.mtp_final_depth = depth_policy.depth();
@@ -196,7 +197,7 @@ GenerationResult NativeEngine::complete(
         result.mtp_final_depth = depth_policy.depth();
         result.mtp_promotions = depth_policy.promotions();
         result.mtp_demotions = depth_policy.demotions();
-        zero_accept_streak = step.accepted == 0 ? zero_accept_streak + 1 : 0;
+        profitability_guard.observe(step.accepted);
         current = step.next_current_token;
         previous_target_stream = std::move(step.next_target_stream);
         for (const std::uint32_t token : step.emitted_tokens) {
@@ -209,7 +210,14 @@ GenerationResult NativeEngine::complete(
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
-        if (zero_accept_streak >= options_.zero_accept_fallback_rounds) {
+        const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
+        const bool economic_fallback_enabled = economic_fallback == nullptr ||
+            std::string_view(economic_fallback) != "0";
+        const bool should_fallback = economic_fallback_enabled
+            ? profitability_guard.should_fallback(options_.zero_accept_fallback_rounds)
+            : profitability_guard.zero_accept_streak() >=
+                  options_.zero_accept_fallback_rounds;
+        if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
         }

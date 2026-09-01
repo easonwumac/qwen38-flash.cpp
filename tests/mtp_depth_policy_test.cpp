@@ -1,4 +1,5 @@
 #include "qwen38/mtp_depth_policy.hpp"
+#include "qwen38/mtp_profitability.hpp"
 
 #include "test.hpp"
 
@@ -39,4 +40,34 @@ void run_mtp_depth_policy_tests() {
 
     qwen38::MtpDepthPolicy explicit_four(4, 100000);
     QWEN38_CHECK(explicit_four.depth() == 4);
+
+    QWEN38_CHECK(qwen38::should_fallback_mtp(2, 2, 2, 0));
+    QWEN38_CHECK(qwen38::should_fallback_mtp(2, 2, 11, 10));
+    QWEN38_CHECK(!qwen38::should_fallback_mtp(1, 2, 2, 0));
+    QWEN38_CHECK(!qwen38::should_fallback_mtp(2, 2, 28, 39));
+    QWEN38_CHECK(!qwen38::should_fallback_mtp(2, 2, 11, 11));
+
+    qwen38::MtpProfitabilityGuard early_loss;
+    early_loss.observe(0);
+    QWEN38_CHECK(!early_loss.should_fallback(2));
+    early_loss.observe(0);
+    QWEN38_CHECK(early_loss.should_fallback(2));
+
+    qwen38::MtpProfitabilityGuard profitable_empty_streak;
+    for (int round = 0; round < 6; ++round) profitable_empty_streak.observe(2);
+    profitable_empty_streak.observe(0);
+    profitable_empty_streak.observe(0);
+    QWEN38_CHECK(!profitable_empty_streak.should_fallback(2));
+
+    qwen38::MtpProfitabilityGuard exact_window;
+    for (std::size_t round = 0; round < qwen38::MtpProfitabilityGuard::window_size; ++round) {
+        exact_window.observe(1);
+    }
+    QWEN38_CHECK(!exact_window.should_fallback(2));
+
+    qwen38::MtpProfitabilityGuard losing_window;
+    for (std::size_t round = 0; round < qwen38::MtpProfitabilityGuard::window_size; ++round) {
+        losing_window.observe(round < 15 ? 1 : 0);
+    }
+    QWEN38_CHECK(losing_window.should_fallback(2));
 }

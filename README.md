@@ -105,7 +105,10 @@ companion auto mode stays serial. `3` uses the same adaptive cap explicitly;
 selects the verified
 `12:28` resident-expert balanced tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
 already set, caps the MLX cache at 256 MiB, and falls back to serial after two
-consecutive zero-accept rounds.
+early zero-accept rounds or when a full 16-round window averages less than one
+accepted draft per round. This avoids disabling profitable MTP on a random
+empty streak while still ending locally losing speculation. Set
+`QWEN38_ECONOMIC_MTP_FALLBACK=0` to restore the legacy two-empty-round policy.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
