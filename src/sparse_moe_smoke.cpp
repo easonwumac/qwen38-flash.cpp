@@ -147,8 +147,18 @@ int main(int argc, char** argv) {
                       << component_median(&qwen38::MoePrefillTimings::routing_ms)
                       << ",\"gate_up\":"
                       << component_median(&qwen38::MoePrefillTimings::gate_up_ms)
+                      << ",\"gate_qmm\":"
+                      << component_median(&qwen38::MoePrefillTimings::gate_qmm_ms)
+                      << ",\"up_qmm\":"
+                      << component_median(&qwen38::MoePrefillTimings::up_qmm_ms)
+                      << ",\"swiglu\":"
+                      << component_median(&qwen38::MoePrefillTimings::swiglu_ms)
                       << ",\"down_reduce\":"
                       << component_median(&qwen38::MoePrefillTimings::down_reduce_ms)
+                      << ",\"down_qmm\":"
+                      << component_median(&qwen38::MoePrefillTimings::down_qmm_ms)
+                      << ",\"route_reduce\":"
+                      << component_median(&qwen38::MoePrefillTimings::route_reduce_ms)
                       << ",\"shared_expert\":"
                       << component_median(&qwen38::MoePrefillTimings::shared_expert_ms)
                       << ",\"merge\":"

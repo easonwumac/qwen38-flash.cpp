@@ -17,7 +17,12 @@ struct RouterSelection {
 struct MoePrefillTimings {
     double routing_ms{0.0};
     double gate_up_ms{0.0};
+    double gate_qmm_ms{0.0};
+    double up_qmm_ms{0.0};
+    double swiglu_ms{0.0};
     double down_reduce_ms{0.0};
+    double down_qmm_ms{0.0};
+    double route_reduce_ms{0.0};
     double shared_expert_ms{0.0};
     double merge_ms{0.0};
 };

@@ -595,7 +595,8 @@ MlxArray SparseMoe::forward_prefill_impl(
     }
 
     const auto gate_up_started = Clock::now();
-    MlxArray gate = MlxArray::gather_quantized_matmul(
+    const auto gate_started = Clock::now();
+    MlxArray raw_gate = MlxArray::gather_quantized_matmul(
         gathered_input,
         expert_gate_.weight,
         expert_gate_.scales,
@@ -604,7 +605,12 @@ MlxArray SparseMoe::forward_prefill_impl(
         sorted_experts,
         group_size_,
         expert_gate_.bits,
-        true).silu();
+        true);
+    if (timings != nullptr) {
+        raw_gate.eval();
+        timings->gate_qmm_ms = elapsed_ms(gate_started);
+    }
+    const auto up_started = Clock::now();
     MlxArray up = MlxArray::gather_quantized_matmul(
         gathered_input,
         expert_up_.weight,
@@ -615,9 +621,16 @@ MlxArray SparseMoe::forward_prefill_impl(
         group_size_,
         expert_up_.bits,
         true);
+    if (timings != nullptr) {
+        up.eval();
+        timings->up_qmm_ms = elapsed_ms(up_started);
+    }
+    const auto swiglu_started = Clock::now();
+    MlxArray gate = raw_gate.silu();
     MlxArray expert_hidden = MlxArray::multiply(gate, up);
     if (timings != nullptr) {
         expert_hidden.eval();
+        timings->swiglu_ms = elapsed_ms(swiglu_started);
         timings->gate_up_ms = elapsed_ms(gate_up_started);
     }
     const std::vector<int> expert_shape = expert_hidden.shape();
@@ -635,6 +648,11 @@ MlxArray SparseMoe::forward_prefill_impl(
         group_size_,
         expert_down_.bits,
         true).reshape(std::vector<int>{slots, hidden_size});
+    if (timings != nullptr) {
+        down.eval();
+        timings->down_qmm_ms = elapsed_ms(down_started);
+    }
+    const auto route_reduce_started = Clock::now();
     MlxArray unsorted = MlxArray::take_axis(down, inverse_order, 0).reshape(
         std::vector<int>{1, rows, top_k, hidden_size});
     MlxArray weighted = MlxArray::multiply(
@@ -642,6 +660,7 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray routed = weighted.sum_axis(2);
     if (timings != nullptr) {
         routed.eval();
+        timings->route_reduce_ms = elapsed_ms(route_reduce_started);
         timings->down_reduce_ms = elapsed_ms(down_started);
     }
     const auto shared_started = Clock::now();
