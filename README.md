@@ -42,6 +42,21 @@ The two paths must come from compatible `mlx`/`mlx-c` revisions. They are not
 downloaded implicitly, so offline and reproducible builds do not silently change
 the compute backend.
 
+Build the native tokenizer with `utf8proc` for Unicode NFC/category parity:
+
+```bash
+cmake -S . -B build-tokenizer -DQWEN38_ENABLE_TOKENIZER=ON \
+  -DQWEN38_UTF8PROC_INCLUDE_DIR=/path/to/include \
+  -DQWEN38_UTF8PROC_LIBRARY_DIR=/path/to/lib
+cmake --build build-tokenizer --parallel
+./build-tokenizer/qwen38-tokenize /path/to/model "Hello, world!"
+```
+
+The tokenizer implements Qwen's Unicode-aware pre-split, byte-level mapping,
+BPE merges, NFC normalization, special tokens, and decoding in C++. Real-model
+parity fixtures cover English, CJK, Korean, code, whitespace, contractions,
+emoji, CRLF, combining marks, and chat control tokens.
+
 Run the server:
 
 ```bash
