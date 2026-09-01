@@ -148,6 +148,10 @@ diagnostics. At the same threshold, an MTP verifier evaluates all S query rows
 in one causal grouped-query SDPA call while retaining a sliced checkpoint after
 each row for partial acceptance and rollback. Set `QWEN38_BATCH_SDPA_VERIFY=0`
 to restore one SDPA call per verifier row.
+With both long-context paths active, exact history-cache hits at 512 or more
+cached tokens may propose four tokens at once and fall back to the adaptive
+S2/S3 continuation when no four-token match exists. Set
+`QWEN38_LONG_HISTORY_DEPTH4=0` to restore adaptive-depth history everywhere.
 
 The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,

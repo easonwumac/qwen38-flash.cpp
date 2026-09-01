@@ -60,6 +60,16 @@ bool is_prefix(
         std::equal(prefix.begin(), prefix.end(), tokens.begin());
 }
 
+bool use_long_history_depth_four(const std::size_t token_count) {
+    if (token_count < 512) return false;
+    const char* enabled = std::getenv("QWEN38_LONG_HISTORY_DEPTH4");
+    if (enabled != nullptr && std::string_view(enabled) == "0") return false;
+    const char* sdpa_decode = std::getenv("QWEN38_SDPA_DECODE");
+    if (sdpa_decode != nullptr && std::string_view(sdpa_decode) != "1") return false;
+    const char* batch_verify = std::getenv("QWEN38_BATCH_SDPA_VERIFY");
+    return batch_verify == nullptr || std::string_view(batch_verify) != "0";
+}
+
 } // namespace
 
 NativeEngine::NativeEngine(
@@ -210,8 +220,14 @@ GenerationResult NativeEngine::complete(
 
         std::vector<std::uint32_t> history_proposal;
         if (history_draft_enabled) {
+            const bool try_depth_four = use_long_history_depth_four(state.token_count);
+            const std::size_t history_depth = try_depth_four ? 4 : depth_policy.depth();
             history_proposal = history_draft.propose(
-                std::min<std::size_t>(depth_policy.depth(), remaining));
+                std::min<std::size_t>(history_depth, remaining));
+            if (history_proposal.size() < 2 && try_depth_four) {
+                history_proposal = history_draft.propose(
+                    std::min<std::size_t>(depth_policy.depth(), remaining));
+            }
         }
         const bool used_history_draft = history_proposal.size() >= 2;
         MtpRoundStep step = used_history_draft
