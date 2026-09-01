@@ -108,7 +108,10 @@ is the default conservative graph with chunk 64.
 companion, short prompts start at depth 2 for an eight-round probe and promote
 to depth 3 only after at least 10 accepted drafts. A promoted request is checked
 in 12-round windows and permanently demoted to depth 2 below 50% per-draft
-acceptance. Prompts longer than 2,048 tokens stay at depth 2. Without an MTP
+acceptance. The `speed` profile also treats the first four depth-3 rounds as a
+probation window and demotes immediately when they are already below 50%; set
+`QWEN38_MTP_EARLY_DEMOTION=0` to retain the full initial 12-round window.
+Prompts longer than 2,048 tokens stay at depth 2. Without an MTP
 companion auto mode stays serial. `3` uses the same adaptive cap explicitly;
 `off`, `2`, and `4` are fixed alternatives. On a 64 GB Mac, auto mode also
 selects the verified

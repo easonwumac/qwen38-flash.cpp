@@ -3,6 +3,8 @@
 
 #include "test.hpp"
 
+#include <cstdlib>
+
 void run_mtp_depth_policy_tests() {
     qwen38::MtpDepthPolicy fixed_two(2, 10);
     for (int round = 0; round < 16; ++round) fixed_two.observe(2, 2);
@@ -37,6 +39,21 @@ void run_mtp_depth_policy_tests() {
     for (int round = 0; round < 12; ++round) exact_half.observe(3, round < 6 ? 3 : 0);
     QWEN38_CHECK(exact_half.depth() == 3);
     QWEN38_CHECK(exact_half.demotions() == 0);
+
+    setenv("QWEN38_MTP_EARLY_DEMOTION", "1", 1);
+    qwen38::MtpDepthPolicy failed_promotion(3, 32);
+    for (int round = 0; round < 8; ++round) failed_promotion.observe(2, 2);
+    for (int round = 0; round < 3; ++round) failed_promotion.observe(3, 1);
+    QWEN38_CHECK(failed_promotion.depth() == 3);
+    failed_promotion.observe(3, 1);
+    QWEN38_CHECK(failed_promotion.depth() == 2);
+    QWEN38_CHECK(failed_promotion.demotions() == 1);
+
+    qwen38::MtpDepthPolicy passed_probation(3, 32);
+    for (int round = 0; round < 8; ++round) passed_probation.observe(2, 2);
+    for (int round = 0; round < 4; ++round) passed_probation.observe(3, 2);
+    QWEN38_CHECK(passed_probation.depth() == 3);
+    unsetenv("QWEN38_MTP_EARLY_DEMOTION");
 
     qwen38::MtpDepthPolicy explicit_four(4, 100000);
     QWEN38_CHECK(explicit_four.depth() == 4);

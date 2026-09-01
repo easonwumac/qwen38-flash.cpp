@@ -1,6 +1,8 @@
 #include "qwen38/mtp_depth_policy.hpp"
 
+#include <cstdlib>
 #include <stdexcept>
+#include <string_view>
 
 namespace qwen38 {
 namespace {
@@ -9,6 +11,12 @@ constexpr std::size_t short_prompt_limit = 2048;
 constexpr std::size_t probe_round_limit = 8;
 constexpr std::size_t probe_accept_threshold = 10;
 constexpr std::size_t monitor_round_limit = 12;
+constexpr std::size_t promotion_probation_round_limit = 4;
+
+bool early_demotion_enabled() {
+    const char* value = std::getenv("QWEN38_MTP_EARLY_DEMOTION");
+    return value != nullptr && std::string_view(value) == "1";
+}
 
 } // namespace
 
@@ -49,6 +57,14 @@ void MtpDepthPolicy::observe(
     ++monitor_rounds_;
     monitor_proposed_ += proposed;
     monitor_accepted_ += accepted;
+    if (early_demotion_enabled() &&
+        monitor_rounds_ == promotion_probation_round_limit &&
+        monitor_accepted_ * 2 < monitor_proposed_) {
+        depth_ = 2;
+        monitoring_ = false;
+        ++demotions_;
+        return;
+    }
     if (monitor_rounds_ == monitor_round_limit) {
         if (monitor_accepted_ * 2 < monitor_proposed_) {
             depth_ = 2;
