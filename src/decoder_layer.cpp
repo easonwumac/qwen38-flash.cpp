@@ -43,9 +43,17 @@ DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
     }
     snapshot.full_attention.token_count = state.full_attention.token_count;
     snapshot.full_attention.position_base = state.full_attention.position_base;
+    snapshot.full_attention.qsa_pooled_count =
+        state.full_attention.qsa_pooled_count;
     if (state.full_attention.token_count != 0) {
         snapshot.full_attention.keys = state.full_attention.keys.share();
         snapshot.full_attention.values = state.full_attention.values.share();
+        snapshot.full_attention.qsa_raw_keys =
+            state.full_attention.qsa_raw_keys.share();
+        if (state.full_attention.qsa_pooled_count != 0) {
+            snapshot.full_attention.qsa_pooled_keys =
+                state.full_attention.qsa_pooled_keys.share();
+        }
     }
     snapshot.ple.ngram = state.ple.ngram;
     snapshot.ple.convolution_initialized = state.ple.convolution_initialized;

@@ -65,6 +65,24 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     result.config_.key_value_head_count = size_value(
         text.at("num_key_value_heads"), "num_key_value_heads");
     result.config_.head_dimension = size_value(text.at("head_dim"), "head_dim");
+    result.config_.indexer_head_count = size_value(
+        text.at("indexer_n_heads"), "indexer_n_heads");
+    result.config_.indexer_key_value_head_count = size_value(
+        text.at("indexer_kv_heads"), "indexer_kv_heads");
+    result.config_.indexer_head_dimension = size_value(
+        text.at("indexer_head_dim"), "indexer_head_dim");
+    result.config_.indexer_budget = size_value(
+        text.at("indexer_budget"), "indexer_budget");
+    result.config_.indexer_compress_ratio = size_value(
+        text.at("indexer_compress_ratio"), "indexer_compress_ratio");
+    if (result.config_.indexer_head_count == 0 ||
+        result.config_.indexer_key_value_head_count != 1 ||
+        result.config_.indexer_head_dimension == 0 ||
+        result.config_.indexer_compress_ratio == 0 ||
+        result.config_.indexer_budget == 0 ||
+        result.config_.indexer_budget % result.config_.indexer_compress_ratio != 0) {
+        throw std::runtime_error("unsupported Qwen3.8 QSA geometry");
+    }
     result.config_.hyper_connection_count = size_value(text.at("hc_count"), "hc_count");
     result.config_.hyper_connection_low_rank = size_value(text.at("hc_lowrank"), "hc_lowrank");
     result.config_.moe_intermediate_size = size_value(

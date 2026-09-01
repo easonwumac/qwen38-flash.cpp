@@ -30,6 +30,11 @@ struct ModelConfig {
     std::size_t attention_head_count{0};
     std::size_t key_value_head_count{0};
     std::size_t head_dimension{0};
+    std::size_t indexer_head_count{0};
+    std::size_t indexer_key_value_head_count{0};
+    std::size_t indexer_head_dimension{0};
+    std::size_t indexer_budget{0};
+    std::size_t indexer_compress_ratio{0};
     std::size_t hyper_connection_count{0};
     std::size_t hyper_connection_low_rank{0};
     std::size_t moe_intermediate_size{0};
@@ -55,6 +60,7 @@ struct ModelConfig {
     std::vector<std::string> layer_types;
     std::vector<std::size_t> ple_layer_ids;
     bool attention_norm_has_offset{true};
+    bool indexer_norm_has_offset{true};
 };
 
 class ModelManifest final {

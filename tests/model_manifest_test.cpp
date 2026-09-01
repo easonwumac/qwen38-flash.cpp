@@ -47,6 +47,8 @@ void run_model_manifest_tests() {
         "vocab_size":248320,"max_position_embeddings":262144,
         "mtp_num_hidden_layers":1,"num_attention_heads":24,
         "num_key_value_heads":2,"head_dim":256,"hc_count":4,
+        "indexer_n_heads":4,"indexer_kv_heads":1,"indexer_head_dim":128,
+        "indexer_budget":2048,"indexer_compress_ratio":4,
         "hc_lowrank":320,"rms_norm_eps":0.000001,
         "moe_intermediate_size":640,"shared_expert_intermediate_size":640,
         "linear_conv_kernel_dim":4,"linear_key_head_dim":128,
@@ -84,6 +86,11 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().max_context_tokens == 262144);
     QWEN38_CHECK(manifest.config().quantization_bits == 4);
     QWEN38_CHECK(manifest.config().hyper_connection_count == 4);
+    QWEN38_CHECK(manifest.config().indexer_head_count == 4);
+    QWEN38_CHECK(manifest.config().indexer_key_value_head_count == 1);
+    QWEN38_CHECK(manifest.config().indexer_head_dimension == 128);
+    QWEN38_CHECK(manifest.config().indexer_budget == 2048);
+    QWEN38_CHECK(manifest.config().indexer_compress_ratio == 4);
     QWEN38_CHECK(manifest.config().hyper_connection_low_rank == 320);
     QWEN38_CHECK(manifest.config().moe_intermediate_size == 640);
     QWEN38_CHECK(manifest.config().normalize_topk_probability);

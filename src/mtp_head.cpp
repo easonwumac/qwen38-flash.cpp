@@ -254,7 +254,14 @@ void QwenMtpHead::consume_decode(
     MtpDecodeState& state) const {
     MlxArray stream = forward_stream(
         target_pre_mixer_stream, next_token, query_position, state, nullptr);
-    stream.eval();
+    std::vector<const MlxArray*> outputs{&stream};
+    if (state.layer.full_attention.qsa_raw_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_raw_keys);
+    }
+    if (state.layer.full_attention.qsa_pooled_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_pooled_keys);
+    }
+    MlxArray::eval_all(outputs);
 }
 
 void QwenMtpHead::consume_committed_batch(

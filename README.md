@@ -10,11 +10,13 @@ a UI and is not a wrapper around `mlx-serve`.
 
 > [!IMPORTANT]
 > The current milestone performs real end-to-end greedy generation through all
-> 48 layers, runs transactional depth-2 MTP when a companion is present, and
+> 48 layers, runs transactional adaptive depth-2/3 MTP when a companion is present, and
 > serves OpenAI-style completion APIs with live SSE token streaming and bounded
-> chunked prefill. It is not yet the final optimized release: the controlled
-> decode targets remain unmet, and QSA contexts above the 2,048-token selection
-> budget remain unsupported.
+> chunked prefill. Qwen Sparse Attention now owns raw/pooled indexer state,
+> causal top-block selection, snapshots, and verifier rollback beyond the
+> 2,048-token selection budget. It is not yet the final optimized release: the
+> non-MTP and mixed-workload decode targets remain unmet, and 128K/262K context
+> operation is not yet validated.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -31,9 +33,16 @@ including depthwise convolution and recurrent caches, forget/beta gates, Q/K
 normalization, gated RMSNorm, and Q4 output projection against a third oracle.
 `qwen38-self-attention-smoke MODEL_DIRECTORY` verifies two cached layer-3
 full-attention steps, including partial RoPE, grouped-query expansion, and the
-query output gate. QSA contexts above its selection budget are not implemented.
+query output gate. Adding `--qsa` forwards the real indexer through the
+2,052-token engagement boundary and checks batched-verifier output against the
+serial path together with every rollback checkpoint's raw/pooled cache frontier.
 `qwen38-ngram-smoke MODEL_DIRECTORY` validates PLE hash rows and the low-memory
 SSD AoS row gather against the original 30 GB safetensors table.
+
+`qwen38-long-context-smoke MODEL_DIRECTORY PROMPT.txt [CHUNK_ROWS [MAX_TOKENS]]`
+is the guarded full-model QSA check. It requires `devtools/memory_guard.py`,
+defaults to conservative 64-row chunks, and reports linear/full-attention time,
+actual pooled blocks, prefill throughput, and one-token decode latency.
 
 ## Build
 

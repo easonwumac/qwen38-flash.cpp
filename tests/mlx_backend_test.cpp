@@ -116,6 +116,53 @@ int main() {
         std::cerr << "MLX causal SDPA prefix offset mismatch\n";
         return 1;
     }
+    const std::array<std::int32_t, 3> mask_values{1, 0, 1};
+    const std::array<int, 4> mask_shape{1, 1, 1, 3};
+    const auto attention_mask = qwen38::MlxArray::from_int32(
+        mask_values, mask_shape).astype(MLX_BOOL);
+    const auto masked_attention = qwen38::MlxArray::scaled_dot_product_attention(
+        suffix_query, suffix_keys, suffix_values, 1.0F, attention_mask).to_float32();
+    if (masked_attention.size() != 1 ||
+        std::abs(masked_attention[0] - 4.0F) > 1.0e-5F) {
+        std::cerr << "MLX masked SDPA mismatch\n";
+        return 1;
+    }
+    const auto range = qwen38::MlxArray::arange(0.0, 3.0, 1.0, MLX_INT32);
+    const std::array<int, 2> range_row_shape{1, 3};
+    const std::array<int, 2> range_grid_shape{2, 3};
+    const auto range_grid = range.reshape(range_row_shape).broadcast_to(range_grid_shape);
+    const std::array<std::int32_t, 1> two_value{2};
+    const std::array<int, 0> scalar_shape{};
+    const auto two = qwen38::MlxArray::from_int32(two_value, scalar_shape);
+    const auto low = qwen38::MlxArray::less_equal(range_grid, two);
+    const auto high = qwen38::MlxArray::greater_equal(range_grid, two);
+    const auto edge = qwen38::MlxArray::logical_and(low, high);
+    const auto union_mask = qwen38::MlxArray::logical_or(edge, high);
+    const auto chosen = qwen38::MlxArray::where(
+        union_mask,
+        range_grid,
+        qwen38::MlxArray::zeros(scalar_shape, MLX_INT32));
+    if (chosen.astype(MLX_FLOAT32).to_float32() !=
+        std::vector<float>({0, 0, 2, 0, 0, 2})) {
+        std::cerr << "MLX QSA selection primitives mismatch\n";
+        return 1;
+    }
+    const std::array<std::int32_t, 2> scatter_indices_values{0, 2};
+    const std::array<int, 2> scatter_indices_shape{1, 2};
+    const auto scatter_indices = qwen38::MlxArray::from_int32(
+        scatter_indices_values, scatter_indices_shape);
+    const std::array<std::int32_t, 1> true_value{1};
+    const auto true_scalar = qwen38::MlxArray::from_int32(
+        true_value, scalar_shape).astype(MLX_BOOL);
+    const auto scattered = qwen38::MlxArray::put_along_axis(
+        qwen38::MlxArray::zeros(range_row_shape, MLX_BOOL),
+        scatter_indices,
+        true_scalar,
+        -1).astype(MLX_FLOAT32).to_float32();
+    if (scattered != std::vector<float>({1, 0, 1})) {
+        std::cerr << "MLX put_along_axis mismatch\n";
+        return 1;
+    }
     const std::array<float, 4> signed_values{-4.0F, -1.0F, 0.0F, 9.0F};
     const auto signed_array = qwen38::MlxArray::from_float32(signed_values, shape);
     if (signed_array.absolute().to_float32() != std::vector<float>({4, 1, 0, 9}) ||
@@ -306,13 +353,28 @@ int main() {
         qwen38::MlxArray::from_float32(left_values, shape);
     mtp_state.layer.linear_attention.recurrent =
         qwen38::MlxArray::from_float32(right_values, shape);
+    mtp_state.layer.full_attention.token_count = 2;
+    mtp_state.layer.full_attention.keys =
+        qwen38::MlxArray::from_float32(left_values, shape);
+    mtp_state.layer.full_attention.values =
+        qwen38::MlxArray::from_float32(right_values, shape);
+    mtp_state.layer.full_attention.qsa_raw_keys =
+        qwen38::MlxArray::from_float32(left_values, shape);
+    mtp_state.layer.full_attention.qsa_pooled_keys =
+        qwen38::MlxArray::from_float32(right_values, shape);
+    mtp_state.layer.full_attention.qsa_pooled_count = 1;
     auto mtp_snapshot = qwen38::snapshot_mtp_decode_state(mtp_state);
     mtp_state = {};
     if (mtp_snapshot.row_count != 19 || mtp_snapshot.position_base != 41 ||
         mtp_snapshot.layer.linear_attention.convolution.to_float32() !=
             std::vector<float>({1, 2, 3, 4}) ||
         mtp_snapshot.layer.linear_attention.recurrent.to_float32() !=
-            std::vector<float>({5, 6, 7, 8})) {
+            std::vector<float>({5, 6, 7, 8}) ||
+        mtp_snapshot.layer.full_attention.qsa_raw_keys.to_float32() !=
+            std::vector<float>({1, 2, 3, 4}) ||
+        mtp_snapshot.layer.full_attention.qsa_pooled_keys.to_float32() !=
+            std::vector<float>({5, 6, 7, 8}) ||
+        mtp_snapshot.layer.full_attention.qsa_pooled_count != 1) {
         std::cerr << "MTP decode-state snapshot mismatch\n";
         return 1;
     }

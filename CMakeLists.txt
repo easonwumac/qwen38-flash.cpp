@@ -199,6 +199,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         target_link_libraries(qwen38-prefill-prompt-smoke PRIVATE qwen38_mlx qwen38_tokenizer)
         set_target_properties(qwen38-prefill-prompt-smoke PROPERTIES
             BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+        add_executable(qwen38-long-context-smoke src/long_context_smoke.cpp)
+        target_link_libraries(qwen38-long-context-smoke PRIVATE qwen38_mlx qwen38_tokenizer)
+        set_target_properties(qwen38-long-context-smoke PROPERTIES
+            BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     endif()
 endif()
 

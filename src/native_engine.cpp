@@ -53,9 +53,9 @@ ModelManifest prepare_manifest(
     return manifest;
 }
 
-std::uint32_t argmax_token(const MlxArray& logits) {
+std::uint32_t argmax_token(const MlxArray& logits, const ModelDecodeState& state) {
     MlxArray token = logits.argmax_all();
-    token.eval();
+    eval_with_decode_state(token, state);
     return token.item_uint32();
 }
 
@@ -397,7 +397,7 @@ GenerationResult NativeEngine::complete_impl(
                 }
             }
             TargetDecodeStep step = model_.forward_decode_capture(current, state);
-            const std::uint32_t token = argmax_token(step.logits);
+            const std::uint32_t token = argmax_token(step.logits, state);
             previous_target_stream = std::move(step.pre_mixer_stream);
             current = token;
             if (is_stop_token(token)) {

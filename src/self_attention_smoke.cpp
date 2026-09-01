@@ -2,6 +2,7 @@
 #include "qwen38/self_attention.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -9,6 +10,8 @@
 #include <exception>
 #include <iostream>
 #include <numeric>
+#include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -42,11 +45,115 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::int32_t 
     return mixer.read(stream).mixed;
 }
 
+qwen38::SelfAttentionState snapshot(const qwen38::SelfAttentionState& state) {
+    qwen38::SelfAttentionState result;
+    result.token_count = state.token_count;
+    result.position_base = state.position_base;
+    result.qsa_pooled_count = state.qsa_pooled_count;
+    if (state.token_count != 0) {
+        result.keys = state.keys.share();
+        result.values = state.values.share();
+        result.qsa_raw_keys = state.qsa_raw_keys.share();
+    }
+    if (state.qsa_pooled_count != 0) {
+        result.qsa_pooled_keys = state.qsa_pooled_keys.share();
+    }
+    return result;
+}
+
+double cosine(const std::vector<float>& left, const std::vector<float>& right) {
+    if (left.size() != right.size() || left.empty()) {
+        throw std::runtime_error("QSA parity output shape mismatch");
+    }
+    double dot = 0.0;
+    double left_norm = 0.0;
+    double right_norm = 0.0;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        dot += static_cast<double>(left[index]) * right[index];
+        left_norm += static_cast<double>(left[index]) * left[index];
+        right_norm += static_cast<double>(right[index]) * right[index];
+    }
+    return dot / std::sqrt(left_norm * right_norm);
+}
+
+int qsa_smoke(
+    qwen38::MlxTensorStore& tensors,
+    qwen38::SelfAttention& layer,
+    const qwen38::MlxArray& input) {
+    const auto& config = tensors.manifest().config();
+    const std::size_t budget = config.indexer_budget;
+    const std::size_t ratio = config.indexer_compress_ratio;
+    if (budget % 512 != 0 || ratio == 0) {
+        throw std::runtime_error("QSA smoke expects a 512-aligned selection budget");
+    }
+    static_cast<void>(::setenv("QWEN38_SDPA_PREFILL", "1", 1));
+    qwen38::SelfAttentionState origin;
+    for (std::size_t offset = 0; offset < budget; offset += 512) {
+        const std::array<int, 3> repetitions{1, 512, 1};
+        auto chunk = input.tile(repetitions);
+        auto output = layer.forward_prefill(chunk, origin);
+        output.eval();
+    }
+    if (origin.token_count != budget ||
+        origin.qsa_raw_keys.shape() != std::vector<int>({
+            1, static_cast<int>(budget), static_cast<int>(config.indexer_head_dimension)})) {
+        throw std::runtime_error("QSA pre-engagement state is incomplete");
+    }
+
+    qwen38::SelfAttentionState batched_origin = snapshot(origin);
+    qwen38::SelfAttentionState serial = snapshot(origin);
+    const std::array<int, 3> verify_repetitions{1, static_cast<int>(ratio), 1};
+    auto verify_input = input.tile(verify_repetitions);
+    std::vector<qwen38::SelfAttentionState> checkpoints;
+    auto batched = layer.forward_verify(verify_input, batched_origin, checkpoints);
+
+    std::vector<qwen38::MlxArray> serial_rows;
+    serial_rows.reserve(ratio);
+    for (std::size_t row = 0; row < ratio; ++row) {
+        serial_rows.push_back(layer.forward_decode(input, serial));
+    }
+    qwen38::MlxArray serial_output = serial_rows.front().share();
+    for (std::size_t row = 1; row < serial_rows.size(); ++row) {
+        serial_output = qwen38::MlxArray::concatenate(serial_output, serial_rows[row], 1);
+    }
+    const auto batch_values = batched.astype(MLX_FLOAT32).to_float32();
+    const auto serial_values = serial_output.astype(MLX_FLOAT32).to_float32();
+    const double output_cosine = cosine(batch_values, serial_values);
+    const std::size_t engaged_tokens = budget + ratio;
+    const std::size_t expected_blocks = engaged_tokens / ratio;
+    if (checkpoints.size() != ratio || serial.token_count != engaged_tokens ||
+        checkpoints.back().token_count != engaged_tokens ||
+        checkpoints.back().qsa_pooled_count != expected_blocks ||
+        checkpoints.back().qsa_raw_keys.shape() != std::vector<int>({
+            1, static_cast<int>(engaged_tokens),
+            static_cast<int>(config.indexer_head_dimension)}) ||
+        output_cosine < 0.999) {
+        throw std::runtime_error("QSA batched/serial parity or cache contract failed");
+    }
+    for (std::size_t row = 0; row < ratio; ++row) {
+        const std::size_t row_tokens = budget + row + 1;
+        const std::size_t row_blocks = row_tokens / ratio;
+        const std::size_t expected_row_pooled =
+            row_blocks > budget / ratio ? row_blocks : 0;
+        if (checkpoints[row].token_count != budget + row + 1 ||
+            checkpoints[row].qsa_raw_keys.shape()[1] !=
+                static_cast<int>(budget + row + 1) ||
+            checkpoints[row].qsa_pooled_count != expected_row_pooled) {
+            throw std::runtime_error("QSA verifier checkpoint is misaligned");
+        }
+    }
+    std::cout << "{\"qsa_engaged_tokens\":" << engaged_tokens
+              << ",\"raw_rows\":" << checkpoints.back().qsa_raw_keys.shape()[1]
+              << ",\"pooled_blocks\":" << checkpoints.back().qsa_pooled_count
+              << ",\"batch_serial_cosine\":" << output_cosine << "}\n";
+    return EXIT_SUCCESS;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY\n";
+    if (argc < 2 || argc > 3) {
+        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY [--qsa]\n";
         return EXIT_FAILURE;
     }
     try {
@@ -57,6 +164,12 @@ int main(int argc, char** argv) {
             tensors,
             "language_model.model.layers.3.self_attn",
             tensors.manifest().config());
+        if (argc == 3) {
+            if (std::string_view(argv[2]) != "--qsa") {
+                throw std::runtime_error("unknown self-attention smoke mode");
+            }
+            return qsa_smoke(tensors, layer, first_input);
+        }
         std::vector<double> timings;
         std::vector<float> first_values;
         std::vector<float> second_values;

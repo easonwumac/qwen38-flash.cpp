@@ -19,6 +19,7 @@ struct ModelDecodeState {
 };
 
 [[nodiscard]] ModelDecodeState snapshot_decode_state(const ModelDecodeState& state);
+void eval_with_decode_state(const MlxArray& output, const ModelDecodeState& state);
 
 struct GreedyStep {
     std::uint32_t token{0};

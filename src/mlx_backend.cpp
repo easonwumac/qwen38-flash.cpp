@@ -404,6 +404,42 @@ MlxArray MlxArray::scaled_dot_product_attention(
     return result;
 }
 
+MlxArray MlxArray::scaled_dot_product_attention(
+    const MlxArray& queries,
+    const MlxArray& keys,
+    const MlxArray& values,
+    const float scale,
+    const MlxArray& mask) {
+    MlxArray result;
+    MlxArray sinks;
+    const Stream stream;
+    check(
+        mlx_fast_scaled_dot_product_attention(
+            &result.value_,
+            queries.value_,
+            keys.value_,
+            values.value_,
+            scale,
+            "array",
+            mask.value_,
+            sinks.value_,
+            false,
+            stream.get()),
+        "masked scaled dot product attention");
+    return result;
+}
+
+MlxArray MlxArray::arange(
+    const double start,
+    const double stop,
+    const double step,
+    const mlx_dtype dtype) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_arange(&result.value_, start, stop, step, dtype, stream.get()), "arange");
+    return result;
+}
+
 MlxArray MlxArray::reshape(const std::span<const int> shape) const {
     MlxArray result;
     const Stream stream;
@@ -439,6 +475,22 @@ MlxArray MlxArray::repeat_axis(const int repeats, const int axis) const {
     MlxArray result;
     const Stream stream;
     check(mlx_repeat_axis(&result.value_, value_, repeats, axis, stream.get()), "repeat_axis");
+    return result;
+}
+
+MlxArray MlxArray::expand_dims(const int axis) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_expand_dims(&result.value_, value_, axis, stream.get()), "expand_dims");
+    return result;
+}
+
+MlxArray MlxArray::broadcast_to(const std::span<const int> shape) const {
+    MlxArray result;
+    const Stream stream;
+    check(
+        mlx_broadcast_to(&result.value_, value_, shape.data(), shape.size(), stream.get()),
+        "broadcast_to");
     return result;
 }
 
@@ -523,6 +575,51 @@ MlxArray MlxArray::maximum(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
     const Stream stream;
     check(mlx_maximum(&result.value_, left.value_, right.value_, stream.get()), "maximum");
+    return result;
+}
+
+MlxArray MlxArray::less_equal(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_less_equal(&result.value_, left.value_, right.value_, stream.get()),
+        "less_equal");
+    return result;
+}
+
+MlxArray MlxArray::greater_equal(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_greater_equal(&result.value_, left.value_, right.value_, stream.get()),
+        "greater_equal");
+    return result;
+}
+
+MlxArray MlxArray::logical_and(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_logical_and(&result.value_, left.value_, right.value_, stream.get()),
+        "logical_and");
+    return result;
+}
+
+MlxArray MlxArray::logical_or(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_logical_or(&result.value_, left.value_, right.value_, stream.get()),
+        "logical_or");
+    return result;
+}
+
+MlxArray MlxArray::where(
+    const MlxArray& condition,
+    const MlxArray& when_true,
+    const MlxArray& when_false) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_where(
+              &result.value_, condition.value_, when_true.value_, when_false.value_,
+              stream.get()),
+        "where");
     return result;
 }
 
@@ -663,6 +760,20 @@ MlxArray MlxArray::take_along_axis(
     check(
         mlx_take_along_axis(&result.value_, input.value_, indices.value_, axis, stream.get()),
         "take_along_axis");
+    return result;
+}
+
+MlxArray MlxArray::put_along_axis(
+    const MlxArray& input,
+    const MlxArray& indices,
+    const MlxArray& values,
+    const int axis) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_put_along_axis(
+              &result.value_, input.value_, indices.value_, values.value_, axis,
+              stream.get()),
+        "put_along_axis");
     return result;
 }
 

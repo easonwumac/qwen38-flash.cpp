@@ -11,6 +11,9 @@ namespace qwen38 {
 struct SelfAttentionState {
     MlxArray keys;
     MlxArray values;
+    MlxArray qsa_raw_keys;
+    MlxArray qsa_pooled_keys;
+    std::size_t qsa_pooled_count{0};
     std::size_t token_count{0};
     std::size_t position_base{0};
 };
@@ -52,11 +55,27 @@ private:
     [[nodiscard]] MlxArray apply_rope_prefill(
         const MlxArray& input,
         std::size_t position) const;
+    [[nodiscard]] MlxArray apply_rope_rows(
+        const MlxArray& input,
+        std::size_t position,
+        std::size_t step,
+        std::size_t vector_dimension) const;
+    [[nodiscard]] MlxArray update_qsa_and_build_mask(
+        const MlxArray& input,
+        SelfAttentionState& state) const;
+    void copy_qsa_checkpoint(
+        const SelfAttentionState& complete,
+        std::size_t token_count,
+        SelfAttentionState& checkpoint) const;
 
     std::size_t attention_heads_;
     std::size_t key_value_heads_;
     std::size_t head_dimension_;
     std::size_t rotary_dimension_;
+    std::size_t indexer_head_count_;
+    std::size_t indexer_head_dimension_;
+    std::size_t indexer_budget_;
+    std::size_t indexer_compress_ratio_;
     int group_size_;
     float epsilon_;
     double rope_theta_;
@@ -64,8 +83,11 @@ private:
     QuantizedProjection key_projection_;
     QuantizedProjection value_projection_;
     QuantizedProjection output_projection_;
+    QuantizedProjection indexer_projection_;
     MlxArray query_norm_weight_;
     MlxArray key_norm_weight_;
+    MlxArray indexer_query_norm_weight_;
+    MlxArray indexer_key_norm_weight_;
 };
 
 } // namespace qwen38

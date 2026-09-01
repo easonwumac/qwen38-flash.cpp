@@ -68,11 +68,24 @@ public:
         const MlxArray& values,
         float scale,
         bool causal);
+    [[nodiscard]] static MlxArray scaled_dot_product_attention(
+        const MlxArray& queries,
+        const MlxArray& keys,
+        const MlxArray& values,
+        float scale,
+        const MlxArray& mask);
+    [[nodiscard]] static MlxArray arange(
+        double start,
+        double stop,
+        double step,
+        mlx_dtype dtype);
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
     [[nodiscard]] MlxArray transpose() const;
     [[nodiscard]] MlxArray swapaxes(int axis1, int axis2) const;
     [[nodiscard]] MlxArray tile(std::span<const int> repetitions) const;
     [[nodiscard]] MlxArray repeat_axis(int repeats, int axis) const;
+    [[nodiscard]] MlxArray expand_dims(int axis) const;
+    [[nodiscard]] MlxArray broadcast_to(std::span<const int> shape) const;
     [[nodiscard]] MlxArray slice(
         std::span<const int> start,
         std::span<const int> stop,
@@ -86,6 +99,14 @@ public:
     [[nodiscard]] MlxArray square_root() const;
     [[nodiscard]] MlxArray sign() const;
     [[nodiscard]] static MlxArray maximum(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray less_equal(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray greater_equal(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray logical_and(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray logical_or(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray where(
+        const MlxArray& condition,
+        const MlxArray& when_true,
+        const MlxArray& when_false);
     [[nodiscard]] MlxArray softmax_axis(int axis) const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray sum_axis(int axis, bool keep_dimensions = false) const;
@@ -118,6 +139,11 @@ public:
     [[nodiscard]] static MlxArray take_along_axis(
         const MlxArray& input,
         const MlxArray& indices,
+        int axis);
+    [[nodiscard]] static MlxArray put_along_axis(
+        const MlxArray& input,
+        const MlxArray& indices,
+        const MlxArray& values,
         int axis);
     [[nodiscard]] MlxArray argpartition_axis(int kth, int axis) const;
     [[nodiscard]] MlxArray argsort_axis(int axis) const;

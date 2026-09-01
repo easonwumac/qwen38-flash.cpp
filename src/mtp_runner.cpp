@@ -13,9 +13,22 @@
 namespace qwen38 {
 namespace {
 
-std::uint32_t argmax_token(const MlxArray& logits) {
+void append_head_qsa_state(
+    std::vector<const MlxArray*>& outputs,
+    const MtpDecodeState& state) {
+    if (state.layer.full_attention.qsa_raw_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_raw_keys);
+    }
+    if (state.layer.full_attention.qsa_pooled_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_pooled_keys);
+    }
+}
+
+std::uint32_t argmax_token(const MlxArray& logits, const MtpDecodeState& state) {
     MlxArray token = logits.argmax_all();
-    token.eval();
+    std::vector<const MlxArray*> outputs{&token};
+    append_head_qsa_state(outputs, state);
+    MlxArray::eval_all(outputs);
     return token.item_uint32();
 }
 
@@ -40,8 +53,9 @@ std::vector<std::uint32_t> draft_lazy_chain(
         stream = std::move(step.pre_mixer_stream);
     }
     std::vector<const MlxArray*> outputs;
-    outputs.reserve(draft_arrays.size());
+    outputs.reserve(draft_arrays.size() + 2);
     for (const MlxArray& draft : draft_arrays) outputs.push_back(&draft);
+    append_head_qsa_state(outputs, head_state);
     MlxArray::eval_all(outputs);
     std::vector<std::uint32_t> drafts;
     drafts.reserve(draft_arrays.size());
@@ -173,14 +187,14 @@ MtpRoundStep run_greedy_mtp_round_reference(
         drafts.reserve(draft_depth);
         MtpDecodeStep draft = head.forward_decode(
             previous_target_stream, current_token, query_position, head_state);
-        drafts.push_back(argmax_token(draft.logits));
+        drafts.push_back(argmax_token(draft.logits, head_state));
         for (std::size_t index = 1; index < draft_depth; ++index) {
             draft = head.forward_decode(
                 draft.pre_mixer_stream,
                 drafts.back(),
                 query_position + index,
                 head_state);
-            drafts.push_back(argmax_token(draft.logits));
+            drafts.push_back(argmax_token(draft.logits, head_state));
         }
     }
     const double draft_ms = std::chrono::duration<double, std::milli>(

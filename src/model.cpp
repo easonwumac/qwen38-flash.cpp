@@ -61,6 +61,19 @@ MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
     return batch.slice(start, stop, strides);
 }
 
+void append_qsa_arrays(
+    std::vector<const MlxArray*>& arrays,
+    const ModelDecodeState& state) {
+    for (const DecoderLayerState& layer : state.layers) {
+        if (layer.full_attention.qsa_raw_keys.get().ctx != nullptr) {
+            arrays.push_back(&layer.full_attention.qsa_raw_keys);
+        }
+        if (layer.full_attention.qsa_pooled_keys.get().ctx != nullptr) {
+            arrays.push_back(&layer.full_attention.qsa_pooled_keys);
+        }
+    }
+}
+
 } // namespace
 
 QwenModel::QuantizedTensor QwenModel::load_quantized(
@@ -119,6 +132,13 @@ ModelDecodeState QwenModel::snapshot_state(const ModelDecodeState& state) const 
     return snapshot_decode_state(state);
 }
 
+void eval_with_decode_state(const MlxArray& output, const ModelDecodeState& state) {
+    std::vector<const MlxArray*> arrays{&output};
+    arrays.reserve(1 + state.layers.size() * 2);
+    append_qsa_arrays(arrays, state);
+    MlxArray::eval_all(arrays);
+}
+
 MlxArray QwenModel::embed(const std::uint32_t token) const {
     if (token >= vocabulary_size_) throw std::runtime_error("token id is out of range");
     const std::vector<std::int32_t> token_values{static_cast<std::int32_t>(token)};
@@ -160,7 +180,7 @@ MlxArray QwenModel::consume_decode_capture(
     ModelDecodeState& state) const {
     HiddenDecodeStep hidden =
         forward_hidden_decode_impl(token, state, nullptr, nullptr);
-    hidden.pre_mixer_stream.eval();
+    eval_with_decode_state(hidden.pre_mixer_stream, state);
     return std::move(hidden.pre_mixer_stream);
 }
 
@@ -202,7 +222,7 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
         const bool barrier = (layer + 1) % barrier_stride == 0 ||
             layer + 1 == layers_.size();
         if (barrier) {
-            stream_batch.eval();
+            eval_with_decode_state(stream_batch, state);
             if (layer_ms != nullptr) {
                 const auto now = std::chrono::steady_clock::now();
                 const double window_ms = std::chrono::duration<double, std::milli>(
@@ -271,8 +291,9 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         // an explicit stride keeps a clean diagnostic rollback.
         if ((layer + 1) % barrier_stride == 0 || layer + 1 == layers_.size()) {
             std::vector<const MlxArray*> layer_outputs;
-            layer_outputs.reserve(streams.size());
+            layer_outputs.reserve(streams.size() + layers_.size() * 2);
             for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
+            append_qsa_arrays(layer_outputs, checkpoints.back());
             MlxArray::eval_all(layer_outputs);
         }
         if (layer_ms != nullptr) {
@@ -402,7 +423,7 @@ GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelDecodeState&
     if (logits.size() != vocabulary_size_) throw std::runtime_error("language head width mismatch");
     MlxArray token_array = logits.argmax_all();
     MlxArray selected_logit = MlxArray::take(logits, token_array).astype(MLX_FLOAT32);
-    selected_logit.eval();
+    eval_with_decode_state(selected_logit, state);
     return {
         .token = token_array.item_uint32(),
         .logit = selected_logit.item_float32(),

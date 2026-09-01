@@ -134,11 +134,23 @@ oracle exactly:
 | first output | 5.597035408 |
 | second output | 11.505207062 |
 
-The second step measures around 0.75 ms warm median in isolation. At two tokens,
-the QSA indexer selects the entire visible causal tail, so ordinary attention is
-semantically exact. The compressed-key indexer and block-selection mask for
-contexts above the 2,048-token budget remain outstanding; this limitation is
-explicit rather than silently treating all long-context tokens as selected.
+The second step measures around 0.75 ms warm median in isolation. QSA keeps the
+raw projected key stream until complete ratio-4 blocks can be pooled with an
+FP32 mean, converted back to the checkpoint dtype, normalized, and partially
+RoPE-encoded at the block origin. Each query scores those pooled keys as the
+sum across four heads of `relu(q @ k)`, selects the top 512 causally visible
+blocks, expands them to token positions, and unions the incomplete causal tail.
+The same raw/pooled frontier participates in model snapshots and every verifier
+rollback checkpoint. The first real-weight boundary test engages at 2,052
+tokens and retains 0.999957 batched/serial output cosine.
+
+The first implementation deliberately feeds the resulting Boolean mask to MLX
+SDPA rather than claiming a custom sparse attention kernel. Guarded full-model
+checks at 1,984/2,112 tokens measured 18.31/18.41 prefill tok/s, so crossing the
+selection boundary did not introduce a visible prefill regression. A 3,505-token
+run reached 18.62 prefill tok/s, decoded the next token in 274.9 ms, retained 876
+pooled blocks on all 12 full-attention layers, and peaked at 28.3 GiB RSS. Longer
+retrieval quality and the 128K/262K memory envelope remain release gates.
 
 ## PLE n-gram SSD table
 
@@ -210,11 +222,11 @@ lane for decode and narrow verification. Disabling that lane falls back to
 per-projection Q8 MLX operations rather than interpreting Q8 storage through a
 Q4 fused kernel.
 
-This is not yet the speculative runtime. A guarded real-weight smoke produced a
-well-formed 10,240-wide recursive stream at 36.7 GiB peak RSS. Exact top-1/logit
-parity against the retained fold-capable P73 head remains the promotion gate;
-the current dense short-context attention implementation also lacks MTP QSA
-indexer state and cannot be used beyond its exact visible-history envelope.
+The MTP sidecar owns the same QSA raw/pooled state as the target and includes it
+in proposal evaluation, batched consumption, snapshots, and rollback. A guarded
+real-weight smoke produced a well-formed 10,240-wide recursive stream at 36.7
+GiB peak RSS. Exact target verification remains authoritative; long-context MTP
+quality and throughput still require a complete mixed-domain benchmark.
 
 The retained P185 fold-capable Zig trace is now an executable parity fixture,
 not merely historical documentation. On its position-99 row, a cold C++ head
@@ -226,8 +238,9 @@ encoding split: pre-FC and Hyper-Connection norms are deltas, while attention
 q/k norms are already effective weights. Applying that contract raised logits
 cosine to **0.998923**, final-mixed cosine to **0.998982**, and preserved the
 reference top-1 (`6765`) on both P185 and P192 traces. The short-context MTP
-head therefore passes its 0.995 parity gate. QSA indexer/cache support remains
-required before contexts exceeding the 2,048-token selection budget.
+head therefore passes its 0.995 parity gate. Its QSA state is now carried across
+contexts exceeding the 2,048-token selection budget; long-context MTP acceptance
+and profitability remain unclaimed until measured.
 
 Prompt priming and round commitment now have a dependency-free lifecycle
 contract. A cold prompt creates only real adjacent
@@ -236,17 +249,16 @@ with the preceding valid carry, while gaps fail closed and position zero resets
 stale request state. The commit planner truncates speculative head rows to the
 round origin and stashes only `t1` plus the accepted draft prefix. Unit tests
 cover cold, chunked, reset, gap, partial-accept, and invalid-accept cases under
-ASan/UBSan. The planner is ready to drive the native head but is not yet wired
-to a batched target verifier.
+ASan/UBSan. The planner now drives the native head and batched target verifier.
 
-Target decode state now supports explicit ref-counted snapshots across every
-implemented state family: GDN recurrent/convolution arrays, full-attention KV
-and absolute position, PLE convolution, n-gram history, and the model token
-offset. MLX buffers are shared until a functional update replaces them, so a
-verifier can retain a rollback anchor without duplicating model weights or
-cache storage. Unit coverage destroys the source state and verifies that the
-snapshot remains valid. Per-verify-position capture and QSA state are the next
-requirements before partial-accept rollback is complete.
+Target decode state supports explicit ref-counted snapshots across every state
+family: GDN recurrent/convolution arrays, full-attention KV plus QSA raw/pooled
+indexer caches and absolute position, PLE convolution, n-gram history, and the
+model token offset. MLX buffers are shared until a functional update replaces
+them, so a verifier can retain a rollback anchor without duplicating model
+weights or cache storage. Unit coverage destroys the source state and verifies
+that the snapshot remains valid; the real-weight boundary smoke also checks
+each per-position QSA checkpoint against the serial cache frontier.
 
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
