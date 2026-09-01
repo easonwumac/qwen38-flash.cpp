@@ -1,6 +1,7 @@
 #include "qwen38/native_engine.hpp"
 #include "qwen38/mtp_runner.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <optional>
@@ -58,6 +59,9 @@ NativeEngine::NativeEngine(
       tokenizer_(Tokenizer::load(model_directory)),
       model_(tensors_),
       mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)) {
+    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 64) {
+        throw std::runtime_error("prefill chunk rows must be between 1 and 64");
+    }
     if (mtp_depth_ != 0) {
         if (options_.mtp_cache_limit_bytes == 0) {
             throw std::runtime_error("MTP cache limit must be positive");
@@ -86,13 +90,21 @@ GenerationResult NativeEngine::complete(
         : mtp_head_->make_state();
     std::optional<MlxArray> previous_target_stream;
     const auto prompt_started = std::chrono::steady_clock::now();
-    for (std::size_t index = 0; index + 1 < prompt_tokens.size(); ++index) {
-        if (mtp_head_ != nullptr && previous_target_stream.has_value()) {
-            mtp_head_->consume_decode(
-                *previous_target_stream, prompt_tokens[index], index, mtp_state);
+    const std::size_t prefill_rows = prompt_tokens.size() - 1;
+    for (std::size_t offset = 0; offset < prefill_rows;
+         offset += options_.prefill_chunk_rows) {
+        const std::size_t count = std::min(
+            options_.prefill_chunk_rows, prefill_rows - offset);
+        std::vector<MlxArray> streams = model_.prefill_chunk(
+            std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state);
+        for (std::size_t row = 0; row < count; ++row) {
+            const std::size_t index = offset + row;
+            if (mtp_head_ != nullptr && previous_target_stream.has_value()) {
+                mtp_head_->consume_decode(
+                    *previous_target_stream, prompt_tokens[index], index, mtp_state);
+            }
+            previous_target_stream = std::move(streams[row]);
         }
-        previous_target_stream =
-            model_.consume_decode_capture(prompt_tokens[index], state);
     }
     const double prompt_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - prompt_started).count();

@@ -121,6 +121,42 @@ MlxArray QwenModel::consume_decode_capture(
     return std::move(hidden.pre_mixer_stream);
 }
 
+std::vector<MlxArray> QwenModel::prefill_chunk(
+    const std::span<const std::uint32_t> tokens,
+    ModelDecodeState& state) const {
+    constexpr std::size_t max_prefill_rows = 64;
+    if (tokens.empty() || tokens.size() > max_prefill_rows) {
+        throw std::runtime_error("prefill chunk must contain 1 to 64 tokens");
+    }
+    if (state.layers.size() != layers_.size()) {
+        throw std::runtime_error("model state layer count mismatch");
+    }
+    if (state.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
+        throw std::runtime_error("prefill token count overflow");
+    }
+
+    std::vector<MlxArray> streams;
+    streams.reserve(tokens.size());
+    for (const std::uint32_t token : tokens) {
+        streams.push_back(HyperConnection::initialize_stream(embed(token), stream_count_));
+    }
+    for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
+        std::vector<DecoderLayerState> checkpoints;
+        streams = layers_[layer]->forward_verify_dense_batched(
+            std::move(streams), tokens, state.layers[layer], checkpoints);
+        if (checkpoints.size() != tokens.size()) {
+            throw std::runtime_error("prefill layer checkpoint count mismatch");
+        }
+        state.layers[layer] = std::move(checkpoints.back());
+        std::vector<const MlxArray*> layer_outputs;
+        layer_outputs.reserve(streams.size());
+        for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
+        MlxArray::eval_all(layer_outputs);
+    }
+    state.token_count += tokens.size();
+    return streams;
+}
+
 std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     const std::span<const std::uint32_t> tokens,
     const ModelDecodeState& origin) const {

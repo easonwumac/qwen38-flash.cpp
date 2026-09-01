@@ -62,9 +62,14 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"max_completion_tokens":2})"));
     QWEN38_CHECK(chat.status == 200);
     QWEN38_CHECK(engine.last_prompt.find("<|im_start|>user") != std::string::npos);
+    const auto no_think = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"enable_thinking":false})"));
+    QWEN38_CHECK(no_think.status == 200);
+    QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
     QWEN38_CHECK(inference_api.handle(post("/admin/cache/clear", "{}")).status == 200);
     QWEN38_CHECK(engine.cleared);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 4);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 6);
     QWEN38_CHECK(inference_api.handle(post(
         "/v1/completions", R"({"prompt":"x","stream":true})")).status == 400);
 

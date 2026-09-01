@@ -38,6 +38,21 @@ void reject_streaming(const Json& body) {
     }
 }
 
+ChatTemplateOptions chat_template_options(const Json& body) {
+    ChatTemplateOptions options;
+    if (const Json* value = body.find("enable_thinking"); value != nullptr) {
+        options.enable_thinking = value->as_boolean();
+    }
+    if (const Json* value = body.find("reasoning_effort"); value != nullptr) {
+        const std::string& effort = value->as_string();
+        if (effort == "xhigh") options.reasoning_effort = ReasoningEffort::xhigh;
+        else if (effort == "medium") options.reasoning_effort = ReasoningEffort::medium;
+        else if (effort == "low") options.reasoning_effort = ReasoningEffort::low;
+        else throw std::runtime_error("reasoning_effort must be xhigh, medium, or low");
+    }
+    return options;
+}
+
 std::string completion_json(
     const RuntimeSnapshot& snapshot,
     const GenerationResult& result,
@@ -142,7 +157,7 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                     });
                 }
                 if (messages.empty()) throw std::runtime_error("messages must not be empty");
-                prompt = render_chat_prompt(messages);
+                prompt = render_chat_prompt(messages, chat_template_options(body));
             } else {
                 prompt = body.at("prompt").as_string();
             }

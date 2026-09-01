@@ -72,5 +72,6 @@ int main() {
         std::cerr << "non-special added token decode mismatch\n";
         passed = false;
     }
+    passed &= check(tokenizer, "<think>\n\n</think>\n\n", {248068, 271, 248069, 271});
     return passed ? 0 : 1;
 }

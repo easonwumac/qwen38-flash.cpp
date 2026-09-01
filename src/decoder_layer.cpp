@@ -138,8 +138,8 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
     const std::span<const std::uint32_t> tokens,
     const DecoderLayerState& origin,
     std::vector<DecoderLayerState>& checkpoints) const {
-    if (streams.empty() || streams.size() != tokens.size() || streams.size() > 5) {
-        throw std::runtime_error("decoder verifier batch must contain 1 to 5 matching rows");
+    if (streams.empty() || streams.size() != tokens.size() || streams.size() > 64) {
+        throw std::runtime_error("decoder batch must contain 1 to 64 matching rows");
     }
     checkpoints.clear();
     checkpoints.resize(streams.size());

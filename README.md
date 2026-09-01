@@ -86,7 +86,7 @@ With both MLX and tokenizer options enabled, run the native inference server:
 
 ```bash
 ./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model \
-  --mtp-depth auto
+  --prefill-chunk 64 --mtp-depth auto
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
@@ -101,6 +101,10 @@ are explicit alternatives. On a 64 GB Mac, auto mode also selects the verified
 `12:24` resident-expert safety tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
 already set, caps the MLX cache at 256 MiB, and falls back to serial after two
 consecutive zero-accept rounds.
+
+`--prefill-chunk 64` is the default layer-major prompt path. It bounds the
+temporary prompt batch while preserving the model's production batched
+numerics; accepted values are 1 through 64.
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`

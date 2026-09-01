@@ -272,8 +272,11 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
         if (result.id_to_token_.size() <= id) result.id_to_token_.resize(static_cast<std::size_t>(id) + 1);
         result.id_to_token_[id] = token;
         result.token_to_id_[token] = id;
+        // Hugging Face tokenizers match every added token atomically during
+        // normal encoding. `special` only controls special-token semantics;
+        // Qwen marks output-control tokens such as <think> as non-special.
+        result.special_to_id_.emplace(token, id);
         if (description.at("special").as_boolean()) {
-            result.special_to_id_.emplace(token, id);
             result.special_ids_.insert(id);
         }
     }

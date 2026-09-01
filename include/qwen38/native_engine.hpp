@@ -14,6 +14,9 @@
 namespace qwen38 {
 
 struct NativeEngineOptions {
+    // Layer-major prompt ingestion. 64 matched the retained oMLX production
+    // path while keeping the temporary batch bounded on 64 GiB machines.
+    std::size_t prefill_chunk_rows{64};
     // nullopt selects depth 2 when an MTP sidecar is present, otherwise serial.
     std::optional<std::size_t> mtp_depth;
     std::size_t mtp_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};

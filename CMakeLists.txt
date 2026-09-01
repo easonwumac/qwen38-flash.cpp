@@ -142,6 +142,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-model-bench src/model_bench.cpp)
     target_link_libraries(qwen38-model-bench PRIVATE qwen38_mlx)
     set_target_properties(qwen38-model-bench PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+
+    add_executable(qwen38-prefill-smoke src/prefill_smoke.cpp)
+    target_link_libraries(qwen38-prefill-smoke PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-prefill-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-mtp-head-smoke src/mtp_head_smoke.cpp)
     target_link_libraries(qwen38-mtp-head-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-mtp-head-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
@@ -168,6 +172,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         qwen38-decoder-layer-smoke
         qwen38-model-smoke
         qwen38-model-bench
+        qwen38-prefill-smoke
         qwen38-mtp-head-smoke
         qwen38-mtp-fixture-smoke
         qwen38-mtp-head-compare
@@ -185,6 +190,11 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         endif()
         target_link_libraries(qwen38-server PRIVATE qwen38_inference)
         target_compile_definitions(qwen38-server PRIVATE QWEN38_HAS_INFERENCE=1)
+
+        add_executable(qwen38-prefill-prompt-smoke src/prefill_prompt_smoke.cpp)
+        target_link_libraries(qwen38-prefill-prompt-smoke PRIVATE qwen38_mlx qwen38_tokenizer)
+        set_target_properties(qwen38-prefill-prompt-smoke PROPERTIES
+            BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     endif()
 endif()
 
