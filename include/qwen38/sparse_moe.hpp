@@ -14,6 +14,14 @@ struct RouterSelection {
     std::vector<float> weights;
 };
 
+struct MoePrefillTimings {
+    double routing_ms{0.0};
+    double gate_up_ms{0.0};
+    double down_reduce_ms{0.0};
+    double shared_expert_ms{0.0};
+    double merge_ms{0.0};
+};
+
 class SparseMoe final {
 public:
     SparseMoe(
@@ -29,6 +37,9 @@ public:
     [[nodiscard]] MlxArray forward_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_verify(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_prefill(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_prefill_profiled(
+        const MlxArray& input,
+        MoePrefillTimings& timings) const;
 
 private:
     struct QuantizedProjection {
@@ -52,6 +63,9 @@ private:
         std::size_t expert) const;
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_shared(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_prefill_impl(
+        const MlxArray& input,
+        MoePrefillTimings* timings) const;
 
     std::size_t expert_count_;
     std::size_t experts_per_token_;

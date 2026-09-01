@@ -53,12 +53,20 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::size_t r
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY [PREFILL_ROWS]\n";
+    if (argc < 2 || argc > 4) {
+        std::cerr << "Usage: " << argv[0]
+                  << " MODEL_DIRECTORY [PREFILL_ROWS [components]]\n";
         return EXIT_FAILURE;
     }
     try {
-        const std::size_t rows = argc == 3 ? std::stoul(argv[2]) : 1;
+        const std::size_t rows = argc >= 3 ? std::stoul(argv[2]) : 1;
+        const bool profile_components = argc == 4 && std::string_view(argv[3]) == "components";
+        if (argc == 4 && !profile_components) {
+            throw std::runtime_error("the only supported profiling mode is 'components'");
+        }
+        if (profile_components && rows == 1) {
+            throw std::runtime_error("component profiling requires PREFILL_ROWS greater than 1");
+        }
         if (rows == 0 || rows > 512) {
             throw std::runtime_error("PREFILL_ROWS must be between 1 and 512");
         }
@@ -82,15 +90,21 @@ int main(int argc, char** argv) {
             ? moe.route_decode(input)
             : qwen38::RouterSelection{};
         std::vector<double> timings;
+        std::vector<qwen38::MoePrefillTimings> component_timings;
         std::vector<float> values;
-        for (int iteration = 0; iteration < 6; ++iteration) {
+        const int iterations = profile_components ? 21 : 6;
+        for (int iteration = 0; iteration < iterations; ++iteration) {
             const auto started = std::chrono::steady_clock::now();
+            qwen38::MoePrefillTimings components;
             auto output = rows == 1
                 ? moe.forward_decode(input)
-                : moe.forward_prefill(input);
+                : profile_components
+                    ? moe.forward_prefill_profiled(input, components)
+                    : moe.forward_prefill(input);
             values = output.astype(MLX_FLOAT32).to_float32();
             timings.push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count());
+            if (profile_components) component_timings.push_back(components);
         }
         if (values.size() != rows * config.hidden_size ||
             !std::all_of(values.begin(), values.end(), [](const float value) {
@@ -101,6 +115,16 @@ int main(int argc, char** argv) {
         const double checksum = std::accumulate(values.begin(), values.end(), 0.0);
         std::vector<double> warm(timings.begin() + 1, timings.end());
         std::sort(warm.begin(), warm.end());
+        const auto component_median = [&component_timings](
+                                          const auto qwen38::MoePrefillTimings::* field) {
+            std::vector<double> values;
+            values.reserve(component_timings.size() - 1);
+            for (std::size_t index = 1; index < component_timings.size(); ++index) {
+                values.push_back(component_timings[index].*field);
+            }
+            std::sort(values.begin(), values.end());
+            return values[values.size() / 2];
+        };
         std::cout << "{\"rows\":" << rows << ",\"experts\":[";
         for (std::size_t index = 0; index < selection.experts.size(); ++index) {
             if (index != 0) std::cout << ',';
@@ -116,7 +140,22 @@ int main(int argc, char** argv) {
                   << ",\"warm_median_ms\":" << warm[warm.size() / 2]
                   << ",\"prefill_tps\":"
                   << 1000.0 * static_cast<double>(rows) / warm[warm.size() / 2]
-                  << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";
+                  << ",\"open_shards\":" << tensors.open_shard_count();
+        if (profile_components) {
+            std::cout << ",\"components_ms\":{"
+                      << "\"routing\":"
+                      << component_median(&qwen38::MoePrefillTimings::routing_ms)
+                      << ",\"gate_up\":"
+                      << component_median(&qwen38::MoePrefillTimings::gate_up_ms)
+                      << ",\"down_reduce\":"
+                      << component_median(&qwen38::MoePrefillTimings::down_reduce_ms)
+                      << ",\"shared_expert\":"
+                      << component_median(&qwen38::MoePrefillTimings::shared_expert_ms)
+                      << ",\"merge\":"
+                      << component_median(&qwen38::MoePrefillTimings::merge_ms)
+                      << '}';
+        }
+        std::cout << "}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "qwen38-sparse-moe-smoke: " << error.what() << '\n';

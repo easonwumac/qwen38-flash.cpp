@@ -29,7 +29,9 @@ match the independent `devtools/hyper_connection_oracle.py` MLX-Python oracle.
 `qwen38-sparse-moe-smoke MODEL_DIRECTORY [PREFILL_ROWS]` verifies router top-k,
 ten selected Q4 experts, and the gated shared expert against a second independent
 oracle. An optional width from 2 through 512 exercises and times the production
-grouped-prefill path; run that memory-heavy mode through `devtools/memory_guard.py`.
+grouped-prefill path; append `components` to report router, gate/up, down/reduce,
+shared-expert, and merge medians. Run either memory-heavy mode through
+`devtools/memory_guard.py`.
 `qwen38-gated-delta-net-smoke MODEL_DIRECTORY` verifies two stateful decode steps,
 including depthwise convolution and recurrent caches, forget/beta gates, Q/K
 normalization, gated RMSNorm, and Q4 output projection against a third oracle.

@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -529,6 +530,23 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
+    return forward_prefill_impl(input, nullptr);
+}
+
+MlxArray SparseMoe::forward_prefill_profiled(
+    const MlxArray& input,
+    MoePrefillTimings& timings) const {
+    timings = {};
+    return forward_prefill_impl(input, &timings);
+}
+
+MlxArray SparseMoe::forward_prefill_impl(
+    const MlxArray& input,
+    MoePrefillTimings* timings) const {
+    using Clock = std::chrono::steady_clock;
+    const auto elapsed_ms = [](const Clock::time_point started) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+    };
     const std::vector<int> shape = input.shape();
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 512) {
         throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..512");
@@ -544,6 +562,7 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
     const int hidden_size = shape[2];
     const int top_k = checked_int(experts_per_token_, "experts_per_token");
     const int slots = rows * top_k;
+    const auto routing_started = Clock::now();
     MlxArray gates = MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
     MlxArray partition = gates.argpartition_axis(-top_k, -1);
     const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - top_k};
@@ -568,7 +587,14 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
     MlxArray gathered_input = MlxArray::take_axis(flat_input, source_rows, 0).reshape(
         std::vector<int>{slots, 1, hidden_size});
     MlxArray no_indices;
+    if (timings != nullptr) {
+        const std::array<const MlxArray*, 4> routing_outputs{
+            &weights, &sorted_experts, &inverse_order, &gathered_input};
+        MlxArray::eval_all(routing_outputs);
+        timings->routing_ms = elapsed_ms(routing_started);
+    }
 
+    const auto gate_up_started = Clock::now();
     MlxArray gate = MlxArray::gather_quantized_matmul(
         gathered_input,
         expert_gate_.weight,
@@ -590,10 +616,15 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
         expert_up_.bits,
         true);
     MlxArray expert_hidden = MlxArray::multiply(gate, up);
+    if (timings != nullptr) {
+        expert_hidden.eval();
+        timings->gate_up_ms = elapsed_ms(gate_up_started);
+    }
     const std::vector<int> expert_shape = expert_hidden.shape();
     if (expert_shape.size() != 3 || expert_shape[0] != slots || expert_shape[1] != 1) {
         throw std::runtime_error("grouped MoE gate/up returned an invalid shape");
     }
+    const auto down_started = Clock::now();
     MlxArray down = MlxArray::gather_quantized_matmul(
         expert_hidden,
         expert_down_.weight,
@@ -609,7 +640,23 @@ MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
     MlxArray weighted = MlxArray::multiply(
         unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
     MlxArray routed = weighted.sum_axis(2);
-    return MlxArray::add(routed, forward_shared(input));
+    if (timings != nullptr) {
+        routed.eval();
+        timings->down_reduce_ms = elapsed_ms(down_started);
+    }
+    const auto shared_started = Clock::now();
+    MlxArray shared = forward_shared(input);
+    if (timings != nullptr) {
+        shared.eval();
+        timings->shared_expert_ms = elapsed_ms(shared_started);
+    }
+    const auto merge_started = Clock::now();
+    MlxArray output = MlxArray::add(routed, shared);
+    if (timings != nullptr) {
+        output.eval();
+        timings->merge_ms = elapsed_ms(merge_started);
+    }
+    return output;
 }
 
 } // namespace qwen38
