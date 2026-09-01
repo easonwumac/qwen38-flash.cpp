@@ -1,0 +1,84 @@
+#include "qwen38/api.hpp"
+#include "qwen38/http_server.hpp"
+#include "qwen38/runtime.hpp"
+
+#include <charconv>
+#include <csignal>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <optional>
+#include <string>
+
+namespace {
+
+qwen38::HttpServer* active_server = nullptr;
+
+void handle_signal(const int) {
+    if (active_server != nullptr) {
+        active_server->stop();
+    }
+}
+
+void print_usage(const char* program) {
+    std::cout
+        << "Usage: " << program << " [--host IPv4] [--port PORT] [--model PATH]\n"
+        << "\n"
+        << "qwen38-flash.cpp server foundation. The inference backend is not yet implemented.\n";
+}
+
+std::uint16_t parse_port(const std::string& value) {
+    unsigned int parsed = 0;
+    const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+        parsed == 0 || parsed > 65535) {
+        throw std::runtime_error("invalid port: " + value);
+    }
+    return static_cast<std::uint16_t>(parsed);
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    try {
+        qwen38::ServerConfig config;
+        std::optional<std::string> model_path;
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            if (argument == "--help" || argument == "-h") {
+                print_usage(argv[0]);
+                return EXIT_SUCCESS;
+            }
+            if ((argument == "--host" || argument == "--port" || argument == "--model") &&
+                i + 1 >= argc) {
+                throw std::runtime_error("missing value for " + argument);
+            }
+            if (argument == "--host") {
+                config.host = argv[++i];
+            } else if (argument == "--port") {
+                config.port = parse_port(argv[++i]);
+            } else if (argument == "--model") {
+                model_path = argv[++i];
+            } else {
+                throw std::runtime_error("unknown argument: " + argument);
+            }
+        }
+
+        qwen38::RuntimeState runtime;
+        if (model_path.has_value()) {
+            runtime.begin_loading(*model_path);
+            runtime.mark_failed("model loading is not implemented in this milestone");
+        }
+        const qwen38::Api api(runtime);
+        qwen38::HttpServer server(config, api);
+        active_server = &server;
+        std::signal(SIGINT, handle_signal);
+        std::signal(SIGTERM, handle_signal);
+        server.run();
+        active_server = nullptr;
+        return EXIT_SUCCESS;
+    } catch (const std::exception& error) {
+        std::cerr << "qwen38-server: " << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
+}

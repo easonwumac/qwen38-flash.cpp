@@ -1,0 +1,10 @@
+/build/
+/build-*/
+/.cache/
+/.clangd/
+/.DS_Store
+*.safetensors
+*.gguf
+*.bin
+*.log
+compile_commands.json
