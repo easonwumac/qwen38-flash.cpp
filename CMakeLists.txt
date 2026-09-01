@@ -94,6 +94,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         src/mlx_backend.cpp
         src/model.cpp
         src/mtp_head.cpp
+        src/mtp_verifier.cpp
         src/ple.cpp
         src/self_attention.cpp
         src/sparse_moe.cpp

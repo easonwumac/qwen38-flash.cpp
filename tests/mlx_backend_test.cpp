@@ -1,9 +1,11 @@
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model.hpp"
+#include "qwen38/mtp_verifier.hpp"
 
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 int main() {
@@ -116,6 +118,35 @@ int main() {
         snapshot.layers[0].ple.convolution.to_float32() !=
             std::vector<float>({1, 2, 3, 4})) {
         std::cerr << "model decode-state snapshot mismatch\n";
+        return 1;
+    }
+
+    qwen38::MtpTargetVerification verification{.draft_count = 2, .rows = {}};
+    for (std::size_t index = 0; index < 3; ++index) {
+        qwen38::ModelDecodeState checkpoint(0);
+        checkpoint.token_count = 10 + index;
+        verification.rows.push_back({
+            .greedy = {.token = static_cast<std::uint32_t>(100 + index), .logit = 0.0F},
+            .pre_mixer_stream = {},
+            .state_after = std::move(checkpoint),
+        });
+    }
+    qwen38::ModelDecodeState committed(0);
+    qwen38::commit_mtp_target_verification(std::move(verification), 1, committed);
+    if (committed.token_count != 11) {
+        std::cerr << "MTP verifier committed the wrong checkpoint\n";
+        return 1;
+    }
+
+    bool rejected_invalid_commit = false;
+    try {
+        qwen38::MtpTargetVerification invalid{.draft_count = 2, .rows = {}};
+        qwen38::commit_mtp_target_verification(std::move(invalid), 0, committed);
+    } catch (const std::runtime_error&) {
+        rejected_invalid_commit = true;
+    }
+    if (!rejected_invalid_commit) {
+        std::cerr << "MTP verifier accepted an invalid row timeline\n";
         return 1;
     }
     return 0;
