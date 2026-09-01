@@ -167,11 +167,12 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
             checkpoints[row].linear_attention = std::move(linear_checkpoints[row]);
         }
     } else {
+        std::vector<SelfAttentionState> attention_checkpoints;
+        MlxArray outputs = full_attention_->forward_verify(
+            attention.mixed, origin.full_attention, attention_checkpoints);
         for (std::size_t row = 0; row < streams.size(); ++row) {
-            attention_outputs.push_back(full_attention_->forward_decode(
-                slice_row(attention.mixed, row), working.full_attention));
-            DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
-            checkpoints[row].full_attention = std::move(snapshot.full_attention);
+            attention_outputs.push_back(slice_row(outputs, row));
+            checkpoints[row].full_attention = std::move(attention_checkpoints[row]);
         }
     }
     MlxArray post_attention = attention_hyper_connection_.write(

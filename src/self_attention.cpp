@@ -38,6 +38,28 @@ MlxArray scalar(const float value, const mlx_dtype dtype) {
     return MlxArray::from_float32(values, shape).astype(dtype);
 }
 
+MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() < 2 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("attention verifier row is out of range");
+    }
+    std::vector<int> start(shape.size(), 0);
+    std::vector<int> stop = shape;
+    std::vector<int> strides(shape.size(), 1);
+    start[1] = static_cast<int>(row);
+    stop[1] = static_cast<int>(row + 1);
+    return batch.slice(start, stop, strides);
+}
+
+MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
+    if (rows.empty()) throw std::runtime_error("attention verifier has no outputs");
+    MlxArray result = rows.front().share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, rows[row], 1);
+    }
+    return result;
+}
+
 } // namespace
 
 SelfAttention::SelfAttention(
@@ -176,6 +198,86 @@ MlxArray SelfAttention::forward_decode(
     MlxArray gated = MlxArray::multiply(
         attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
     return project(gated, output_projection_);
+}
+
+MlxArray SelfAttention::forward_verify(
+    const MlxArray& input,
+    const SelfAttentionState& origin,
+    std::vector<SelfAttentionState>& checkpoints) const {
+    const std::vector<int> input_shape = input.shape();
+    if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1 ||
+        input_shape[1] > 5) {
+        throw std::runtime_error("attention verifier requires shape [1,S,hidden], S=1..5");
+    }
+    const std::size_t rows = static_cast<std::size_t>(input_shape[1]);
+    const int heads = dimension(attention_heads_, "attention heads");
+    const int kv_heads = dimension(key_value_heads_, "key/value heads");
+    const int head_dimension = dimension(head_dimension_, "head dimension");
+    MlxArray query_gate_batch = project(input, query_projection_).reshape(
+        std::vector<int>{1, input_shape[1], heads, 2 * head_dimension});
+    MlxArray key_batch = project(input, key_projection_).reshape(
+        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
+    MlxArray value_batch = project(input, value_projection_).reshape(
+        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
+
+    SelfAttentionState working;
+    working.token_count = origin.token_count;
+    working.position_base = origin.position_base;
+    if (origin.token_count != 0) {
+        working.keys = origin.keys.share();
+        working.values = origin.values.share();
+    }
+    checkpoints.clear();
+    checkpoints.resize(rows);
+    std::vector<MlxArray> gated_rows;
+    gated_rows.reserve(rows);
+    const std::vector<int> strides{1, 1, 1, 1};
+    for (std::size_t row = 0; row < rows; ++row) {
+        MlxArray query_gate = slice_sequence_row(query_gate_batch, row);
+        MlxArray query = query_gate.slice(
+            std::vector<int>{0, 0, 0, 0},
+            std::vector<int>{1, 1, heads, head_dimension},
+            strides);
+        MlxArray gate = query_gate.slice(
+            std::vector<int>{0, 0, 0, head_dimension},
+            std::vector<int>{1, 1, heads, 2 * head_dimension},
+            strides);
+        query = query.rms_norm(query_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray key = slice_sequence_row(key_batch, row)
+            .rms_norm(key_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray value = slice_sequence_row(value_batch, row).swapaxes(1, 2);
+        const std::size_t position = working.position_base + working.token_count;
+        query = apply_rope(query, position);
+        key = apply_rope(key, position);
+        if (working.token_count == 0) {
+            working.keys = std::move(key);
+            working.values = std::move(value);
+        } else {
+            working.keys = MlxArray::concatenate(working.keys, key, 2);
+            working.values = MlxArray::concatenate(working.values, value, 2);
+        }
+        ++working.token_count;
+        checkpoints[row].keys = working.keys.share();
+        checkpoints[row].values = working.values.share();
+        checkpoints[row].token_count = working.token_count;
+        checkpoints[row].position_base = working.position_base;
+
+        const int repetitions = heads / kv_heads;
+        MlxArray repeated_keys = working.keys.repeat_axis(repetitions, 1);
+        MlxArray repeated_values = working.values.repeat_axis(repetitions, 1);
+        MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
+        scores = MlxArray::multiply(
+            scores,
+            scalar(1.0F / std::sqrt(static_cast<float>(head_dimension_)), scores.dtype()));
+        MlxArray probabilities =
+            scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
+        MlxArray attended =
+            MlxArray::matmul(probabilities, repeated_values).swapaxes(1, 2);
+        const std::vector<int> flat_shape{1, 1, heads * head_dimension};
+        gated_rows.push_back(MlxArray::multiply(
+            attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid()));
+    }
+    return project(concatenate_sequence_rows(gated_rows), output_projection_);
 }
 
 } // namespace qwen38

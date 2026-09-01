@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <string_view>
+#include <vector>
 
 namespace qwen38 {
 
@@ -24,6 +25,10 @@ public:
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& input,
         SelfAttentionState& state) const;
+    [[nodiscard]] MlxArray forward_verify(
+        const MlxArray& input,
+        const SelfAttentionState& origin,
+        std::vector<SelfAttentionState>& checkpoints) const;
 
 private:
     struct QuantizedProjection {
