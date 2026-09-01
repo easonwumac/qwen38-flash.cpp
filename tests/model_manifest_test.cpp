@@ -30,6 +30,19 @@ void write_shard(const std::filesystem::path& path) {
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
+void write_qmeta_sidecar(const std::filesystem::path& path) {
+    const std::string header =
+        R"({"layer.qmeta9_tags":{"dtype":"U8","shape":[2],"data_offsets":[0,2]},"layer.qmeta9_dict":{"dtype":"U32","shape":[1],"data_offsets":[2,6]}})";
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    const std::uint64_t size = header.size();
+    for (unsigned int i = 0; i < 8; ++i) {
+        output.put(static_cast<char>((size >> (i * 8U)) & 0xFFU));
+    }
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    const std::array<char, 6> bytes{3, 5, 7, 0, 0, 0};
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+}
+
 } // namespace
 
 void run_model_manifest_tests() {
@@ -78,6 +91,7 @@ void run_model_manifest_tests() {
       "weight_map":{"tensor":"model-00001-of-00001.safetensors"}
     })");
     write_shard(directory / "model-00001-of-00001.safetensors");
+    write_qmeta_sidecar(directory / "model-qmeta-joint9.safetensors");
 
     qwen38::ModelManifest manifest = qwen38::ModelManifest::load(directory);
     QWEN38_CHECK(manifest.config().hidden_size == 2560);
@@ -102,6 +116,10 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().layer_types.at(3) == "full_attention");
     QWEN38_CHECK(manifest.config().ple_layer_ids == std::vector<std::size_t>({2}));
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
+    QWEN38_CHECK(manifest.has_tensor("tensor"));
+    QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_tags"));
+    QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_dict"));
+    QWEN38_CHECK(!manifest.has_tensor("missing"));
 
     qwen38::TensorStore store(std::move(manifest));
     QWEN38_CHECK(store.open_shard_count() == 0);
@@ -109,6 +127,10 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(store.open_shard_count() == 1);
     QWEN38_CHECK(tensor.bytes.size() == 2);
     QWEN38_CHECK(std::to_integer<unsigned char>(tensor.bytes[1]) == 9);
+    const auto qmeta_tags = store.tensor("layer.qmeta9_tags");
+    QWEN38_CHECK(store.open_shard_count() == 2);
+    QWEN38_CHECK(qmeta_tags.bytes.size() == 2);
+    QWEN38_CHECK(std::to_integer<unsigned char>(qmeta_tags.bytes[1]) == 5);
     QWEN38_CHECK(store.mapped_virtual_bytes() > 2);
 
     std::filesystem::remove_all(directory);

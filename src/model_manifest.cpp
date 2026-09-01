@@ -184,6 +184,25 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
             throw std::runtime_error("model shard is missing: " + shard);
         }
     }
+
+    // Optional compact affine-metadata sidecar used by the Qwen3.8 routed-MoE
+    // kernels. It deliberately stays outside the upstream weight index so the
+    // original checkpoint remains loadable by ordinary MLX tooling. Discover
+    // its tensor names from the safetensors header instead of baking all 288
+    // entries into another JSON manifest.
+    constexpr std::string_view qmeta_sidecar = "model-qmeta-joint9.safetensors";
+    const std::filesystem::path qmeta_path = result.directory_ / qmeta_sidecar;
+    if (std::filesystem::is_regular_file(qmeta_path)) {
+        const SafetensorsFile qmeta(qmeta_path);
+        for (const auto& [tensor_name, metadata] : qmeta.tensors()) {
+            static_cast<void>(metadata);
+            if (tensor_name.empty() || !result.weight_map_.emplace(
+                    tensor_name, std::string(qmeta_sidecar)).second) {
+                throw std::runtime_error(
+                    "compact qmeta sidecar duplicates a model tensor: " + tensor_name);
+            }
+        }
+    }
     return result;
 }
 

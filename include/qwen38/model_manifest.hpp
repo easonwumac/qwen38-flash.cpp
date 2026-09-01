@@ -72,6 +72,9 @@ public:
     [[nodiscard]] const std::unordered_map<std::string, std::string>& weight_map() const noexcept {
         return weight_map_;
     }
+    [[nodiscard]] bool has_tensor(std::string_view name) const {
+        return weight_map_.contains(std::string(name));
+    }
     [[nodiscard]] std::uint64_t declared_weight_bytes() const noexcept { return declared_weight_bytes_; }
 
 private:
