@@ -121,7 +121,7 @@ GenerationResult NativeEngine::complete(
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
     const std::size_t request_prefill_chunk =
         options_.prefill_chunk_rows > 256 && prefill_rows > 512
-        ? 128
+        ? (prefill_rows <= 8192 ? 256 : 128)
         : options_.prefill_chunk_rows;
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,
