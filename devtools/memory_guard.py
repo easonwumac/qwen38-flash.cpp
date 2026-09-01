@@ -122,7 +122,9 @@ def main() -> int:
         )
         return 75
 
-    child = subprocess.Popen(command, start_new_session=True)
+    child_environment = os.environ.copy()
+    child_environment["QWEN38_MEMORY_GUARD"] = "1"
+    child = subprocess.Popen(command, start_new_session=True, env=child_environment)
     peak_rss = 0.0
     minimum_available = start_available
     try:

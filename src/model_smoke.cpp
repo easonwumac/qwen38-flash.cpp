@@ -11,6 +11,10 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     try {
+        if (std::getenv("QWEN38_MEMORY_GUARD") == nullptr) {
+            throw std::runtime_error(
+                "full-model smoke tests must run through devtools/memory_guard.py");
+        }
         const auto load_started = std::chrono::steady_clock::now();
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);

@@ -29,6 +29,10 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     try {
+        if (std::getenv("QWEN38_MEMORY_GUARD") == nullptr) {
+            throw std::runtime_error(
+                "full-model benchmarks must run through devtools/memory_guard.py");
+        }
         const std::size_t steps = argc == 3 ? parse_steps(argv[2]) : 8;
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);

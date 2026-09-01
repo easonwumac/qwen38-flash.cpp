@@ -100,7 +100,8 @@ compiles each non-PLE linear decoder layer after its first stateful step. Togeth
 with the resident tier below, these form the current fastest verified path.
 
 On unified-memory Macs, run full-model experiments through
-`devtools/memory_guard.py -- COMMAND`. The default guard refuses to start below
+`devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
+refuse unguarded execution. The default guard refuses to start below
 42 GiB reclaimable memory and terminates the process group plus recursively
 spawned descendants before they exceed 38 GiB aggregate RSS or leave less than
 8 GiB reclaimable. A system-wide lock prevents overlapping guarded model runs.
