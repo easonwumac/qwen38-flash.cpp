@@ -81,6 +81,41 @@ int main() {
         std::cerr << "MLX swapaxes/softmax mismatch\n";
         return 1;
     }
+    const std::array<int, 4> attention_shape{1, 1, 2, 1};
+    const std::array<float, 2> zero_attention_values{0.0F, 0.0F};
+    const std::array<float, 2> value_attention_values{2.0F, 6.0F};
+    const auto attention_queries = qwen38::MlxArray::from_float32(
+        zero_attention_values, attention_shape);
+    const auto attention_keys = qwen38::MlxArray::from_float32(
+        zero_attention_values, attention_shape);
+    const auto attention_values = qwen38::MlxArray::from_float32(
+        value_attention_values, attention_shape);
+    const auto causal_attention = qwen38::MlxArray::scaled_dot_product_attention(
+        attention_queries, attention_keys, attention_values, 1.0F, true).to_float32();
+    if (causal_attention.size() != 2 ||
+        std::abs(causal_attention[0] - 2.0F) > 1.0e-5F ||
+        std::abs(causal_attention[1] - 4.0F) > 1.0e-5F) {
+        std::cerr << "MLX causal SDPA mismatch\n";
+        return 1;
+    }
+    const std::array<int, 4> suffix_query_shape{1, 1, 1, 1};
+    const std::array<int, 4> suffix_key_shape{1, 1, 3, 1};
+    const std::array<float, 1> suffix_query_values{0.0F};
+    const std::array<float, 3> suffix_key_values{0.0F, 0.0F, 0.0F};
+    const std::array<float, 3> suffix_value_values{2.0F, 4.0F, 6.0F};
+    const auto suffix_query = qwen38::MlxArray::from_float32(
+        suffix_query_values, suffix_query_shape);
+    const auto suffix_keys = qwen38::MlxArray::from_float32(
+        suffix_key_values, suffix_key_shape);
+    const auto suffix_values = qwen38::MlxArray::from_float32(
+        suffix_value_values, suffix_key_shape);
+    const auto suffix_attention = qwen38::MlxArray::scaled_dot_product_attention(
+        suffix_query, suffix_keys, suffix_values, 1.0F, true).to_float32();
+    if (suffix_attention.size() != 1 ||
+        std::abs(suffix_attention[0] - 4.0F) > 1.0e-5F) {
+        std::cerr << "MLX causal SDPA prefix offset mismatch\n";
+        return 1;
+    }
     const std::array<float, 4> signed_values{-4.0F, -1.0F, 0.0F, 9.0F};
     const auto signed_array = qwen38::MlxArray::from_float32(signed_values, shape);
     if (signed_array.absolute().to_float32() != std::vector<float>({4, 1, 0, 9}) ||

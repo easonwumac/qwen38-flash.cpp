@@ -62,6 +62,12 @@ public:
         const MlxArray& right,
         int axis);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray scaled_dot_product_attention(
+        const MlxArray& queries,
+        const MlxArray& keys,
+        const MlxArray& values,
+        float scale,
+        bool causal);
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
     [[nodiscard]] MlxArray transpose() const;
     [[nodiscard]] MlxArray swapaxes(int axis1, int axis2) const;

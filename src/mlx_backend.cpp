@@ -7,6 +7,18 @@
 #include <sys/mman.h>
 #include <utility>
 
+extern "C" int mlx_fast_scaled_dot_product_attention(
+    mlx_array* result,
+    mlx_array queries,
+    mlx_array keys,
+    mlx_array values,
+    float scale,
+    const char* mask_mode,
+    mlx_array mask,
+    mlx_array sinks,
+    bool force_fused,
+    mlx_stream stream);
+
 namespace qwen38 {
 namespace {
 
@@ -363,6 +375,32 @@ MlxArray MlxArray::matmul(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
     const Stream stream;
     check(mlx_matmul(&result.value_, left.value_, right.value_, stream.get()), "matmul");
+    return result;
+}
+
+MlxArray MlxArray::scaled_dot_product_attention(
+    const MlxArray& queries,
+    const MlxArray& keys,
+    const MlxArray& values,
+    const float scale,
+    const bool causal) {
+    MlxArray result;
+    MlxArray mask;
+    MlxArray sinks;
+    const Stream stream;
+    check(
+        mlx_fast_scaled_dot_product_attention(
+            &result.value_,
+            queries.value_,
+            keys.value_,
+            values.value_,
+            scale,
+            causal ? "causal" : "",
+            mask.value_,
+            sinks.value_,
+            false,
+            stream.get()),
+        "scaled dot product attention");
     return result;
 }
 

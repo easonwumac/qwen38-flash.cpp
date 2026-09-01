@@ -219,10 +219,8 @@ MlxArray DecoderLayer::forward_prefill(
         attention_output = linear_attention_->forward_prefill(
             attention.mixed, state.linear_attention);
     } else {
-        std::vector<SelfAttentionState> checkpoints;
-        attention_output = full_attention_->forward_verify(
-            attention.mixed, state.full_attention, checkpoints);
-        state.full_attention = std::move(checkpoints.back());
+        attention_output = full_attention_->forward_prefill(
+            attention.mixed, state.full_attention);
     }
     MlxArray post_attention = attention_hyper_connection_.write(
         stream_batch, attention_output, attention.injection);

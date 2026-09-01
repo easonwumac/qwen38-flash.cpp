@@ -29,6 +29,9 @@ public:
         const MlxArray& input,
         const SelfAttentionState& origin,
         std::vector<SelfAttentionState>& checkpoints) const;
+    [[nodiscard]] MlxArray forward_prefill(
+        const MlxArray& input,
+        SelfAttentionState& state) const;
 
 private:
     struct QuantizedProjection {
@@ -44,6 +47,9 @@ private:
         const MlxArray& input,
         const QuantizedProjection& projection) const;
     [[nodiscard]] MlxArray apply_rope(const MlxArray& input, std::size_t position) const;
+    [[nodiscard]] MlxArray apply_rope_prefill(
+        const MlxArray& input,
+        std::size_t position) const;
 
     std::size_t attention_heads_;
     std::size_t key_value_heads_;
