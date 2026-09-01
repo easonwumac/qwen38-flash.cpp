@@ -1,4 +1,5 @@
 #include "qwen38/native_engine.hpp"
+#include "qwen38/runtime_profile.hpp"
 #include "qwen38/history_draft.hpp"
 #include "qwen38/mtp_depth_policy.hpp"
 #include "qwen38/mtp_profitability.hpp"
@@ -239,10 +240,8 @@ GenerationResult NativeEngine::complete_impl(
     bool cached_mtp_cumulative_keep = false;
     std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
-    const std::size_t request_prefill_chunk =
-        options_.prefill_chunk_rows > 256 && prefill_rows > 512
-        ? (prefill_rows <= 6144 ? 384 : (prefill_rows <= 8192 ? 256 : 128))
-        : options_.prefill_chunk_rows;
+    const std::size_t request_prefill_chunk = qwen38::select_prefill_chunk_rows(
+        options_.prefill_chunk_rows, prefill_rows);
     const auto prompt_started = std::chrono::steady_clock::now();
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,

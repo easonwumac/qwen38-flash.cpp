@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -39,9 +40,11 @@ int main(int argc, char **argv) {
                 "long-context tests must run through devtools/memory_guard.py");
         }
         const std::filesystem::path model_path = argv[1];
-        const std::size_t chunk_rows = argc >= 4 ? std::stoul(argv[3]) : 64;
+        const std::optional<std::size_t> explicit_chunk_rows =
+            argc >= 4 ? std::optional<std::size_t>(std::stoul(argv[3])) : std::nullopt;
         const std::string profile = argc == 6 ? argv[5] : "speed";
-        if (chunk_rows == 0 || chunk_rows > 512) {
+        if (explicit_chunk_rows.has_value() &&
+            (*explicit_chunk_rows == 0 || *explicit_chunk_rows > 512)) {
             throw std::runtime_error("CHUNK_ROWS must be between 1 and 512");
         }
         qwen38::apply_runtime_profile(profile);
@@ -63,6 +66,8 @@ int main(int argc, char **argv) {
             if (tokens.size() > max_tokens)
                 tokens.resize(max_tokens);
         }
+        const std::size_t chunk_rows = explicit_chunk_rows.value_or(
+            qwen38::select_prefill_chunk_rows(512, tokens.size() - 1));
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(model_path));
         const qwen38::ModelConfig &config = tensors.manifest().config();
 

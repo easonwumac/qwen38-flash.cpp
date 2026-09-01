@@ -41,10 +41,10 @@ SSD AoS row gather against the original 30 GB safetensors table.
 
 `qwen38-long-context-smoke MODEL PROMPT [CHUNK [MAX_TOKENS [PROFILE]]]` is the
 guarded full-model QSA check. It requires
-`devtools/memory_guard.py`, defaults to 64-row chunks and the same `speed`
-profile as the server, and reports linear/full-attention time, actual pooled
-blocks, prefill throughput, and one-token decode latency. Pass `safe` as the
-profile for a conservative unfused diagnostic control.
+`devtools/memory_guard.py`, defaults to the same adaptive chunk policy and
+`speed` profile as the server, and reports linear/full-attention time, actual
+pooled blocks, prefill throughput, and one-token decode latency. Pass `safe` as
+the profile for a conservative unfused diagnostic control.
 
 ## Build
 

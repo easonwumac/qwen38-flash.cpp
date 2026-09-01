@@ -1,7 +1,15 @@
 #include "qwen38/runtime.hpp"
+#include "qwen38/runtime_profile.hpp"
 #include "test.hpp"
 
 void run_runtime_tests() {
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 512) == 512);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 513) == 384);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 6144) == 384);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 6145) == 256);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 8193) == 128);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(64, 262144) == 64);
+
     qwen38::RuntimeState runtime;
     QWEN38_CHECK(!runtime.ready());
     QWEN38_CHECK(runtime.snapshot().model_state == qwen38::ModelState::unloaded);

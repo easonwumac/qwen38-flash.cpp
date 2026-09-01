@@ -148,11 +148,13 @@ The first implementation deliberately feeds the resulting Boolean mask to MLX
 SDPA rather than claiming a custom sparse attention kernel. Conservative
 full-model controls at 1,984/2,112 tokens measured 18.31/18.41 prefill tok/s, so
 crossing the selection boundary did not introduce a visible regression. The
-production `speed` profile reached 178.41 PP tok/s at 2,112 tokens and 193.52 at
-3,505 tokens. The latter retained 876 pooled blocks on all 12 full-attention
-layers, decoded the next token in 74.9 ms, peaked at 35.2 GiB RSS, and kept 9.4
-GiB available. Longer retrieval quality and the 128K/262K memory envelope remain
-release gates.
+production `speed` profile with the server's 384-row adaptive chunk reached
+370.45 PP tok/s at 2,112 tokens and 450.95 at 3,505 tokens. The latter retained
+876 pooled blocks on all 12 full-attention layers, decoded the next token in
+75.9 ms, peaked at 34.4 GiB RSS, and kept 8.0 GiB available. A controlled
+64/128/256/384/512 sweep at 2,112 tokens measured
+178.41/290.28/346.00/370.45/360.54 PP, confirming 384 as the retained optimum.
+Longer retrieval quality and the 128K/262K memory envelope remain release gates.
 
 ## PLE n-gram SSD table
 
