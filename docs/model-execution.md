@@ -214,10 +214,14 @@ The retained P185 fold-capable Zig trace is now an executable parity fixture,
 not merely historical documentation. On its position-99 row, a cold C++ head
 matched the reference top-1 but reached only 0.927642 logit cosine. Priming the
 98 preceding `(stream, token, absolute-position)` rows from the retained trace
-raised cosine to 0.982551. The fusion stream is exact (1.0 cosine) and the first
-material divergence is attention output (0.942299 after priming), isolating the
-remaining gap to the absent QSA indexer/select path. The 0.995 promotion gate
-therefore remains closed until QSA state lands.
+raised cosine to 0.982551 and isolated the first material divergence to the
+attention output. The retained P192 evidence then identified the sidecar's
+encoding split: pre-FC and Hyper-Connection norms are deltas, while attention
+q/k norms are already effective weights. Applying that contract raised logits
+cosine to **0.998923**, final-mixed cosine to **0.998982**, and preserved the
+reference top-1 (`6765`) on both P185 and P192 traces. The short-context MTP
+head therefore passes its 0.995 parity gate. QSA indexer/cache support remains
+required before contexts exceeding the 2,048-token selection budget.
 
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak

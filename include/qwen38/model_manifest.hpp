@@ -54,6 +54,7 @@ struct ModelConfig {
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
     std::vector<std::size_t> ple_layer_ids;
+    bool attention_norm_has_offset{true};
 };
 
 class ModelManifest final {

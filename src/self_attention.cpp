@@ -4,6 +4,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace qwen38 {
@@ -21,6 +22,14 @@ MlxArray offset_norm_weight(MlxArray raw, const std::size_t width) {
     const std::vector<int> shape{dimension(width, "norm width")};
     MlxArray ones = MlxArray::from_float32(ones_data, shape).astype(raw.dtype());
     return MlxArray::add(raw, ones);
+}
+
+MlxArray effective_norm_weight(
+    MlxArray raw,
+    const std::size_t width,
+    const bool has_offset) {
+    if (!has_offset) return raw;
+    return offset_norm_weight(std::move(raw), width);
 }
 
 MlxArray scalar(const float value, const mlx_dtype dtype) {
@@ -48,10 +57,14 @@ SelfAttention::SelfAttention(
       key_projection_(load_projection(tensors, std::string(prefix) + ".k_proj")),
       value_projection_(load_projection(tensors, std::string(prefix) + ".v_proj")),
       output_projection_(load_projection(tensors, std::string(prefix) + ".o_proj")),
-      query_norm_weight_(offset_norm_weight(
-          tensors.tensor(std::string(prefix) + ".q_norm.weight"), config.head_dimension)),
-      key_norm_weight_(offset_norm_weight(
-          tensors.tensor(std::string(prefix) + ".k_norm.weight"), config.head_dimension)) {
+      query_norm_weight_(effective_norm_weight(
+          tensors.tensor(std::string(prefix) + ".q_norm.weight"),
+          config.head_dimension,
+          config.attention_norm_has_offset)),
+      key_norm_weight_(effective_norm_weight(
+          tensors.tensor(std::string(prefix) + ".k_norm.weight"),
+          config.head_dimension,
+          config.attention_norm_has_offset)) {
     if (attention_heads_ % key_value_heads_ != 0 || rotary_dimension_ == 0 ||
         rotary_dimension_ % 2 != 0 || rotary_dimension_ > head_dimension_) {
         throw std::runtime_error("unsupported attention head/rotary configuration");

@@ -27,6 +27,9 @@ ModelConfig mtp_layer_config(const ModelConfig& target) {
     result.layer_types = {"full_attention"};
     result.ple_layer_ids.clear();
     result.quantization_bits = 8;
+    // The retained ReleaseFast sidecar stores pre-FC/HC norms as deltas, but
+    // its attention q/k norms are already effective weights (P192 fixture).
+    result.attention_norm_has_offset = false;
     return result;
 }
 
