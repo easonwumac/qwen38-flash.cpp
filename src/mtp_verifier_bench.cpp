@@ -82,6 +82,11 @@ int main(int argc, char** argv) {
         static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "1", 1));
         std::vector<double> layer_ms;
         double head_ms = 0.0;
+        // Production groups 16 layers behind each barrier. That is the right
+        // latency path, but attributing the whole synchronization to layers
+        // 15/31/47 makes the per-layer profile misleading. Profile a separate
+        // stride-1 pass after all authoritative latency samples instead.
+        static_cast<void>(setenv("QWEN38_VERIFY_BARRIER_STRIDE", "1", 1));
         const std::vector<std::uint32_t> profile_tokens = seeded_origin
             ? std::vector<std::uint32_t>{11, 271, 40}
             : std::vector<std::uint32_t>{9419, 11, 271};
@@ -98,7 +103,7 @@ int main(int argc, char** argv) {
                   << ",\"batched_head_ms\":" << candidate_ms
                   << ",\"head_speedup\":" << control_ms / candidate_ms
                   << ",\"serial_speedup\":" << serial_ms / candidate_ms
-                  << ",\"profile\":{\"linear_layers_ms\":" << linear_ms
+                  << ",\"profile\":{\"barrier_stride\":1,\"linear_layers_ms\":" << linear_ms
                   << ",\"full_layers_ms\":" << full_ms
                   << ",\"head_ms\":" << head_ms
                   << ",\"slowest_layer\":"
