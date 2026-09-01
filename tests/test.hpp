@@ -25,5 +25,6 @@ void run_api_tests();
 void run_chat_template_tests();
 void run_json_tests();
 void run_model_manifest_tests();
+void run_ngram_tests();
 void run_runtime_tests();
 void run_safetensors_tests();

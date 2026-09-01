@@ -43,6 +43,14 @@ struct ModelConfig {
     std::string output_gate_type;
     double rope_theta{0.0};
     double partial_rotary_factor{0.0};
+    std::size_t ngram_size{0};
+    std::size_t heads_per_ngram{0};
+    std::size_t ngram_vocabulary_base{0};
+    std::size_t ngram_vocabulary_divisor{0};
+    std::size_t ple_embedding_dimension{0};
+    std::size_t ple_convolution_kernel_size{0};
+    std::uint64_t ngram_seed{1234};
+    std::uint32_t end_of_sequence_token{0};
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
 };

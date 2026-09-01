@@ -22,6 +22,7 @@ add_library(qwen38_core
     src/json.cpp
     src/mapped_file.cpp
     src/model_manifest.cpp
+    src/ngram.cpp
     src/runtime.cpp
     src/safetensors.cpp
 )
@@ -48,7 +49,10 @@ target_link_libraries(qwen38-server PRIVATE qwen38_core)
 add_executable(qwen38-inspect src/inspect.cpp)
 target_link_libraries(qwen38-inspect PRIVATE qwen38_core)
 
-install(TARGETS qwen38-server qwen38-inspect RUNTIME DESTINATION bin)
+add_executable(qwen38-ngram-smoke src/ngram_smoke.cpp)
+target_link_libraries(qwen38-ngram-smoke PRIVATE qwen38_core)
+
+install(TARGETS qwen38-server qwen38-inspect qwen38-ngram-smoke RUNTIME DESTINATION bin)
 
 if(QWEN38_ENABLE_TOKENIZER)
     find_path(QWEN38_UTF8PROC_HEADER utf8proc.h
@@ -134,6 +138,7 @@ if(QWEN38_BUILD_TESTS)
         tests/chat_template_test.cpp
         tests/json_test.cpp
         tests/model_manifest_test.cpp
+        tests/ngram_test.cpp
         tests/runtime_test.cpp
         tests/safetensors_test.cpp
         tests/test_main.cpp

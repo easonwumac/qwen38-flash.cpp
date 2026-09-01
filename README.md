@@ -33,6 +33,8 @@ normalization, gated RMSNorm, and Q4 output projection against a third oracle.
 `qwen38-self-attention-smoke MODEL_DIRECTORY` verifies two cached layer-3
 full-attention steps, including partial RoPE, grouped-query expansion, and the
 query output gate. QSA contexts above its selection budget are not implemented.
+`qwen38-ngram-smoke MODEL_DIRECTORY` validates PLE hash rows and the low-memory
+SSD AoS row gather against the original 30 GB safetensors table.
 
 ## Build
 

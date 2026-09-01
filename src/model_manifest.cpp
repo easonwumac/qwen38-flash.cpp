@@ -96,6 +96,25 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         !(result.config_.rope_theta > 0.0)) {
         throw std::runtime_error("invalid rotary configuration");
     }
+    result.config_.ngram_size = size_value(text.at("ngram_size"), "ngram_size");
+    result.config_.heads_per_ngram = size_value(text.at("heads_per_ngram"), "heads_per_ngram");
+    result.config_.ngram_vocabulary_base = size_value(
+        text.at("ngram_vocab_size_base"), "ngram_vocab_size_base");
+    result.config_.ngram_vocabulary_divisor = size_value(
+        text.at("make_ngram_vocab_size_divisible_by"),
+        "make_ngram_vocab_size_divisible_by");
+    result.config_.ple_embedding_dimension = size_value(text.at("ple_embed_dim"), "ple_embed_dim");
+    result.config_.ple_convolution_kernel_size = size_value(
+        text.at("ple_conv_kernel_size"), "ple_conv_kernel_size");
+    if (const Json* seed = text.find("seed")) {
+        result.config_.ngram_seed = size_value(*seed, "seed");
+    }
+    result.config_.end_of_sequence_token = static_cast<std::uint32_t>(
+        size_value(text.at("eos_token_id"), "eos_token_id"));
+    if (result.config_.ngram_size != 3 || result.config_.heads_per_ngram != 8 ||
+        result.config_.ple_embedding_dimension != result.config_.hidden_size) {
+        throw std::runtime_error("unsupported Qwen3.8 PLE geometry");
+    }
     result.config_.rms_norm_epsilon = text.at("rms_norm_eps").as_number();
     if (!(result.config_.rms_norm_epsilon > 0.0)) {
         throw std::runtime_error("rms_norm_eps must be positive");

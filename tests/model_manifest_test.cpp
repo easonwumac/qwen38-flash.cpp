@@ -52,6 +52,9 @@ void run_model_manifest_tests() {
         "linear_value_head_dim":128,"linear_num_key_heads":16,
         "linear_num_value_heads":48,"output_gate_type":"sigmoid",
         "partial_rotary_factor":0.25,"rope_parameters":{"rope_theta":10000000},
+        "ngram_size":3,"heads_per_ngram":8,"ngram_vocab_size_base":20000000,
+        "make_ngram_vocab_size_divisible_by":128,"ple_embed_dim":2560,
+        "ple_conv_kernel_size":4,"eos_token_id":248044,
         "layer_types":["linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
@@ -86,6 +89,8 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().linear_value_head_count == 48);
     QWEN38_CHECK(manifest.config().output_gate_type == "sigmoid");
     QWEN38_CHECK(manifest.config().rope_theta == 10000000.0);
+    QWEN38_CHECK(manifest.config().ngram_seed == 1234);
+    QWEN38_CHECK(manifest.config().end_of_sequence_token == 248044);
     QWEN38_CHECK(manifest.config().layer_types.at(3) == "full_attention");
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
 

@@ -122,6 +122,22 @@ semantically exact. The compressed-key indexer and block-selection mask for
 contexts above the 2,048-token budget remain outstanding; this limitation is
 explicit rather than silently treating all long-context tokens as selected.
 
+## PLE n-gram SSD table
+
+The host runtime implements the official splitmix/primes n-gram hash, EOS segment
+reset semantics, affine Q4 row dequantization, and two storage layouts. The
+original 30 GB safetensors layout is the correctness fallback. When the matching
+headerless `.aos` artifact is present, each row's packed weights, scales, and
+biases are contiguous and fetched with one `pread`, avoiding three distant
+regions and avoiding a 30 GB virtual mapping in the serving path.
+
+For the retained model, 16-row AoS gathers matched the safetensors fallback
+element-for-element. A measured process used about 5.5 MB peak footprint; the
+first gather was 4.53 ms and the next was 1.66 ms. Correctness and residency are
+therefore established, but serial SSD reads are not the final decode path.
+Persistent parallel pread workers and the PLE projection/gated-convolution graph
+are the next milestone.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s
