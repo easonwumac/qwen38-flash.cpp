@@ -12,8 +12,11 @@ qwen38::HttpRequest get(std::string target) {
 
 class FakeEngine final : public qwen38::InferenceEngine {
 public:
-    qwen38::GenerationResult complete(std::string_view prompt, std::size_t) override {
+    qwen38::GenerationResult complete(
+        std::string_view prompt,
+        const std::size_t max_tokens) override {
         last_prompt = std::string(prompt);
+        last_max_tokens = max_tokens;
         return {
             .text = response_text,
             .tokens = {1, 2},
@@ -26,6 +29,7 @@ public:
     }
     void clear_cache() override { cleared = true; }
     std::string last_prompt;
+    std::size_t last_max_tokens{0};
     std::string response_text{"answer"};
     bool cleared{false};
 };
@@ -69,6 +73,13 @@ void run_api_tests() {
     QWEN38_CHECK(completion.body.find("\"activations\":0") != std::string::npos);
     QWEN38_CHECK(completion.body.find("\"deactivations\":0") != std::string::npos);
     QWEN38_CHECK(engine.last_prompt == "hello");
+    const auto long_completion = inference_api.handle(post(
+        "/v1/completions", R"({"prompt":"hello","max_tokens":512})"));
+    QWEN38_CHECK(long_completion.status == 200);
+    QWEN38_CHECK(engine.last_max_tokens == 512);
+    const auto invalid_token_limit = inference_api.handle(post(
+        "/v1/completions", R"({"prompt":"hello","max_tokens":0})"));
+    QWEN38_CHECK(invalid_token_limit.status == 400);
     const auto chat = inference_api.handle(post(
         "/v1/chat/completions",
         R"({"messages":[{"role":"user","content":"hello"}],"max_completion_tokens":2})"));
@@ -132,7 +143,7 @@ void run_api_tests() {
     QWEN38_CHECK(chat_stream_wire.find("\"content\":\"final answer\"") !=
         std::string::npos);
     QWEN38_CHECK(chat_stream_wire.ends_with("data: [DONE]\n\n"));
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 14);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 16);
 
     QWEN38_CHECK(qwen38::json_escape("a\n\"b") == "a\\n\\\"b");
 }

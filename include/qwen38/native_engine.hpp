@@ -16,6 +16,10 @@
 namespace qwen38 {
 
 struct NativeEngineOptions {
+    // Bound request duration and incremental decode-state growth without
+    // imposing an API-level 256-token product limitation. The model context
+    // window remains the final per-request limit.
+    std::size_t max_generation_tokens{4096};
     // Layer-major prompt ingestion. 64 matched the retained oMLX production
     // path while keeping the temporary batch bounded on 64 GiB machines.
     std::size_t prefill_chunk_rows{64};

@@ -173,6 +173,9 @@ NativeEngine::NativeEngine(
         throw std::runtime_error("chat end marker must encode to one token");
     }
     chat_end_token_ = chat_end.front();
+    if (options_.max_generation_tokens == 0) {
+        throw std::runtime_error("generation token limit must be positive");
+    }
     if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 512) {
         throw std::runtime_error("prefill chunk rows must be between 1 and 512");
     }
@@ -211,12 +214,21 @@ GenerationResult NativeEngine::complete_impl(
     const std::string_view prompt,
     const std::size_t max_tokens,
     const TextDeltaCallback* on_delta) {
-    if (max_tokens == 0 || max_tokens > 256) {
-        throw std::runtime_error("max_tokens must be between 1 and 256");
+    if (max_tokens == 0 || max_tokens > options_.max_generation_tokens) {
+        throw std::runtime_error(
+            "max_tokens must be between 1 and the configured generation limit (" +
+            std::to_string(options_.max_generation_tokens) + ")");
     }
     std::scoped_lock lock(inference_mutex_);
     const std::vector<std::uint32_t> prompt_tokens = tokenizer_.encode(prompt);
     if (prompt_tokens.empty()) throw std::runtime_error("prompt produced no tokens");
+    const std::size_t context_limit = tensors_.manifest().config().max_context_tokens;
+    if (prompt_tokens.size() > context_limit ||
+        max_tokens > context_limit - prompt_tokens.size()) {
+        throw std::runtime_error(
+            "prompt and max_tokens exceed the model context limit (" +
+            std::to_string(context_limit) + " tokens)");
+    }
 
     ModelDecodeState state = model_.make_state();
     MtpDecodeState mtp_state = mtp_head_ == nullptr

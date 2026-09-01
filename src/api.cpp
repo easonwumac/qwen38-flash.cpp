@@ -27,8 +27,8 @@ std::size_t max_tokens(const Json& body) {
     if (value == nullptr) value = body.find("max_tokens");
     if (value == nullptr) return 16;
     const std::int64_t parsed = value->as_integer();
-    if (parsed < 1 || parsed > 256) {
-        throw std::runtime_error("max_tokens must be between 1 and 256");
+    if (parsed < 1) {
+        throw std::runtime_error("max_tokens must be positive");
     }
     return static_cast<std::size_t>(parsed);
 }

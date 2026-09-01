@@ -20,8 +20,10 @@ scheduling remain later milestones.
 | `POST` | `/v1/completions` | Native tokenization and greedy generation, usage and timing. |
 | `POST` | `/admin/cache/clear` | Clears unused MLX allocator/cache blocks; active request state is serialized and never invalidated. |
 
-Completion requests accept a string `prompt` and `max_tokens` from 1 through
-256. Chat requests accept a non-empty OpenAI-style `messages` array and either
+Completion requests accept a string `prompt` and a positive `max_tokens` up to
+the server's `--max-generation-tokens` limit (4096 by default). The combined
+prompt and requested generation must also fit the model context window. Chat
+requests accept a non-empty OpenAI-style `messages` array and either
 `max_completion_tokens` or `max_tokens`. The current engine is greedy-only;
 `enable_thinking` and the mlx-serve-compatible alias `thinking` select the Qwen
 thinking template; when both are present they must agree.
