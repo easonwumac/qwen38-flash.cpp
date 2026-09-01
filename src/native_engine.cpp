@@ -49,6 +49,13 @@ std::uint32_t argmax_token(const MlxArray& logits) {
     return token.item_uint32();
 }
 
+bool is_prefix(
+    const std::span<const std::uint32_t> prefix,
+    const std::span<const std::uint32_t> tokens) {
+    return prefix.size() <= tokens.size() &&
+        std::equal(prefix.begin(), prefix.end(), tokens.begin());
+}
+
 } // namespace
 
 NativeEngine::NativeEngine(
@@ -89,9 +96,22 @@ GenerationResult NativeEngine::complete(
         ? MtpDecodeState{}
         : mtp_head_->make_state();
     std::optional<MlxArray> previous_target_stream;
-    const auto prompt_started = std::chrono::steady_clock::now();
+    std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
-    for (std::size_t offset = 0; offset < prefill_rows;
+    if (prefix_cache_ != nullptr &&
+        is_prefix(prefix_cache_->tokens,
+            std::span<const std::uint32_t>(prompt_tokens.data(), prefill_rows))) {
+        state = model_.snapshot_state(prefix_cache_->target_state);
+        if (mtp_head_ != nullptr) {
+            mtp_state = mtp_head_->snapshot_state(prefix_cache_->mtp_state);
+        }
+        if (prefix_cache_->previous_target_stream.has_value()) {
+            previous_target_stream = prefix_cache_->previous_target_stream->share();
+        }
+        prefill_offset = prefix_cache_->tokens.size();
+    }
+    const auto prompt_started = std::chrono::steady_clock::now();
+    for (std::size_t offset = prefill_offset; offset < prefill_rows;
          offset += options_.prefill_chunk_rows) {
         const std::size_t count = std::min(
             options_.prefill_chunk_rows, prefill_rows - offset);
@@ -111,7 +131,25 @@ GenerationResult NativeEngine::complete(
 
     GenerationResult result;
     result.prompt_tokens = prompt_tokens.size();
+    result.cached_prompt_tokens = prefill_offset;
     result.prompt_ms = prompt_ms;
+
+    if (options_.prefix_cache_max_tokens != 0 && prefill_rows != 0 &&
+        prefill_rows <= options_.prefix_cache_max_tokens &&
+        (prefix_cache_ == nullptr || prefill_offset != prefill_rows)) {
+        prefix_cache_ = std::make_unique<PrefixCacheEntry>(PrefixCacheEntry{
+            .tokens = std::vector<std::uint32_t>(
+                prompt_tokens.begin(), prompt_tokens.begin() +
+                    static_cast<std::ptrdiff_t>(prefill_rows)),
+            .target_state = model_.snapshot_state(state),
+            .mtp_state = mtp_head_ == nullptr
+                ? MtpDecodeState{}
+                : mtp_head_->snapshot_state(mtp_state),
+            .previous_target_stream = previous_target_stream.has_value()
+                ? std::optional<MlxArray>(previous_target_stream->share())
+                : std::nullopt,
+        });
+    }
     result.tokens.reserve(max_tokens);
     std::uint32_t current = prompt_tokens.back();
     std::size_t zero_accept_streak = 0;
@@ -166,6 +204,7 @@ void NativeEngine::clear_cache() {
     std::scoped_lock lock(inference_mutex_);
     // Request-owned decode state is released at request completion. This also
     // returns unused MLX allocator/cache blocks to the system on demand.
+    prefix_cache_.reset();
     MlxArray::clear_cache();
 }
 

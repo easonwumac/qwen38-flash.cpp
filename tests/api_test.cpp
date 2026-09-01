@@ -18,6 +18,7 @@ public:
             .text = "answer",
             .tokens = {1, 2},
             .prompt_tokens = 3,
+            .cached_prompt_tokens = 2,
             .prompt_ms = 4.0,
             .generation_ms = 5.0,
             .finish_reason = "stop",
@@ -55,6 +56,7 @@ void run_api_tests() {
         "/v1/completions", R"({"prompt":"hello","max_tokens":2})"));
     QWEN38_CHECK(completion.status == 200);
     QWEN38_CHECK(completion.body.find("answer") != std::string::npos);
+    QWEN38_CHECK(completion.body.find("\"cached_tokens\":2") != std::string::npos);
     QWEN38_CHECK(completion.body.find("\"mtp\":{\"rounds\":0") != std::string::npos);
     QWEN38_CHECK(engine.last_prompt == "hello");
     const auto chat = inference_api.handle(post(

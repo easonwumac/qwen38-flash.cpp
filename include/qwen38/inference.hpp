@@ -12,6 +12,7 @@ struct GenerationResult {
     std::string text;
     std::vector<std::uint32_t> tokens;
     std::size_t prompt_tokens{0};
+    std::size_t cached_prompt_tokens{0};
     double prompt_ms{0.0};
     double generation_ms{0.0};
     std::string finish_reason{"length"};

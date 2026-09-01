@@ -71,7 +71,10 @@ std::string completion_json(
         << "\"}],\"usage\":{\"prompt_tokens\":" << result.prompt_tokens
         << ",\"completion_tokens\":" << result.tokens.size()
         << ",\"total_tokens\":" << result.prompt_tokens + result.tokens.size()
+        << ",\"prompt_tokens_details\":{\"cached_tokens\":"
+        << result.cached_prompt_tokens << "}"
         << "},\"performance\":{\"prompt_ms\":" << result.prompt_ms
+        << ",\"cached_prompt_tokens\":" << result.cached_prompt_tokens
         << ",\"generation_ms\":" << result.generation_ms
         << ",\"generation_tps\":"
         << (result.generation_ms > 0.0

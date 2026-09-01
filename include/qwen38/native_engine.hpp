@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <vector>
 
 namespace qwen38 {
 
@@ -17,6 +18,8 @@ struct NativeEngineOptions {
     // Layer-major prompt ingestion. 64 matched the retained oMLX production
     // path while keeping the temporary batch bounded on 64 GiB machines.
     std::size_t prefill_chunk_rows{64};
+    // Retain one exact complete-state prefix. Zero disables caching.
+    std::size_t prefix_cache_max_tokens{8192};
     // nullopt selects depth 2 when an MTP sidecar is present, otherwise serial.
     std::optional<std::size_t> mtp_depth;
     std::size_t mtp_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};
@@ -36,11 +39,19 @@ public:
     void clear_cache() override;
 
 private:
+    struct PrefixCacheEntry {
+        std::vector<std::uint32_t> tokens;
+        ModelDecodeState target_state;
+        MtpDecodeState mtp_state;
+        std::optional<MlxArray> previous_target_stream;
+    };
+
     NativeEngineOptions options_;
     MlxTensorStore tensors_;
     Tokenizer tokenizer_;
     QwenModel model_;
     std::unique_ptr<QwenMtpHead> mtp_head_;
+    std::unique_ptr<PrefixCacheEntry> prefix_cache_;
     std::size_t mtp_depth_{0};
     std::mutex inference_mutex_;
 };

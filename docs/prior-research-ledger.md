@@ -27,6 +27,7 @@ reference evidence, not measurements of this C++ runtime.
 | Native HTTP Q4 MTP low-acceptance control | Auto MTP and serial emitted byte-identical eight-token text; MTP saw 0/4 accepted across two rounds, fell back, and reached 22.91 tok/s versus 29.27 serial; peaks 36.6 versus 34.9 GiB | The production API wiring is correct, and acceptance-only fallback works, but two losing rounds are too expensive | One 15-token code prompt; cold prompt/decode timing, not a throughput promotion |
 | C++ layer-major prompt integration | Five chat prompts matched the retained oMLX first token exactly, including the 186-token P73 prompt (`I`, id 40). On that prompt, the internal batch path was 3.09x faster than the old serial path; the warmed HTTP path reached 99.2 prefill tok/s and peaked at 35.5 GiB | The old serial C++ prefill was both slower and a false numerical oracle. Batched target numerics are now the production path | Chunk size 64, Q4 REAP-288, no prefix reuse; still well below P73's 479.357 tok/s |
 | C++ batched-prefill Q4 MTP check | The warmed 186-token P73 prompt accepted 18/28 drafts and emitted 32 tokens at 27.12 tok/s; prefill was 80.3 tok/s; peak 35.5 GiB | Batched target prefill correctly primes complete MTP state, but serial MTP-head prompt priming and current round cost remain unprofitable | One code prompt, depth 2, short 32-token generation; correctness check, not a speed promotion |
+| C++ exact complete-state prefix cache | A repeated P73 request reused 185/186 prompt tokens with byte-identical output. No-MTP prompt time fell from 1955.67 ms after clear to 0.000042 ms on hit; MTP preserved 18/28 acceptance and identical 32-token output with 0 ms reported prompt time. Peaks were 34.5 GiB serial and 35.2 GiB MTP | One snapshot can safely reuse target KV, GDN, PLE, QSA, prior target stream, and the complete MTP head state together | One-entry RAM tier, capped at 8192 tokens by default; no partial rollback checkpoint or SSD tier yet |
 
 P73's 59.866 tok/s is explained by `(1 + 1.57) / 43.95 ms`, approximately
 58.5 tok/s. It is not evidence of a universal 59 tok/s target path. The serial
@@ -75,6 +76,10 @@ directions. New code should build on them.
     and Transformers agree on the 186-token template and first generated token;
     the former C++ token-at-a-time path does not. Added tokens such as `<think>`
     must remain atomic even when their tokenizer metadata says `special=false`.
+11. **Cache complete state or do not cache.** The first C++ cache intentionally
+    keeps one exact target/MTP snapshot rather than multiplying hybrid entries.
+    Its public cached-token count and cache-clear behavior are part of the API
+    contract; an MTP hit must preserve both committed tokens and acceptance.
 
 ## Reject or do not repeat
 
@@ -107,10 +112,10 @@ The implementation order is deliberately narrow:
 3. **Compile-stable fixed-capacity state.** Replace growing per-step QSA/GDN
    graph shapes with fixed-capacity or paged state so the verified MTP pass can
    reuse compiled graphs and avoid allocator/dispatch churn.
-4. **Exact prefix snapshots.** Chunked target prefill is now integrated. Add
-   reusable target prefix snapshots next; MTP restoration must include its
-   complete QSA state or rebuild from a freshly forwarded tail, and must never
-   silently restore KV alone.
+4. **Bounded multi-entry/SSD prefix tier.** One exact complete-state RAM snapshot
+   is integrated. Add byte accounting before expanding entry count, then a
+   durable SSD tier for long prompts. MTP restoration must continue to include
+   complete QSA state or rebuild from a freshly forwarded tail.
 5. **Verifier-wide fusion only after profiling.** The remaining plausible
    kernel opportunity is a fused, exact S=2..4 verifier path that removes
    model-byte movement, intermediates, and dispatches across multiple

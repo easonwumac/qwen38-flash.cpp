@@ -86,7 +86,7 @@ With both MLX and tokenizer options enabled, run the native inference server:
 
 ```bash
 ./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model \
-  --prefill-chunk 64 --mtp-depth auto
+  --prefill-chunk 64 --prefix-cache-tokens 8192 --mtp-depth auto
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
@@ -105,6 +105,11 @@ consecutive zero-accept rounds.
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the model's production batched
 numerics; accepted values are 1 through 64.
+
+The server retains one complete target/MTP prefix snapshot up to
+`--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,
+PLE, QSA, and KV state family together. Set the limit to `0` to disable it;
+`POST /admin/cache/clear` releases the snapshot and the MLX allocator cache.
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`
