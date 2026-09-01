@@ -21,12 +21,43 @@ MlxArray offset_norm(MlxArray raw, const std::size_t width) {
     return MlxArray::add(raw, MlxArray::from_float32(values, shape).astype(raw.dtype()));
 }
 
-ModelConfig mtp_layer_config(const ModelConfig& target) {
+int infer_projection_bits(
+    MlxTensorStore& tensors,
+    const char* prefix,
+    const std::size_t group_size) {
+    const std::string base(prefix);
+    const std::vector<int> weight_shape = tensors.tensor(base + ".weight").shape();
+    const std::vector<int> scale_shape = tensors.tensor(base + ".scales").shape();
+    if (weight_shape.empty() || scale_shape.empty() || weight_shape.size() != scale_shape.size()) {
+        throw std::runtime_error("cannot infer MTP quantization geometry");
+    }
+    if (weight_shape.back() <= 0 || scale_shape.back() <= 0) {
+        throw std::runtime_error("invalid MTP quantization geometry");
+    }
+    const std::size_t packed = static_cast<std::size_t>(weight_shape.back());
+    const std::size_t groups = static_cast<std::size_t>(scale_shape.back());
+    if (packed == 0 || groups == 0 || group_size == 0 ||
+        groups > std::numeric_limits<std::size_t>::max() / group_size) {
+        throw std::runtime_error("invalid MTP quantization geometry");
+    }
+    const std::size_t width = groups * group_size;
+    if (packed > std::numeric_limits<std::size_t>::max() / 32 ||
+        packed * 32 % width != 0) {
+        throw std::runtime_error("non-integral MTP quantization bits");
+    }
+    const std::size_t bits = packed * 32 / width;
+    if (bits != 4 && bits != 8) {
+        throw std::runtime_error("MTP projections must use affine Q4 or Q8");
+    }
+    return static_cast<int>(bits);
+}
+
+ModelConfig mtp_layer_config(const ModelConfig& target, const int bits) {
     ModelConfig result = target;
     result.layer_count = 1;
     result.layer_types = {"full_attention"};
     result.ple_layer_ids.clear();
-    result.quantization_bits = 8;
+    result.quantization_bits = static_cast<std::size_t>(bits);
     // The retained ReleaseFast sidecar stores pre-FC/HC norms as deltas, but
     // its attention q/k norms are already effective weights (P192 fixture).
     result.attention_norm_has_offset = false;
@@ -63,6 +94,10 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
       group_size_(dimension(
           tensors.manifest().config().quantization_group_size,
           "quantization group size")),
+      mtp_bits_(infer_projection_bits(
+          tensors,
+          "language_model.mtp.fc_embedding",
+          tensors.manifest().config().quantization_group_size)),
       epsilon_(static_cast<float>(tensors.manifest().config().rms_norm_epsilon)),
       embedding_(load_projection(
           tensors,
@@ -72,8 +107,9 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
           tensors,
           "language_model.lm_head",
           dimension(tensors.manifest().config().quantization_bits, "target bits"))),
-      fc_embedding_(load_projection(tensors, "language_model.mtp.fc_embedding", 8)),
-      fc_hidden_(load_projection(tensors, "language_model.mtp.fc_hidden", 8)),
+      fc_embedding_(load_projection(
+          tensors, "language_model.mtp.fc_embedding", mtp_bits_)),
+      fc_hidden_(load_projection(tensors, "language_model.mtp.fc_hidden", mtp_bits_)),
       embedding_norm_(offset_norm(
           tensors.tensor("language_model.mtp.pre_fc_norm_embedding.weight"), hidden_size_)),
       hidden_norm_(offset_norm(
@@ -83,13 +119,13 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
           tensors,
           "language_model.mtp.layers.0",
           0,
-          mtp_layer_config(tensors.manifest().config())),
+          mtp_layer_config(tensors.manifest().config(), mtp_bits_)),
       final_mixer_(
           tensors,
           "language_model.mtp.hyper_connection_mixer",
           hidden_size_,
           stream_count_,
-          8,
+          static_cast<std::size_t>(mtp_bits_),
           tensors.manifest().config().quantization_group_size,
           epsilon_,
           false) {

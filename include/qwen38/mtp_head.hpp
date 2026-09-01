@@ -75,6 +75,7 @@ private:
     std::size_t stream_count_;
     std::size_t vocabulary_size_;
     int group_size_;
+    int mtp_bits_;
     float epsilon_;
     QuantizedProjection embedding_;
     QuantizedProjection language_head_;
