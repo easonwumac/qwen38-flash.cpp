@@ -15,8 +15,8 @@ a UI and is not a wrapper around `mlx-serve`.
 > chunked prefill. Qwen Sparse Attention now owns raw/pooled indexer state,
 > causal top-block selection, snapshots, and verifier rollback beyond the
 > 2,048-token selection budget. It is not yet the final optimized release: the
-> non-MTP and mixed-workload decode targets remain unmet, and 128K/262K context
-> operation is not yet validated.
+> non-MTP and mixed-workload decode targets remain unmet. A guarded real-API
+> request now validates 141,275 prompt tokens; the 262K limit remains unverified.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -261,6 +261,16 @@ is used only when the complete prompt has at most 512 tokens. Prompts through
 6,144 forwarded tokens automatically use chunk 384, prompts through 8,192 use
 chunk 256, and longer prompts use chunk 128 to retain the validated 64 GiB
 memory bound.
+
+The native engine caps the MLX allocator cache at 256 MiB in serial as well as
+MTP mode. Before this bound covered serial inference, a 23,555-token request was
+stopped by the memory guard at 5.8 GiB available memory. With the common bound,
+the identical uncached request completed at 269.2 prompt tok/s. A six-copy,
+141,275-token request then completed at 172.3 prompt tok/s and generated the
+next token in 114.4 ms with MTP and prefix caching disabled. The server stayed
+at about 35.7 GiB sampled RSS and the lowest manual availability sample was
+7.4 GiB on the 64 GiB M5 Pro. This validates operation beyond 128K, not 262K,
+and shows that long-context prefill remains a performance target.
 
 `QWEN38_SDPA_PREFILL=1` replaces the full-attention token loop with MLX causal
 SDPA at prompt widths of 16 or more. It retains the correct causal offset when

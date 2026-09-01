@@ -186,14 +186,15 @@ NativeEngine::NativeEngine(
         throw std::runtime_error(
             "prefill chunks above 64 require QWEN38_GDN_METAL_PREFILL=1");
     }
+    if (options_.allocator_cache_limit_bytes == 0) {
+        throw std::runtime_error("allocator cache limit must be positive");
+    }
+    static_cast<void>(MlxArray::set_cache_limit(
+        options_.allocator_cache_limit_bytes));
     if (mtp_depth_ != 0) {
-        if (options_.mtp_cache_limit_bytes == 0) {
-            throw std::runtime_error("MTP cache limit must be positive");
-        }
         if (options_.zero_accept_fallback_rounds == 0) {
             throw std::runtime_error("MTP fallback window must be positive");
         }
-        static_cast<void>(MlxArray::set_cache_limit(options_.mtp_cache_limit_bytes));
         mtp_head_ = std::make_unique<QwenMtpHead>(tensors_);
     }
 }

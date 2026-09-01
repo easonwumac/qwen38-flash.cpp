@@ -29,7 +29,7 @@ struct NativeEngineOptions {
     // is present: start at 2, promote only on strong short-prompt acceptance,
     // and demote if verification becomes unprofitable.
     std::optional<std::size_t> mtp_depth;
-    std::size_t mtp_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};
+    std::size_t allocator_cache_limit_bytes{256ULL * 1024ULL * 1024ULL};
     std::size_t zero_accept_fallback_rounds{2};
     // The allocator cache already has a strict byte cap. Per-round clearing
     // forces a GPU synchronization and is reserved for diagnostic fallback.
