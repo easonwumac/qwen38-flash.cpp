@@ -26,8 +26,10 @@ This proves weight-to-Metal plumbing, not a complete transformer forward.
 `qwen38-hyper-connection-smoke MODEL_DIRECTORY` additionally executes the real
 layer-0 read/injection gates, residual write-back, and final mixer. Its outputs
 match the independent `devtools/hyper_connection_oracle.py` MLX-Python oracle.
-`qwen38-sparse-moe-smoke MODEL_DIRECTORY` verifies router top-k, ten selected
-Q4 experts, and the gated shared expert against a second independent oracle.
+`qwen38-sparse-moe-smoke MODEL_DIRECTORY [PREFILL_ROWS]` verifies router top-k,
+ten selected Q4 experts, and the gated shared expert against a second independent
+oracle. An optional width from 2 through 512 exercises and times the production
+grouped-prefill path; run that memory-heavy mode through `devtools/memory_guard.py`.
 `qwen38-gated-delta-net-smoke MODEL_DIRECTORY` verifies two stateful decode steps,
 including depthwise convolution and recurrent caches, forget/beta gates, Q/K
 normalization, gated RMSNorm, and Q4 output projection against a third oracle.
