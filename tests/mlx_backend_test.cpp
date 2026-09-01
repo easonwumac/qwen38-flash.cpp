@@ -3,6 +3,7 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/mtp_verifier.hpp"
+#include "qwen38/prefix_cache_store.hpp"
 
 #include "../src/gdn_metal_kernels.hpp"
 
@@ -385,6 +386,38 @@ int main() {
         std::cerr << "persisted prefix-state roundtrip mismatch\n";
         return 1;
     }
+    const std::filesystem::path cache_path =
+        std::filesystem::temp_directory_path() /
+        ("qwen38-prefix-cache-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+        qwen38::PrefixCacheStore store(cache_path, 16ULL * 1024ULL * 1024ULL, 1);
+        const std::array<std::uint32_t, 2> short_tokens{1, 2};
+        persisted.target.token_count = short_tokens.size();
+        store.save(short_tokens, persisted);
+        const std::array<std::uint32_t, 3> long_tokens{1, 2, 3};
+        persisted.target.token_count = long_tokens.size();
+        store.save(long_tokens, persisted);
+        const std::array<std::uint32_t, 4> prompt_tokens{1, 2, 3, 4};
+        std::optional<qwen38::StoredPrefixState> cache_hit =
+            store.load_longest(prompt_tokens);
+        if (!cache_hit.has_value() ||
+            cache_hit->tokens != std::vector<std::uint32_t>({1, 2, 3}) ||
+            cache_hit->state.target.token_count != 3 ||
+            cache_hit->state.target.layers[0].linear_attention.recurrent.to_float32() !=
+                std::vector<float>({5, 6, 7, 8})) {
+            std::cerr << "SSD prefix-cache longest-prefix mismatch\n";
+            std::filesystem::remove_all(cache_path);
+            return 1;
+        }
+        store.clear();
+        if (store.load_longest(prompt_tokens).has_value()) {
+            std::cerr << "SSD prefix-cache clear mismatch\n";
+            std::filesystem::remove_all(cache_path);
+            return 1;
+        }
+    }
+    std::filesystem::remove_all(cache_path);
 
     qwen38::MtpTargetVerification verification{.draft_count = 2, .rows = {}};
     for (std::size_t index = 0; index < 3; ++index) {

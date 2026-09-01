@@ -103,6 +103,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         src/mtp_runner.cpp
         src/mtp_verifier.cpp
         src/ple.cpp
+        src/prefix_cache_store.cpp
         src/self_attention.cpp
         src/sparse_moe.cpp
     )
