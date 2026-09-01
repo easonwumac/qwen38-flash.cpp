@@ -215,6 +215,14 @@ tokens, the same 71-round, 185/205 acceptance path improved from 65.14 to
 improved slightly rather than regressing. Sampled RSS remained about 35.5 GiB.
 Set `QWEN38_DEFER_MTP_COMMIT_EVAL=0` to restore eager materialization.
 
+The batched target LM head also stays lazy until the already-batched verifier
+decision consumes it, eliminating a second barrier between logits and argmax.
+This is a smaller scheduling win: the 128-token fixture improved from
+64.68--64.77 to 64.87--65.03 tok/s, and the 256-token warm run improved from
+66.78 to 66.97 tok/s with identical output and acceptance. Set
+`QWEN38_DEFER_VERIFY_HEAD_EVAL=0` to restore the separate head barrier. Developer
+benchmarks that request isolated head timing still materialize it explicitly.
+
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the

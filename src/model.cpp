@@ -314,7 +314,10 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         language_head_.biases,
         group_size_,
         bits_);
-    logits_batch.eval();
+    const char* defer_head_eval = std::getenv("QWEN38_DEFER_VERIFY_HEAD_EVAL");
+    const bool defer_head_eval_enabled =
+        defer_head_eval == nullptr || std::string_view(defer_head_eval) != "0";
+    if (!defer_head_eval_enabled || head_ms != nullptr) logits_batch.eval();
     if (head_ms != nullptr) {
         *head_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - head_started).count();
