@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -105,6 +106,7 @@ GenerationResult NativeEngine::complete(
         ? MtpDecodeState{}
         : mtp_head_->make_state();
     std::optional<MlxArray> previous_target_stream;
+    std::optional<bool> cached_mtp_profitability;
     std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
     const std::size_t request_prefill_chunk =
@@ -122,6 +124,10 @@ GenerationResult NativeEngine::complete(
             previous_target_stream = prefix_cache_->previous_target_stream->share();
         }
         prefill_offset = prefix_cache_->tokens.size();
+        if (prefill_offset == prefill_rows &&
+            prefix_cache_->mtp_profitability_current_token == prompt_tokens.back()) {
+            cached_mtp_profitability = prefix_cache_->mtp_profitable;
+        }
     }
     const auto prompt_started = std::chrono::steady_clock::now();
     for (std::size_t offset = prefill_offset; offset < prefill_rows;
@@ -161,6 +167,8 @@ GenerationResult NativeEngine::complete(
             .previous_target_stream = previous_target_stream.has_value()
                 ? std::optional<MlxArray>(previous_target_stream->share())
                 : std::nullopt,
+            .mtp_profitable = std::nullopt,
+            .mtp_profitability_current_token = std::nullopt,
         });
     }
     result.tokens.reserve(max_tokens);
@@ -171,7 +179,16 @@ GenerationResult NativeEngine::complete(
     HistoryDraftCache history_draft;
     if (history_draft_enabled) history_draft.append(prompt_tokens);
     MtpProfitabilityGuard profitability_guard;
-    bool mtp_profitable = mtp_head_ != nullptr;
+    bool mtp_profitable = mtp_head_ != nullptr &&
+        cached_mtp_profitability.value_or(true);
+    result.mtp_profitability_cache_skip =
+        cached_mtp_profitability.has_value() && !*cached_mtp_profitability;
+    if (result.mtp_profitability_cache_skip) {
+        const char* mtp_trace = std::getenv("QWEN38_MTP_TRACE");
+        if (mtp_trace != nullptr && std::string_view(mtp_trace) == "1") {
+            std::clog << "qwen38: prefix cache skipped previously losing MTP probe\n";
+        }
+    }
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
     result.mtp_final_depth = depth_policy.depth();
     const auto generation_started = std::chrono::steady_clock::now();
@@ -210,6 +227,16 @@ GenerationResult NativeEngine::complete(
         result.mtp_draft_ms += step.draft_ms;
         result.mtp_verify_ms += step.verify_ms;
         result.mtp_commit_ms += step.commit_ms;
+        const char* mtp_trace = std::getenv("QWEN38_MTP_TRACE");
+        if (mtp_trace != nullptr && std::string_view(mtp_trace) == "1") {
+            std::clog << "qwen38: mtp round=" << result.mtp_rounds
+                      << " depth=" << step.draft_tokens.size()
+                      << " accepted=" << step.accepted
+                      << " draft_ms=" << step.draft_ms
+                      << " verify_ms=" << step.verify_ms
+                      << " commit_ms=" << step.commit_ms
+                      << " history=" << (used_history_draft ? 1 : 0) << '\n';
+        }
         if (used_history_draft) {
             ++result.history_draft_rounds;
             result.history_draft_proposed += step.draft_tokens.size();
@@ -248,6 +275,12 @@ GenerationResult NativeEngine::complete(
     }
     result.generation_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - generation_started).count();
+    if (prefix_cache_ != nullptr && prefill_rows == prefix_cache_->tokens.size() &&
+        std::equal(prefix_cache_->tokens.begin(), prefix_cache_->tokens.end(),
+            prompt_tokens.begin()) && result.mtp_rounds >= 2) {
+        prefix_cache_->mtp_profitable = result.mtp_fallbacks == 0;
+        prefix_cache_->mtp_profitability_current_token = prompt_tokens.back();
+    }
     result.text = tokenizer_.decode(result.tokens);
     return result;
 }

@@ -150,6 +150,11 @@ The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,
 PLE, QSA, and KV state family together. Set the limit to `0` to disable it;
 `POST /admin/cache/clear` releases the snapshot and the MLX allocator cache.
+For an exact repeated prompt, the snapshot also remembers whether the initial
+MTP probe deterministically fell back. A previously losing probe is skipped on
+the next cache hit, while a profitable probe remains enabled. The response
+reports this as `performance.mtp.profitability_cache_skip`. Set
+`QWEN38_MTP_TRACE=1` for per-round acceptance and timing diagnostics.
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`

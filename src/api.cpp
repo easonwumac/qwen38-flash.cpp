@@ -87,6 +87,8 @@ std::string completion_json(
         << ",\"depth\":" << result.mtp_final_depth
         << ",\"promotions\":" << result.mtp_promotions
         << ",\"demotions\":" << result.mtp_demotions
+        << ",\"profitability_cache_skip\":"
+        << (result.mtp_profitability_cache_skip ? "true" : "false")
         << ",\"draft_ms\":" << result.mtp_draft_ms
         << ",\"verify_ms\":" << result.mtp_verify_ms
         << ",\"commit_ms\":" << result.mtp_commit_ms << "}"

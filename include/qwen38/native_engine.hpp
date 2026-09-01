@@ -6,6 +6,7 @@
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/tokenizer.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -48,6 +49,8 @@ private:
         ModelDecodeState target_state;
         MtpDecodeState mtp_state;
         std::optional<MlxArray> previous_target_stream;
+        std::optional<bool> mtp_profitable;
+        std::optional<std::uint32_t> mtp_profitability_current_token;
     };
 
     NativeEngineOptions options_;
