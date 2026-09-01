@@ -13,7 +13,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(qwen38_core
     src/api.cpp
     src/http_server.cpp
+    src/json.cpp
+    src/mapped_file.cpp
+    src/model_manifest.cpp
     src/runtime.cpp
+    src/safetensors.cpp
 )
 target_include_directories(qwen38_core PUBLIC include)
 target_compile_features(qwen38_core PUBLIC cxx_std_20)
@@ -35,7 +39,10 @@ endif()
 add_executable(qwen38-server src/main.cpp)
 target_link_libraries(qwen38-server PRIVATE qwen38_core)
 
-install(TARGETS qwen38-server RUNTIME DESTINATION bin)
+add_executable(qwen38-inspect src/inspect.cpp)
+target_link_libraries(qwen38-inspect PRIVATE qwen38_core)
+
+install(TARGETS qwen38-server qwen38-inspect RUNTIME DESTINATION bin)
 
 if(QWEN38_BUILD_TESTS)
     include(CTest)
@@ -43,7 +50,10 @@ if(QWEN38_BUILD_TESTS)
 
     add_executable(qwen38-tests
         tests/api_test.cpp
+        tests/json_test.cpp
+        tests/model_manifest_test.cpp
         tests/runtime_test.cpp
+        tests/safetensors_test.cpp
         tests/test_main.cpp
     )
     target_link_libraries(qwen38-tests PRIVATE qwen38_core)

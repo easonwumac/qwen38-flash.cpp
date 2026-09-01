@@ -1,6 +1,9 @@
 #include "test.hpp"
 
 int main() {
+    run_json_tests();
+    run_safetensors_tests();
+    run_model_manifest_tests();
     run_runtime_tests();
     run_api_tests();
     if (qwen38::test::failures == 0) {

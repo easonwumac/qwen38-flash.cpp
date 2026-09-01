@@ -1,5 +1,6 @@
 #include "qwen38/api.hpp"
 #include "qwen38/http_server.hpp"
+#include "qwen38/model_manifest.hpp"
 #include "qwen38/runtime.hpp"
 
 #include <charconv>
@@ -67,7 +68,8 @@ int main(int argc, char** argv) {
         qwen38::RuntimeState runtime;
         if (model_path.has_value()) {
             runtime.begin_loading(*model_path);
-            runtime.mark_failed("model loading is not implemented in this milestone");
+            static_cast<void>(qwen38::ModelManifest::load(*model_path));
+            runtime.mark_failed("model manifest is valid; inference graph is not implemented yet");
         }
         const qwen38::Api api(runtime);
         qwen38::HttpServer server(config, api);

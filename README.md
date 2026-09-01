@@ -9,10 +9,11 @@ KV/prefix caches, speculative verification, serving, and observability. It is no
 a UI and is not a wrapper around `mlx-serve`.
 
 > [!IMPORTANT]
-> The current milestone is the tested C++20 server foundation. Health, readiness,
-> status, model-list, metrics, and placeholder inference routes work. Model loading
-> and inference are not implemented yet, so this version is not a usable LLM
-> runtime and makes no performance claim.
+> The current milestone includes the tested C++20 server foundation plus a strict
+> Qwen3.8 manifest parser and lazy, zero-copy safetensors shard mapping. Health,
+> readiness, status, model-list, metrics, and placeholder inference routes work.
+> Graph execution and inference are not implemented yet, so this version is not a
+> usable LLM runtime and makes no performance claim.
 
 ## Build
 
@@ -31,6 +32,13 @@ Run the server:
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
+```
+
+Validate a model manifest and lazily map one tensor without loading all weights:
+
+```bash
+./build/qwen38-inspect /path/to/Qwen3.8-Flash-Next \
+  --tensor language_model.model.embed_tokens.weight
 ```
 
 ## API direction
