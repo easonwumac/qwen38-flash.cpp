@@ -124,6 +124,86 @@ DOWN = r"""
 """
 
 
+def qdot_gate_source(rows: int, values: int) -> str:
+    """Build an MLX-qmv-style gate/up kernel for a fixed output tile."""
+    return rf"""
+    constexpr int K = 2560;
+    constexpr int GS = 64;
+    constexpr int ROWS = {rows};
+    constexpr int VALUES = {values};
+    constexpr int BLOCK = VALUES * 32;
+    constexpr int NG = K / GS;
+    const uint sg = simdgroup_index_in_threadgroup;
+    const uint lane = thread_index_in_simdgroup;
+    const uint row0 = threadgroup_position_in_grid.x * (2 * ROWS) + sg * ROWS;
+    const int slot = row0 / 640;
+    const int expert_row = row0 % 640;
+    if (slot >= 10) return;
+    const uint expert = experts[slot];
+    const int packed_row = K / 8;
+    const size_t expert_base = (size_t)expert * 640 + expert_row;
+    const device uint32_t* gwr = gw + expert_base * packed_row + lane * (VALUES / 8);
+    const device uint32_t* uwr = uw + expert_base * packed_row + lane * (VALUES / 8);
+    const device T* gsr = gs + expert_base * NG + lane / (GS / VALUES);
+    const device T* gbr = gb + expert_base * NG + lane / (GS / VALUES);
+    const device T* usr = us + expert_base * NG + lane / (GS / VALUES);
+    const device T* ubr = ub + expert_base * NG + lane / (GS / VALUES);
+    const device T* xv = x + lane * VALUES;
+    float gate_acc[ROWS] = {{0.0f}};
+    float up_acc[ROWS] = {{0.0f}};
+    for (int k0 = 0; k0 < K; k0 += BLOCK) {{
+        float xt[VALUES];
+        float sum = 0.0f;
+        for (int i = 0; i < VALUES; i += 4) {{
+            float x0 = (float)xv[i], x1 = (float)xv[i + 1];
+            float x2 = (float)xv[i + 2], x3 = (float)xv[i + 3];
+            sum += x0 + x1 + x2 + x3;
+            xt[i] = x0;
+            xt[i + 1] = x1 / 16.0f;
+            xt[i + 2] = x2 / 256.0f;
+            xt[i + 3] = x3 / 4096.0f;
+        }}
+        for (int r = 0; r < ROWS; ++r) {{
+            const device uint16_t* wg =
+                (const device uint16_t*)(gwr + r * packed_row);
+            const device uint16_t* wu =
+                (const device uint16_t*)(uwr + r * packed_row);
+            float qg = 0.0f, qu = 0.0f;
+            for (int i = 0; i < VALUES / 4; ++i) {{
+                uint16_t gv = wg[i], uv = wu[i];
+                qg += xt[4 * i] * (gv & 0x000f) +
+                    xt[4 * i + 1] * (gv & 0x00f0) +
+                    xt[4 * i + 2] * (gv & 0x0f00) +
+                    xt[4 * i + 3] * (gv & 0xf000);
+                qu += xt[4 * i] * (uv & 0x000f) +
+                    xt[4 * i + 1] * (uv & 0x00f0) +
+                    xt[4 * i + 2] * (uv & 0x0f00) +
+                    xt[4 * i + 3] * (uv & 0xf000);
+            }}
+            gate_acc[r] += (float)gsr[r * NG] * qg + (float)gbr[r * NG] * sum;
+            up_acc[r] += (float)usr[r * NG] * qu + (float)ubr[r * NG] * sum;
+        }}
+        gwr += BLOCK / 8;
+        uwr += BLOCK / 8;
+        gsr += BLOCK / GS;
+        gbr += BLOCK / GS;
+        usr += BLOCK / GS;
+        ubr += BLOCK / GS;
+        xv += BLOCK;
+    }}
+    for (int r = 0; r < ROWS; ++r) {{
+        gate_acc[r] = simd_sum(gate_acc[r]);
+        up_acc[r] = simd_sum(up_acc[r]);
+        if (lane == 0) {{
+            float gv = (float)((T)gate_acc[r]);
+            float uv = (float)((T)up_acc[r]);
+            h[(size_t)slot * 640 + expert_row + r] =
+                (T)((float)((T)(gv / (1.0f + exp(-gv)))) * uv);
+        }}
+    }}
+"""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=Path)
@@ -178,6 +258,15 @@ def main() -> None:
         "h", "dw", "ds", "db", "experts", "rw"], output_names=["y"],
         header=HEADER, source=DOWN)
 
+    qdot_kernels = {}
+    for rows in (1, 2, 4, 8):
+        for values in (8, 16):
+            key = f"r{rows}v{values}"
+            qdot_kernels[key] = mx.fast.metal_kernel(
+                name=f"qwen38_moe_gate_{key}",
+                input_names=["x", "gw", "gs", "gb", "uw", "us", "ub", "experts"],
+                output_names=["h"], header=HEADER, source=qdot_gate_source(rows, values))
+
     def custom():
         (hidden,) = ka(inputs=[x.reshape(-1), tensor(base + ".gate_proj.weight"),
             tensor(base + ".gate_proj.scales"), tensor(base + ".gate_proj.biases"),
@@ -193,6 +282,29 @@ def main() -> None:
 
     _, candidate = custom()
     mx.eval(reference, candidate)
+    qdot_results = {}
+    gate_inputs = [x.reshape(-1), tensor(base + ".gate_proj.weight"),
+        tensor(base + ".gate_proj.scales"), tensor(base + ".gate_proj.biases"),
+        tensor(base + ".up_proj.weight"), tensor(base + ".up_proj.scales"),
+        tensor(base + ".up_proj.biases"), experts]
+    baseline_hidden, _ = custom()
+    mx.eval(baseline_hidden)
+    for key, kernel in qdot_kernels.items():
+        rows = int(key.split("v")[0][1:])
+        timings_for_variant = []
+        output = None
+        for _ in range(16):
+            started = time.perf_counter()
+            (output,) = kernel(inputs=gate_inputs, template=[("T", x.dtype)],
+                grid=((6400 // (2 * rows)) * 64, 1, 1), threadgroup=(64, 1, 1),
+                output_shapes=[(10, 640)], output_dtypes=[x.dtype])
+            mx.eval(output)
+            timings_for_variant.append((time.perf_counter() - started) * 1000)
+        error = mx.abs(output.astype(mx.float32) - baseline_hidden.astype(mx.float32))
+        qdot_results[key] = {
+            "median_ms": sorted(timings_for_variant[2:])[len(timings_for_variant[2:]) // 2],
+            "max_abs": float(error.max().item()),
+        }
     gate_timings = []
     for _ in range(8):
         started = time.perf_counter(); hidden, _ = custom(); mx.eval(hidden)
@@ -207,6 +319,7 @@ def main() -> None:
         "candidate_checksum": float(candidate.astype(mx.float32).sum().item()),
         "max_abs": float(delta.max().item()), "mean_abs": float(delta.mean().item()),
         "gate_warm_median_ms": sorted(gate_timings[1:])[3],
+        "qdot_gate": qdot_results,
         "cold_ms": timings[0], "warm_median_ms": sorted(timings[1:])[3]}, separators=(",", ":")))
 
 

@@ -264,6 +264,15 @@ sequence and measured warm steps of `40.8,34.6,36.5,36.5,35.9,36.3 ms`, or
 end-to-end gain shows that MoE down projection is no longer the only dominant
 kernel; attention, HyperConnection, and the shared expert remain targets.
 
+An MLX-qmv-style gate/up sweep tested 1, 2, 4, and 8 output rows per SIMD group
+with 8- and 16-value lane tiles. The best isolated variants reduced the gate
+probe from roughly 0.23--0.28 ms to 0.20--0.26 ms with a one-BF16-ULP maximum
+difference. The rows=8 production candidate also reduced the complete layer-0
+MoE probe to 0.71--0.80 ms, but a guarded full-model run remained
+31.82--32.44 ms per warm token versus the retained 31.94--32.22 ms range.
+The qdot gate is therefore retained only in the low-memory probe; the production
+kernel remains the simpler, previously validated implementation.
+
 The MLX C closure API is now used by the opt-in `QWEN38_COMPILE_LAYER=1` path for
 the 35 non-PLE linear-attention decoder layers. Each closure maps input stream,
 convolution state, and recurrent state to the updated stream and states, allowing
