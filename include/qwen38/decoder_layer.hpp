@@ -10,7 +10,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace qwen38 {
 
@@ -49,6 +51,11 @@ public:
         std::uint32_t token,
         DecoderLayerState& state,
         DecoderLayerTrace* trace = nullptr) const;
+    [[nodiscard]] std::vector<MlxArray> forward_verify_dense_batched(
+        std::vector<MlxArray> streams,
+        std::span<const std::uint32_t> tokens,
+        const DecoderLayerState& origin,
+        std::vector<DecoderLayerState>& checkpoints) const;
 
     [[nodiscard]] std::size_t layer_index() const noexcept { return layer_index_; }
     [[nodiscard]] bool uses_full_attention() const noexcept {

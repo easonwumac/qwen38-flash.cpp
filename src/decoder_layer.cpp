@@ -7,6 +7,31 @@
 #include <vector>
 
 namespace qwen38 {
+namespace {
+
+MlxArray concatenate_rows(const std::vector<MlxArray>& rows) {
+    if (rows.empty()) throw std::runtime_error("cannot concatenate an empty verifier batch");
+    MlxArray result = rows.front().share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, rows[row], 1);
+    }
+    return result;
+}
+
+MlxArray slice_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() < 2 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("verifier batch row is out of range");
+    }
+    std::vector<int> start(shape.size(), 0);
+    std::vector<int> stop = shape;
+    std::vector<int> strides(shape.size(), 1);
+    start[1] = static_cast<int>(row);
+    stop[1] = static_cast<int>(row + 1);
+    return batch.slice(start, stop, strides);
+}
+
+} // namespace
 
 DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
     DecoderLayerState snapshot;
@@ -106,6 +131,59 @@ MlxArray DecoderLayer::forward_decode(
         return apply_compiled(input_stream, state);
     }
     return forward_decode_graph(input_stream, token, state, trace);
+}
+
+std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
+    std::vector<MlxArray> streams,
+    const std::span<const std::uint32_t> tokens,
+    const DecoderLayerState& origin,
+    std::vector<DecoderLayerState>& checkpoints) const {
+    if (streams.empty() || streams.size() != tokens.size() || streams.size() > 5) {
+        throw std::runtime_error("decoder verifier batch must contain 1 to 5 matching rows");
+    }
+    checkpoints.clear();
+    checkpoints.resize(streams.size());
+    DecoderLayerState working = snapshot_decoder_layer_state(origin);
+
+    if (ple_ != nullptr) {
+        for (std::size_t row = 0; row < streams.size(); ++row) {
+            streams[row] = MlxArray::add(
+                streams[row], ple_->forward_decode(streams[row], tokens[row], working.ple));
+            DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
+            checkpoints[row].ple = std::move(snapshot.ple);
+        }
+    }
+
+    MlxArray attention_streams = concatenate_rows(streams);
+    HyperConnectionRead attention = attention_hyper_connection_.read(attention_streams);
+    std::vector<MlxArray> attention_outputs;
+    attention_outputs.reserve(streams.size());
+    for (std::size_t row = 0; row < streams.size(); ++row) {
+        MlxArray mixed = slice_row(attention.mixed, row);
+        attention_outputs.push_back(linear_attention_ != nullptr
+            ? linear_attention_->forward_decode(mixed, working.linear_attention)
+            : full_attention_->forward_decode(mixed, working.full_attention));
+        DecoderLayerState snapshot = snapshot_decoder_layer_state(working);
+        checkpoints[row].linear_attention = std::move(snapshot.linear_attention);
+        checkpoints[row].full_attention = std::move(snapshot.full_attention);
+    }
+    MlxArray post_attention = attention_hyper_connection_.write(
+        attention_streams, concatenate_rows(attention_outputs), attention.injection);
+
+    HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention);
+    std::vector<MlxArray> mlp_outputs;
+    mlp_outputs.reserve(streams.size());
+    for (std::size_t row = 0; row < streams.size(); ++row) {
+        mlp_outputs.push_back(mlp_.forward_decode(slice_row(mlp.mixed, row)));
+    }
+    MlxArray output = mlp_hyper_connection_.write(
+        post_attention, concatenate_rows(mlp_outputs), mlp.injection);
+    std::vector<MlxArray> result;
+    result.reserve(streams.size());
+    for (std::size_t row = 0; row < streams.size(); ++row) {
+        result.push_back(slice_row(output, row));
+    }
+    return result;
 }
 
 MlxArray DecoderLayer::forward_decode_graph(

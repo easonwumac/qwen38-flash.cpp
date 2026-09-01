@@ -136,10 +136,11 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     }
 
     for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
-        DecoderLayerState working = snapshot_decoder_layer_state(origin.layers[layer]);
+        std::vector<DecoderLayerState> layer_checkpoints;
+        streams = layers_[layer]->forward_verify_dense_batched(
+            std::move(streams), tokens, origin.layers[layer], layer_checkpoints);
         for (std::size_t row = 0; row < tokens.size(); ++row) {
-            streams[row] = layers_[layer]->forward_decode(streams[row], tokens[row], working);
-            checkpoints[row].layers[layer] = snapshot_decoder_layer_state(working);
+            checkpoints[row].layers[layer] = std::move(layer_checkpoints[row]);
         }
         // One graph barrier per layer retains bounded memory without the S
         // extra synchronization points of evaluating each row separately.
