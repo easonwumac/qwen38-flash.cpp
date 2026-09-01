@@ -56,6 +56,10 @@ public:
     [[nodiscard]] MlxArray exp() const;
     [[nodiscard]] MlxArray log1p() const;
     [[nodiscard]] MlxArray negative() const;
+    [[nodiscard]] MlxArray absolute() const;
+    [[nodiscard]] MlxArray square_root() const;
+    [[nodiscard]] MlxArray sign() const;
+    [[nodiscard]] static MlxArray maximum(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] MlxArray softmax_axis(int axis) const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray sum_axis(int axis, bool keep_dimensions = false) const;

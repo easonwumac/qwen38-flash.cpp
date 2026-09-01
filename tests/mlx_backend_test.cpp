@@ -73,5 +73,16 @@ int main() {
         std::cerr << "MLX swapaxes/softmax mismatch\n";
         return 1;
     }
+    const std::array<float, 4> signed_values{-4.0F, -1.0F, 0.0F, 9.0F};
+    const auto signed_array = qwen38::MlxArray::from_float32(signed_values, shape);
+    if (signed_array.absolute().to_float32() != std::vector<float>({4, 1, 0, 9}) ||
+        signed_array.sign().to_float32() != std::vector<float>({-1, -1, 0, 1}) ||
+        signed_array.absolute().square_root().to_float32() !=
+            std::vector<float>({2, 1, 0, 3}) ||
+        qwen38::MlxArray::maximum(signed_array, zero).to_float32() !=
+            std::vector<float>({0, 0, 0, 9})) {
+        std::cerr << "MLX abs/sign/sqrt/maximum mismatch\n";
+        return 1;
+    }
     return 0;
 }

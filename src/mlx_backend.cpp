@@ -221,6 +221,34 @@ MlxArray MlxArray::negative() const {
     return result;
 }
 
+MlxArray MlxArray::absolute() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_abs(&result.value_, value_, stream.get()), "abs");
+    return result;
+}
+
+MlxArray MlxArray::square_root() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_sqrt(&result.value_, value_, stream.get()), "sqrt");
+    return result;
+}
+
+MlxArray MlxArray::sign() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_sign(&result.value_, value_, stream.get()), "sign");
+    return result;
+}
+
+MlxArray MlxArray::maximum(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_maximum(&result.value_, left.value_, right.value_, stream.get()), "maximum");
+    return result;
+}
+
 MlxArray MlxArray::softmax_axis(const int axis) const {
     MlxArray result;
     const Stream stream;

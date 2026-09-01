@@ -1,6 +1,7 @@
 /build/
 /build-*/
 /.cache/
+__pycache__/
 /.clangd/
 /.DS_Store
 *.safetensors

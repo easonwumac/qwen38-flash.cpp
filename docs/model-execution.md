@@ -135,8 +135,14 @@ For the retained model, 16-row AoS gathers matched the safetensors fallback
 element-for-element. A measured process used about 5.5 MB peak footprint; the
 first gather was 4.53 ms and the next was 1.66 ms. Correctness and residency are
 therefore established, but serial SSD reads are not the final decode path.
-Persistent parallel pread workers and the PLE projection/gated-convolution graph
-are the next milestone.
+The stateful PLE graph is now implemented as well: n-gram gathering, Q4 key and
+value projections, grouped offset RMSNorm, signed-square-root gating, and the
+dilated depthwise-convolution cache all execute natively from C++. An independent
+MLX-Python oracle verifies the two-token path. The first eight sampled elements
+are bit-identical; aggregate L1 differs by roughly 0.3% because BF16 graph fusion
+can round later channels by one ULP. The second-token component path measures
+about 1.3--1.7 ms warm. Persistent parallel reads and fusion remain optimization
+work, but PLE is no longer missing from the correctness graph.
 
 ## Performance implication
 
