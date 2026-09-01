@@ -149,7 +149,10 @@ See [docs/api.md](docs/api.md) for current behavior.
   specialized Metal kernels replace reference operations.
 
 See [docs/architecture.md](docs/architecture.md) and the
-[benchmark contract](docs/benchmark-contract.md).
+[benchmark contract](docs/benchmark-contract.md). Historical optimization
+results are classified in the
+[prior-research ledger](docs/prior-research-ledger.md); rejected experiments
+must not be repeated without a materially different hypothesis.
 
 ## Target gates
 
