@@ -61,7 +61,7 @@ MtpRoundStep finish_greedy_mtp_round(
     const char* batch_commit = std::getenv("QWEN38_BATCH_MTP_COMMIT");
     const bool batch_commit_enabled =
         batch_commit == nullptr || std::string_view(batch_commit) != "0";
-    if (decision.accepted != 0 && batch_commit_enabled) {
+    if (decision.accepted != 0 && decision.accepted <= 3 && batch_commit_enabled) {
         std::vector<const MlxArray*> committed_streams{&previous_target_stream};
         std::vector<std::uint32_t> committed_tokens{current_token};
         committed_streams.reserve(decision.accepted + 1);
