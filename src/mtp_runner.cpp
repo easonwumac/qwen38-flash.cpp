@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace qwen38 {
@@ -16,6 +17,36 @@ std::uint32_t argmax_token(const MlxArray& logits) {
     MlxArray token = logits.argmax_all();
     token.eval();
     return token.item_uint32();
+}
+
+std::vector<std::uint32_t> draft_lazy_chain(
+    const QwenMtpHead& head,
+    const MlxArray& previous_target_stream,
+    const std::uint32_t current_token,
+    const std::size_t query_position,
+    const std::size_t draft_depth,
+    MtpDecodeState& head_state) {
+    const std::vector<std::int32_t> first_value{static_cast<std::int32_t>(current_token)};
+    const std::vector<int> scalar_shape{1};
+    MlxArray token = MlxArray::from_int32(first_value, scalar_shape);
+    MlxArray stream = previous_target_stream.share();
+    std::vector<MlxArray> draft_arrays;
+    draft_arrays.reserve(draft_depth);
+    for (std::size_t index = 0; index < draft_depth; ++index) {
+        MtpDecodeStep step = head.forward_decode_lazy_token(
+            stream, token, query_position + index, head_state);
+        draft_arrays.push_back(step.logits.argmax_all().reshape(scalar_shape));
+        token = draft_arrays.back().share();
+        stream = std::move(step.pre_mixer_stream);
+    }
+    std::vector<const MlxArray*> outputs;
+    outputs.reserve(draft_arrays.size());
+    for (const MlxArray& draft : draft_arrays) outputs.push_back(&draft);
+    MlxArray::eval_all(outputs);
+    std::vector<std::uint32_t> drafts;
+    drafts.reserve(draft_arrays.size());
+    for (const MlxArray& draft : draft_arrays) drafts.push_back(draft.item_uint32());
+    return drafts;
 }
 
 MtpRoundStep finish_greedy_mtp_round(
@@ -131,17 +162,26 @@ MtpRoundStep run_greedy_mtp_round_reference(
     MtpDecodeState head_origin = head.snapshot_state(head_state);
     const auto draft_started = std::chrono::steady_clock::now();
     std::vector<std::uint32_t> drafts;
-    drafts.reserve(draft_depth);
-    MtpDecodeStep draft = head.forward_decode(
-        previous_target_stream, current_token, query_position, head_state);
-    drafts.push_back(argmax_token(draft.logits));
-    for (std::size_t index = 1; index < draft_depth; ++index) {
-        draft = head.forward_decode(
-            draft.pre_mixer_stream,
-            drafts.back(),
-            query_position + index,
-            head_state);
+    const char* lazy_chain = std::getenv("QWEN38_LAZY_MTP_DRAFT_CHAIN");
+    const bool lazy_chain_enabled =
+        lazy_chain == nullptr || std::string_view(lazy_chain) != "0";
+    if (lazy_chain_enabled) {
+        drafts = draft_lazy_chain(
+            head, previous_target_stream, current_token, query_position,
+            draft_depth, head_state);
+    } else {
+        drafts.reserve(draft_depth);
+        MtpDecodeStep draft = head.forward_decode(
+            previous_target_stream, current_token, query_position, head_state);
         drafts.push_back(argmax_token(draft.logits));
+        for (std::size_t index = 1; index < draft_depth; ++index) {
+            draft = head.forward_decode(
+                draft.pre_mixer_stream,
+                drafts.back(),
+                query_position + index,
+                head_state);
+            drafts.push_back(argmax_token(draft.logits));
+        }
     }
     const double draft_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - draft_started).count();

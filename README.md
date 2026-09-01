@@ -191,6 +191,14 @@ M5 Pro 64 GiB, Q4-trunk/Q8-head, temperature-zero, thinking-off, no-prefix-cache
 high-predictability result—not a universal MTP floor. Peak guarded RSS was
 36.1 GiB.
 
+Draft tokens are chained as one lazy MLX graph and synchronized together after
+the final proposal. This removes one host synchronization per draft without
+changing the proposal tokens or authoritative target verification. On the
+retained 128-token Python fixture, counterposed warm runs improved from
+61.80--62.03 to 62.59--62.67 tok/s while draft time fell from 241--243 to
+219--221 ms with identical output and 89/103 acceptance. Set
+`QWEN38_LAZY_MTP_DRAFT_CHAIN=0` for the serial-sync diagnostic rollback.
+
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the

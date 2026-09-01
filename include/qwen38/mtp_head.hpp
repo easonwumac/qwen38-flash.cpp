@@ -43,6 +43,11 @@ public:
         std::size_t query_position,
         MtpDecodeState& state,
         MtpTrace* trace = nullptr) const;
+    [[nodiscard]] MtpDecodeStep forward_decode_lazy_token(
+        const MlxArray& target_pre_mixer_stream,
+        const MlxArray& next_token,
+        std::size_t query_position,
+        MtpDecodeState& state) const;
     void consume_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
@@ -67,12 +72,19 @@ private:
         const char* prefix,
         int bits);
     [[nodiscard]] MlxArray embed(std::uint32_t token) const;
+    [[nodiscard]] MlxArray embed(const MlxArray& token) const;
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
     [[nodiscard]] MlxArray forward_stream(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
+        std::size_t query_position,
+        MtpDecodeState& state,
+        MtpTrace* trace) const;
+    [[nodiscard]] MlxArray forward_stream_lazy_token(
+        const MlxArray& target_pre_mixer_stream,
+        const MlxArray& next_token,
         std::size_t query_position,
         MtpDecodeState& state,
         MtpTrace* trace) const;

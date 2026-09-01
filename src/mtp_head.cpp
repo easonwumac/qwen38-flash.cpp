@@ -171,6 +171,13 @@ MlxArray QwenMtpHead::embed(const std::uint32_t token) const {
     const std::vector<std::int32_t> values{static_cast<std::int32_t>(token)};
     const std::vector<int> id_shape{1};
     const MlxArray ids = MlxArray::from_int32(values, id_shape);
+    return embed(ids);
+}
+
+MlxArray QwenMtpHead::embed(const MlxArray& ids) const {
+    if (ids.shape() != std::vector<int>{1}) {
+        throw std::runtime_error("MTP lazy token id must have shape [1]");
+    }
     MlxArray value = MlxArray::dequantize(
         MlxArray::take_axis(embedding_.weight, ids, 0),
         MlxArray::take_axis(embedding_.scales, ids, 0),
@@ -184,6 +191,22 @@ MlxArray QwenMtpHead::embed(const std::uint32_t token) const {
 MlxArray QwenMtpHead::forward_stream(
     const MlxArray& target_pre_mixer_stream,
     const std::uint32_t next_token,
+    const std::size_t query_position,
+    MtpDecodeState& state,
+    MtpTrace* trace) const {
+    if (next_token >= vocabulary_size_) {
+        throw std::runtime_error("MTP token id is out of range");
+    }
+    const std::vector<std::int32_t> values{static_cast<std::int32_t>(next_token)};
+    const std::vector<int> shape{1};
+    const MlxArray token = MlxArray::from_int32(values, shape);
+    return forward_stream_lazy_token(
+        target_pre_mixer_stream, token, query_position, state, trace);
+}
+
+MlxArray QwenMtpHead::forward_stream_lazy_token(
+    const MlxArray& target_pre_mixer_stream,
+    const MlxArray& next_token,
     const std::size_t query_position,
     MtpDecodeState& state,
     MtpTrace* trace) const {
@@ -217,7 +240,7 @@ MlxArray QwenMtpHead::forward_stream(
             stream, MlxArray::zeros(zero_shape, stream.dtype()));
     }
     stream = layer_.forward_decode(
-        stream, next_token, state.layer, trace == nullptr ? nullptr : &trace->layer);
+        stream, 0, state.layer, trace == nullptr ? nullptr : &trace->layer);
     ++state.row_count;
     return stream;
 }
@@ -305,6 +328,21 @@ MtpDecodeStep QwenMtpHead::forward_decode(
         trace->final_mixed = MlxArray::add(
             final.mixed, MlxArray::zeros(zero_shape, final.mixed.dtype()));
     }
+    MlxArray logits = project(final.mixed, language_head_);
+    return {
+        .logits = std::move(logits),
+        .pre_mixer_stream = std::move(stream),
+    };
+}
+
+MtpDecodeStep QwenMtpHead::forward_decode_lazy_token(
+    const MlxArray& target_pre_mixer_stream,
+    const MlxArray& next_token,
+    const std::size_t query_position,
+    MtpDecodeState& state) const {
+    MlxArray stream = forward_stream_lazy_token(
+        target_pre_mixer_stream, next_token, query_position, state, nullptr);
+    HyperConnectionRead final = final_mixer_.read(stream);
     MlxArray logits = project(final.mixed, language_head_);
     return {
         .logits = std::move(logits),
