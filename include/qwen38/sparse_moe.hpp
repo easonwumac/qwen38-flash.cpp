@@ -27,6 +27,7 @@ public:
 
     [[nodiscard]] RouterSelection route_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_verify(const MlxArray& input) const;
 
 private:
     struct QuantizedProjection {
@@ -46,6 +47,8 @@ private:
         const MlxArray& input,
         const QuantizedProjection& projection,
         std::size_t expert) const;
+    [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_shared(const MlxArray& input) const;
 
     std::size_t expert_count_;
     std::size_t experts_per_token_;

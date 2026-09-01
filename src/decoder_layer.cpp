@@ -181,13 +181,9 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
         attention_streams, concatenate_rows(attention_outputs), attention.injection);
 
     HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention);
-    std::vector<MlxArray> mlp_outputs;
-    mlp_outputs.reserve(streams.size());
-    for (std::size_t row = 0; row < streams.size(); ++row) {
-        mlp_outputs.push_back(mlp_.forward_decode(slice_row(mlp.mixed, row)));
-    }
+    MlxArray mlp_outputs = mlp_.forward_verify(mlp.mixed);
     MlxArray output = mlp_hyper_connection_.write(
-        post_attention, concatenate_rows(mlp_outputs), mlp.injection);
+        post_attention, mlp_outputs, mlp.injection);
     std::vector<MlxArray> result;
     result.reserve(streams.size());
     for (std::size_t row = 0; row < streams.size(); ++row) {

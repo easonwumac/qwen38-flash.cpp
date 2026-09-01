@@ -78,6 +78,26 @@ bool resident_layer_enabled(const std::size_t layer) {
     return layer >= begin && layer < end;
 }
 
+MlxArray slice_sequence_row(const MlxArray& batch, const std::size_t row) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() != 3 || row >= static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("MoE verifier row is out of range");
+    }
+    return batch.slice(
+        std::vector<int>{0, static_cast<int>(row), 0},
+        std::vector<int>{1, static_cast<int>(row + 1), shape[2]},
+        std::vector<int>{1, 1, 1});
+}
+
+MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
+    if (rows.empty()) throw std::runtime_error("MoE verifier has no routed outputs");
+    MlxArray result = rows.front().share();
+    for (std::size_t row = 1; row < rows.size(); ++row) {
+        result = MlxArray::concatenate(result, rows[row], 1);
+    }
+    return result;
+}
+
 } // namespace
 
 SparseMoe::SparseMoe(
@@ -202,7 +222,7 @@ RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
     return {.experts = std::move(order), .weights = std::move(weights)};
 }
 
-MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
+MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
     MlxArray expert_sum;
     if (fused_gate_up_ && fused_down_) {
         MlxArray experts;
@@ -277,13 +297,35 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
         }
     }
 
+    return expert_sum;
+}
+
+MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
     MlxArray shared_gate = project(input, shared_gate_).silu();
     MlxArray shared_up = project(input, shared_up_);
     MlxArray shared_hidden = MlxArray::multiply(shared_gate, shared_up);
     MlxArray shared_output = project(shared_hidden, shared_down_);
     MlxArray shared_router = MlxArray::matmul(
         input, shared_router_weight_.transpose()).sigmoid();
-    return MlxArray::add(expert_sum, MlxArray::multiply(shared_output, shared_router));
+    return MlxArray::multiply(shared_output, shared_router);
+}
+
+MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
+    return MlxArray::add(forward_experts_decode(input), forward_shared(input));
+}
+
+MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
+    const std::vector<int> shape = input.shape();
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 5) {
+        throw std::runtime_error("MoE verifier requires shape [1,S,hidden], S=1..5");
+    }
+    std::vector<MlxArray> routed;
+    routed.reserve(static_cast<std::size_t>(shape[1]));
+    for (int row = 0; row < shape[1]; ++row) {
+        routed.push_back(forward_experts_decode(
+            slice_sequence_row(input, static_cast<std::size_t>(row))));
+    }
+    return MlxArray::add(concatenate_sequence_rows(routed), forward_shared(input));
 }
 
 } // namespace qwen38
