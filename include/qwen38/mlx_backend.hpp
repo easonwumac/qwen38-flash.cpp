@@ -38,10 +38,12 @@ public:
     [[nodiscard]] static MlxArray multiply(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
+    [[nodiscard]] MlxArray transpose() const;
     [[nodiscard]] MlxArray tile(std::span<const int> repetitions) const;
     [[nodiscard]] MlxArray sigmoid() const;
     [[nodiscard]] MlxArray silu() const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
+    [[nodiscard]] MlxArray sum_axis(int axis, bool keep_dimensions = false) const;
     [[nodiscard]] MlxArray rms_norm(const MlxArray& weight, float epsilon) const;
     [[nodiscard]] MlxArray astype(mlx_dtype dtype) const;
     [[nodiscard]] static MlxArray quantized_matmul(

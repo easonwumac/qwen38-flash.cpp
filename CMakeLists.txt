@@ -82,7 +82,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         message(FATAL_ERROR "The configured MLX C include/library directories are incomplete")
     endif()
 
-    add_library(qwen38_mlx src/hyper_connection.cpp src/mlx_backend.cpp)
+    add_library(qwen38_mlx src/hyper_connection.cpp src/mlx_backend.cpp src/sparse_moe.cpp)
     target_include_directories(qwen38_mlx PUBLIC include)
     target_include_directories(qwen38_mlx SYSTEM PUBLIC "${QWEN38_MLXC_HEADER}")
     target_link_libraries(qwen38_mlx PUBLIC qwen38_core "${QWEN38_MLXC_LIBRARY}" "${QWEN38_MLX_LIBRARY}")
@@ -104,8 +104,11 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-hyper-connection-smoke src/hyper_connection_smoke.cpp)
     target_link_libraries(qwen38-hyper-connection-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-hyper-connection-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-sparse-moe-smoke src/sparse_moe_smoke.cpp)
+    target_link_libraries(qwen38-sparse-moe-smoke PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-sparse-moe-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     install(TARGETS qwen38-mlx-smoke qwen38-qmm-smoke qwen38-embedding-smoke
-        qwen38-hyper-connection-smoke
+        qwen38-hyper-connection-smoke qwen38-sparse-moe-smoke
         RUNTIME DESTINATION bin)
 endif()
 

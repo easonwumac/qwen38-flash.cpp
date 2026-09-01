@@ -67,6 +67,13 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     result.config_.head_dimension = size_value(text.at("head_dim"), "head_dim");
     result.config_.hyper_connection_count = size_value(text.at("hc_count"), "hc_count");
     result.config_.hyper_connection_low_rank = size_value(text.at("hc_lowrank"), "hc_lowrank");
+    result.config_.moe_intermediate_size = size_value(
+        text.at("moe_intermediate_size"), "moe_intermediate_size");
+    result.config_.shared_expert_intermediate_size = size_value(
+        text.at("shared_expert_intermediate_size"), "shared_expert_intermediate_size");
+    if (const Json* normalize = text.find("norm_topk_prob")) {
+        result.config_.normalize_topk_probability = normalize->as_boolean();
+    }
     result.config_.rms_norm_epsilon = text.at("rms_norm_eps").as_number();
     if (!(result.config_.rms_norm_epsilon > 0.0)) {
         throw std::runtime_error("rms_norm_eps must be positive");

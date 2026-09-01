@@ -32,6 +32,9 @@ struct ModelConfig {
     std::size_t head_dimension{0};
     std::size_t hyper_connection_count{0};
     std::size_t hyper_connection_low_rank{0};
+    std::size_t moe_intermediate_size{0};
+    std::size_t shared_expert_intermediate_size{0};
+    bool normalize_topk_probability{true};
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
 };

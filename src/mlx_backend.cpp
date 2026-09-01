@@ -112,6 +112,13 @@ MlxArray MlxArray::reshape(const std::span<const int> shape) const {
     return result;
 }
 
+MlxArray MlxArray::transpose() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_transpose(&result.value_, value_, stream.get()), "transpose");
+    return result;
+}
+
 MlxArray MlxArray::tile(const std::span<const int> repetitions) const {
     MlxArray result;
     const Stream stream;
@@ -139,6 +146,15 @@ MlxArray MlxArray::mean_axis(const int axis, const bool keep_dimensions) const {
     check(mlx_mean_axis(
               &result.value_, value_, axis, keep_dimensions, stream.get()),
         "mean_axis");
+    return result;
+}
+
+MlxArray MlxArray::sum_axis(const int axis, const bool keep_dimensions) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_sum_axis(
+              &result.value_, value_, axis, keep_dimensions, stream.get()),
+        "sum_axis");
     return result;
 }
 
@@ -231,12 +247,15 @@ std::vector<float> MlxArray::to_float32() const {
     if (dtype() != MLX_FLOAT32) {
         throw std::runtime_error("MLX array is not float32");
     }
-    eval();
-    const float* data = mlx_array_data_float32(value_);
-    if (data == nullptr && size() != 0) {
+    MlxArray contiguous;
+    const Stream stream;
+    check(mlx_contiguous(&contiguous.value_, value_, false, stream.get()), "contiguous");
+    contiguous.eval();
+    const float* data = mlx_array_data_float32(contiguous.value_);
+    if (data == nullptr && contiguous.size() != 0) {
         throw std::runtime_error("MLX returned null array data");
     }
-    return {data, data + size()};
+    return {data, data + contiguous.size()};
 }
 
 std::vector<int> MlxArray::shape() const {

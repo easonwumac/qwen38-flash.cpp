@@ -63,6 +63,23 @@ The synthetic write-back deliberately feeds the mixed input as a stand-in block
 output. It verifies Hyper-Connection semantics in isolation; the attention and
 MoE block implementations are the next model-graph milestone.
 
+## Sparse MoE decode path
+
+The native one-token path now computes the BF16 router, float32 softmax, normalized
+top-10 selection, three affine Q4 projections per selected expert, probability
+weighted reduction, and the gated shared expert. For the fixed layer-0 fixture,
+C++ and MLX-Python select experts
+`[78,62,113,257,137,249,232,239,254,51]` and produce output checksum
+`0.0970327854`.
+
+The correctness implementation currently materializes router scores on the host
+and launches projections per selected expert. A six-run component measurement
+was 31.95 ms cold and 1.68 ms warm median. MLX's generic batched quantized matmul
+was tested but did not preserve per-expert numerical semantics for these gathered
+3D weights, so that path was rejected. A fused device-side top-k and selected-QMM
+kernel is required to remove 48 host synchronization points and reduce dispatch
+overhead in the optimized decode graph.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

@@ -34,6 +34,15 @@ int main() {
         std::cerr << "MLX reshape/tile/mean mismatch\n";
         return 1;
     }
+    const auto transposed = left.transpose().to_float32();
+    if (transposed != std::vector<float>({1, 3, 2, 4})) {
+        std::cerr << "MLX transpose mismatch\n";
+        return 1;
+    }
+    if (left.sum_axis(0).to_float32() != std::vector<float>({4, 6})) {
+        std::cerr << "MLX sum mismatch\n";
+        return 1;
+    }
     const auto sigmoid = left.sigmoid().to_float32();
     if (std::abs(sigmoid.front() - 0.7310586F) > 1.0e-5F) {
         std::cerr << "MLX sigmoid mismatch\n";
