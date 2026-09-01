@@ -109,6 +109,12 @@ early zero-accept rounds or when a full 16-round window averages less than one
 accepted draft per round. This avoids disabling profitable MTP on a random
 empty streak while still ending locally losing speculation. Set
 `QWEN38_ECONOMIC_MTP_FALLBACK=0` to restore the legacy two-empty-round policy.
+While learned MTP remains active, a request-local suffix cache replaces a
+learned proposal only when it has an exact prior continuation of at least two
+tokens. The target verifier remains authoritative, but the matching rounds pay
+no learned-drafter cost. Set `QWEN38_HISTORY_DRAFT=0` to disable this hybrid
+path. The cache stores token IDs and suffix indices only, so its memory is tiny
+relative to model and KV residency even at long context.
 The reproduced Q4/g64 L47 sidecar is the recommended production companion. A
 same-target B31 run found the retained Q8 sidecar slower on code, creative, and
 JSON prompts because its higher per-round cost did not buy enough acceptance.

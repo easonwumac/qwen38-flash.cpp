@@ -90,6 +90,9 @@ std::string completion_json(
         << ",\"draft_ms\":" << result.mtp_draft_ms
         << ",\"verify_ms\":" << result.mtp_verify_ms
         << ",\"commit_ms\":" << result.mtp_commit_ms << "}"
+        << ",\"history_draft\":{\"rounds\":" << result.history_draft_rounds
+        << ",\"proposed\":" << result.history_draft_proposed
+        << ",\"accepted\":" << result.history_draft_accepted << "}"
         << "}}";
     return out.str();
 }

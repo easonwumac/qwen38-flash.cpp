@@ -18,44 +18,27 @@ std::uint32_t argmax_token(const MlxArray& logits) {
     return token.item_uint32();
 }
 
-} // namespace
-
-MtpRoundStep run_greedy_mtp_round_reference(
+MtpRoundStep finish_greedy_mtp_round(
     const QwenModel& target,
     const QwenMtpHead& head,
     const std::uint32_t current_token,
     const MlxArray& previous_target_stream,
     const std::size_t query_position,
-    const std::size_t draft_depth,
+    std::vector<std::uint32_t> drafts,
+    const double draft_ms,
+    MtpDecodeState head_origin,
     ModelDecodeState& target_state,
     MtpDecodeState& head_state) {
-    if (draft_depth < 2 || draft_depth > 4) {
-        throw std::runtime_error("MTP draft depth must be between 2 and 4");
+    if (drafts.size() < 2 || drafts.size() > 4) {
+        throw std::runtime_error("MTP proposal depth must be between 2 and 4");
     }
+
     if (query_position != target_state.token_count) {
         throw std::runtime_error("MTP query position must match target committed length");
     }
-    if (query_position > std::numeric_limits<std::size_t>::max() - draft_depth) {
+    if (query_position > std::numeric_limits<std::size_t>::max() - drafts.size()) {
         throw std::runtime_error("MTP query position overflow");
     }
-
-    MtpDecodeState head_origin = head.snapshot_state(head_state);
-    const auto draft_started = std::chrono::steady_clock::now();
-    std::vector<std::uint32_t> drafts;
-    drafts.reserve(draft_depth);
-    MtpDecodeStep draft = head.forward_decode(
-        previous_target_stream, current_token, query_position, head_state);
-    drafts.push_back(argmax_token(draft.logits));
-    for (std::size_t index = 1; index < draft_depth; ++index) {
-        draft = head.forward_decode(
-            draft.pre_mixer_stream,
-            drafts.back(),
-            query_position + index,
-            head_state);
-        drafts.push_back(argmax_token(draft.logits));
-    }
-    const double draft_ms = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - draft_started).count();
 
     const auto verify_started = std::chrono::steady_clock::now();
     MtpTargetVerification verification = verify_mtp_target_layer_major_reference(
@@ -126,6 +109,57 @@ MtpRoundStep run_greedy_mtp_round_reference(
         .verify_ms = verify_ms,
         .commit_ms = commit_ms,
     };
+}
+
+} // namespace
+
+MtpRoundStep run_greedy_mtp_round_reference(
+    const QwenModel& target,
+    const QwenMtpHead& head,
+    const std::uint32_t current_token,
+    const MlxArray& previous_target_stream,
+    const std::size_t query_position,
+    const std::size_t draft_depth,
+    ModelDecodeState& target_state,
+    MtpDecodeState& head_state) {
+    if (draft_depth < 2 || draft_depth > 4) {
+        throw std::runtime_error("MTP draft depth must be between 2 and 4");
+    }
+    MtpDecodeState head_origin = head.snapshot_state(head_state);
+    const auto draft_started = std::chrono::steady_clock::now();
+    std::vector<std::uint32_t> drafts;
+    drafts.reserve(draft_depth);
+    MtpDecodeStep draft = head.forward_decode(
+        previous_target_stream, current_token, query_position, head_state);
+    drafts.push_back(argmax_token(draft.logits));
+    for (std::size_t index = 1; index < draft_depth; ++index) {
+        draft = head.forward_decode(
+            draft.pre_mixer_stream,
+            drafts.back(),
+            query_position + index,
+            head_state);
+        drafts.push_back(argmax_token(draft.logits));
+    }
+    const double draft_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - draft_started).count();
+    return finish_greedy_mtp_round(
+        target, head, current_token, previous_target_stream, query_position,
+        std::move(drafts), draft_ms, std::move(head_origin), target_state, head_state);
+}
+
+MtpRoundStep run_greedy_external_draft_round_reference(
+    const QwenModel& target,
+    const QwenMtpHead& head,
+    const std::uint32_t current_token,
+    const MlxArray& previous_target_stream,
+    const std::size_t query_position,
+    std::vector<std::uint32_t> drafts,
+    ModelDecodeState& target_state,
+    MtpDecodeState& head_state) {
+    MtpDecodeState head_origin = head.snapshot_state(head_state);
+    return finish_greedy_mtp_round(
+        target, head, current_token, previous_target_stream, query_position,
+        std::move(drafts), 0.0, std::move(head_origin), target_state, head_state);
 }
 
 } // namespace qwen38

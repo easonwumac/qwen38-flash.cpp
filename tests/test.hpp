@@ -23,6 +23,7 @@ inline void check(const bool condition, std::string_view expression, std::string
 
 void run_api_tests();
 void run_chat_template_tests();
+void run_history_draft_tests();
 void run_json_tests();
 void run_model_manifest_tests();
 void run_mtp_depth_policy_tests();

@@ -33,4 +33,16 @@ struct MtpRoundStep {
     ModelDecodeState& target_state,
     MtpDecodeState& head_state);
 
+// Verify externally proposed tokens while preserving the same exact target and
+// MTP-head commit lifecycle as the learned drafter path.
+[[nodiscard]] MtpRoundStep run_greedy_external_draft_round_reference(
+    const QwenModel& target,
+    const QwenMtpHead& head,
+    std::uint32_t current_token,
+    const MlxArray& previous_target_stream,
+    std::size_t query_position,
+    std::vector<std::uint32_t> drafts,
+    ModelDecodeState& target_state,
+    MtpDecodeState& head_state);
+
 } // namespace qwen38

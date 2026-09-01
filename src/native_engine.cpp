@@ -1,4 +1,5 @@
 #include "qwen38/native_engine.hpp"
+#include "qwen38/history_draft.hpp"
 #include "qwen38/mtp_depth_policy.hpp"
 #include "qwen38/mtp_profitability.hpp"
 #include "qwen38/mtp_runner.hpp"
@@ -164,6 +165,11 @@ GenerationResult NativeEngine::complete(
     }
     result.tokens.reserve(max_tokens);
     std::uint32_t current = prompt_tokens.back();
+    const char* history_draft_environment = std::getenv("QWEN38_HISTORY_DRAFT");
+    const bool history_draft_enabled = history_draft_environment == nullptr ||
+        std::string_view(history_draft_environment) != "0";
+    HistoryDraftCache history_draft;
+    if (history_draft_enabled) history_draft.append(prompt_tokens);
     MtpProfitabilityGuard profitability_guard;
     bool mtp_profitable = mtp_head_ != nullptr;
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
@@ -176,6 +182,7 @@ GenerationResult NativeEngine::complete(
             const std::uint32_t token = argmax_token(step.logits);
             previous_target_stream = std::move(step.pre_mixer_stream);
             result.tokens.push_back(token);
+            if (history_draft_enabled) history_draft.append(token);
             current = token;
             if (token == tensors_.manifest().config().end_of_sequence_token) {
                 result.finish_reason = "stop";
@@ -184,25 +191,42 @@ GenerationResult NativeEngine::complete(
             continue;
         }
 
-        MtpRoundStep step = run_greedy_mtp_round_reference(
-            model_, *mtp_head_, current, *previous_target_stream, state.token_count,
-            depth_policy.depth(), state, mtp_state);
+        std::vector<std::uint32_t> history_proposal;
+        if (history_draft_enabled) {
+            history_proposal = history_draft.propose(
+                std::min<std::size_t>(depth_policy.depth(), remaining));
+        }
+        const bool used_history_draft = history_proposal.size() >= 2;
+        MtpRoundStep step = used_history_draft
+            ? run_greedy_external_draft_round_reference(
+                  model_, *mtp_head_, current, *previous_target_stream,
+                  state.token_count, std::move(history_proposal), state, mtp_state)
+            : run_greedy_mtp_round_reference(
+                  model_, *mtp_head_, current, *previous_target_stream, state.token_count,
+                  depth_policy.depth(), state, mtp_state);
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
         result.mtp_draft_ms += step.draft_ms;
         result.mtp_verify_ms += step.verify_ms;
         result.mtp_commit_ms += step.commit_ms;
-        depth_policy.observe(step.draft_tokens.size(), step.accepted);
+        if (used_history_draft) {
+            ++result.history_draft_rounds;
+            result.history_draft_proposed += step.draft_tokens.size();
+            result.history_draft_accepted += step.accepted;
+        } else {
+            depth_policy.observe(step.draft_tokens.size(), step.accepted);
+            profitability_guard.observe(step.accepted);
+        }
         result.mtp_final_depth = depth_policy.depth();
         result.mtp_promotions = depth_policy.promotions();
         result.mtp_demotions = depth_policy.demotions();
-        profitability_guard.observe(step.accepted);
         current = step.next_current_token;
         previous_target_stream = std::move(step.next_target_stream);
         for (const std::uint32_t token : step.emitted_tokens) {
             if (result.tokens.size() == max_tokens) break;
             result.tokens.push_back(token);
+            if (history_draft_enabled) history_draft.append(token);
             if (token == tensors_.manifest().config().end_of_sequence_token) {
                 result.finish_reason = "stop";
                 break;
@@ -213,10 +237,10 @@ GenerationResult NativeEngine::complete(
         const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
         const bool economic_fallback_enabled = economic_fallback == nullptr ||
             std::string_view(economic_fallback) != "0";
-        const bool should_fallback = economic_fallback_enabled
+        const bool should_fallback = !used_history_draft && (economic_fallback_enabled
             ? profitability_guard.should_fallback(options_.zero_accept_fallback_rounds)
             : profitability_guard.zero_accept_streak() >=
-                  options_.zero_accept_fallback_rounds;
+                  options_.zero_accept_fallback_rounds);
         if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;

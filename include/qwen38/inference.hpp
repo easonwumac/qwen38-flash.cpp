@@ -26,6 +26,9 @@ struct GenerationResult {
     double mtp_draft_ms{0.0};
     double mtp_verify_ms{0.0};
     double mtp_commit_ms{0.0};
+    std::size_t history_draft_rounds{0};
+    std::size_t history_draft_proposed{0};
+    std::size_t history_draft_accepted{0};
 };
 
 class InferenceEngine {

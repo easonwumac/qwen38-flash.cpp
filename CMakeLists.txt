@@ -19,6 +19,7 @@ add_library(qwen38_core
     src/api.cpp
     src/chat_template.cpp
     src/http_server.cpp
+    src/history_draft.cpp
     src/json.cpp
     src/mapped_file.cpp
     src/model_manifest.cpp
@@ -206,6 +207,7 @@ if(QWEN38_BUILD_TESTS)
     add_executable(qwen38-tests
         tests/api_test.cpp
         tests/chat_template_test.cpp
+        tests/history_draft_test.cpp
         tests/json_test.cpp
         tests/model_manifest_test.cpp
         tests/mtp_depth_policy_test.cpp
