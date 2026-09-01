@@ -1,6 +1,7 @@
 #include "qwen38/decoder_layer.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,7 +60,24 @@ DecoderLayer::DecoderLayer(
     }
 }
 
+DecoderLayer::~DecoderLayer() {
+    if (compiled_.ctx != nullptr) static_cast<void>(mlx_closure_free(compiled_));
+}
+
 MlxArray DecoderLayer::forward_decode(
+    const MlxArray& input_stream,
+    const std::uint32_t token,
+    DecoderLayerState& state) const {
+    const char* compile = std::getenv("QWEN38_COMPILE_LAYER");
+    if (linear_attention_ != nullptr && ple_ == nullptr && state.linear_attention.initialized &&
+        compile != nullptr && std::string_view(compile) == "1") {
+        ensure_compiled();
+        return apply_compiled(input_stream, state);
+    }
+    return forward_decode_graph(input_stream, token, state);
+}
+
+MlxArray DecoderLayer::forward_decode_graph(
     const MlxArray& input_stream,
     const std::uint32_t token,
     DecoderLayerState& state) const {
@@ -85,6 +103,87 @@ MlxArray DecoderLayer::forward_decode(
     HyperConnectionRead mlp = mlp_hyper_connection_.read(stream);
     MlxArray mlp_output = mlp_.forward_decode(mlp.mixed);
     return mlp_hyper_connection_.write(stream, mlp_output, mlp.injection);
+}
+
+int DecoderLayer::compile_callback(
+    mlx_vector_array* outputs,
+    const mlx_vector_array inputs,
+    void* payload) {
+    if (mlx_vector_array_size(inputs) != 3) return 1;
+    mlx_array raw_stream = mlx_array_new();
+    mlx_array raw_convolution = mlx_array_new();
+    mlx_array raw_recurrent = mlx_array_new();
+    if (mlx_vector_array_get(&raw_stream, inputs, 0) != 0 ||
+        mlx_vector_array_get(&raw_convolution, inputs, 1) != 0 ||
+        mlx_vector_array_get(&raw_recurrent, inputs, 2) != 0) {
+        mlx_array_free(raw_stream);
+        mlx_array_free(raw_convolution);
+        mlx_array_free(raw_recurrent);
+        return 1;
+    }
+    MlxArray stream(raw_stream);
+    DecoderLayerState state;
+    state.linear_attention = {
+        .convolution = MlxArray(raw_convolution),
+        .recurrent = MlxArray(raw_recurrent),
+        .initialized = true,
+    };
+    const auto* self = static_cast<const DecoderLayer*>(payload);
+    MlxArray output = self->forward_decode_graph(stream, 0, state);
+    const mlx_array values[]{
+        output.get(),
+        state.linear_attention.convolution.get(),
+        state.linear_attention.recurrent.get(),
+    };
+    return mlx_vector_array_set_data(outputs, values, 3);
+}
+
+void DecoderLayer::ensure_compiled() const {
+    std::call_once(compile_once_, [this]() {
+        mlx_closure function = mlx_closure_new_func_payload(
+            &DecoderLayer::compile_callback,
+            const_cast<DecoderLayer*>(this),
+            nullptr);
+        compiled_ = mlx_closure_new();
+        const int status = mlx_compile(&compiled_, function, false);
+        static_cast<void>(mlx_closure_free(function));
+        if (status != 0) throw std::runtime_error("MLX failed to compile decoder layer closure");
+    });
+}
+
+MlxArray DecoderLayer::apply_compiled(
+    const MlxArray& stream,
+    DecoderLayerState& state) const {
+    const mlx_array values[]{
+        stream.get(),
+        state.linear_attention.convolution.get(),
+        state.linear_attention.recurrent.get(),
+    };
+    mlx_vector_array inputs = mlx_vector_array_new_data(values, 3);
+    mlx_vector_array outputs = mlx_vector_array_new();
+    const int status = mlx_closure_apply(&outputs, compiled_, inputs);
+    static_cast<void>(mlx_vector_array_free(inputs));
+    if (status != 0 || mlx_vector_array_size(outputs) != 3) {
+        static_cast<void>(mlx_vector_array_free(outputs));
+        throw std::runtime_error("compiled decoder layer invocation failed");
+    }
+    mlx_array raw_output = mlx_array_new();
+    mlx_array raw_convolution = mlx_array_new();
+    mlx_array raw_recurrent = mlx_array_new();
+    const int get_status =
+        mlx_vector_array_get(&raw_output, outputs, 0) |
+        mlx_vector_array_get(&raw_convolution, outputs, 1) |
+        mlx_vector_array_get(&raw_recurrent, outputs, 2);
+    static_cast<void>(mlx_vector_array_free(outputs));
+    if (get_status != 0) {
+        mlx_array_free(raw_output);
+        mlx_array_free(raw_convolution);
+        mlx_array_free(raw_recurrent);
+        throw std::runtime_error("compiled decoder layer returned invalid outputs");
+    }
+    state.linear_attention.convolution = MlxArray(raw_convolution);
+    state.linear_attention.recurrent = MlxArray(raw_recurrent);
+    return MlxArray(raw_output);
 }
 
 } // namespace qwen38

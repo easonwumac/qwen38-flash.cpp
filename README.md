@@ -95,8 +95,9 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`
-to keep top-k selection and routing weights on the GPU. Together with the
-resident tier below, this is the current fastest verified native decode path.
+to keep top-k selection and routing weights on the GPU. `QWEN38_COMPILE_LAYER=1`
+compiles each non-PLE linear decoder layer after its first stateful step. Together
+with the resident tier below, these form the current fastest verified path.
 
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. The default guard refuses to start below
@@ -116,6 +117,7 @@ be used with the memory guard during experiments. With fused MoE and device
 routing, the measured peak was 35.9 GiB RSS, outputs were unchanged, and warm
 decode reached about 27 tok/s. The MLX-style Q4 down-projection kernel further
 reduced the verified peak to 34.3 GiB and reached 27.4--28.9 tok/s warm.
+Adding decoder-layer compilation reached 31.0--31.3 tok/s at 35.6 GiB peak RSS.
 
 Validate a model manifest and lazily map one tensor without loading all weights:
 

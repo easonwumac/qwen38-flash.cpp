@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 namespace qwen38 {
 
@@ -21,6 +22,7 @@ struct DecoderLayerState {
 class DecoderLayer final {
 public:
     DecoderLayer(MlxTensorStore& tensors, std::size_t layer_index, const ModelConfig& config);
+    ~DecoderLayer();
 
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& stream,
@@ -34,6 +36,19 @@ public:
     [[nodiscard]] bool uses_ple() const noexcept { return ple_ != nullptr; }
 
 private:
+    [[nodiscard]] MlxArray forward_decode_graph(
+        const MlxArray& stream,
+        std::uint32_t token,
+        DecoderLayerState& state) const;
+    void ensure_compiled() const;
+    [[nodiscard]] MlxArray apply_compiled(
+        const MlxArray& stream,
+        DecoderLayerState& state) const;
+    static int compile_callback(
+        mlx_vector_array* outputs,
+        mlx_vector_array inputs,
+        void* payload);
+
     std::size_t layer_index_;
     HyperConnection attention_hyper_connection_;
     HyperConnection mlp_hyper_connection_;
@@ -41,6 +56,8 @@ private:
     std::unique_ptr<SelfAttention> full_attention_;
     std::unique_ptr<Ple> ple_;
     SparseMoe mlp_;
+    mutable std::once_flag compile_once_;
+    mutable mlx_closure compiled_{};
 };
 
 } // namespace qwen38

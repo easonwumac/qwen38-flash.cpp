@@ -264,6 +264,16 @@ sequence and measured warm steps of `40.8,34.6,36.5,36.5,35.9,36.3 ms`, or
 end-to-end gain shows that MoE down projection is no longer the only dominant
 kernel; attention, HyperConnection, and the shared expert remain targets.
 
+The MLX C closure API is now used by the opt-in `QWEN38_COMPILE_LAYER=1` path for
+the 35 non-PLE linear-attention decoder layers. Each closure maps input stream,
+convolution state, and recurrent state to the updated stream and states, allowing
+MLX to fuse the entire decoder-layer graph around QMM and custom MoE primitives.
+Combined with residency, device routing, and the qdot down kernel, a guarded
+eight-token run measured `1988.8,478.5,36.4,32.2,32.0,32.1,31.9,32.1 ms`:
+31.0--31.3 tok/s warm at 35.6 GiB peak RSS. The expected eight-token sequence was
+unchanged. Compiled fusion changes BF16 association slightly (layer-0 checksum
+2.30148 to 2.30351), so this remains opt-in pending broader quality evaluation.
+
 ## Performance implication
 
 The earlier 21.5 ms head measurement included materializing all logits on the
