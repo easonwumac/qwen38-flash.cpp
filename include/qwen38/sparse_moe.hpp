@@ -58,11 +58,27 @@ public:
         MoePrefillTimings& timings) const;
 
 private:
+    struct CompactQmeta {
+        MlxArray tags;
+        MlxArray dictionary;
+        int bits{0};
+        int groups{0};
+        int row_bytes{0};
+
+        [[nodiscard]] bool present() const noexcept { return bits != 0; }
+    };
+
     struct QuantizedProjection {
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
+        CompactQmeta qmeta;
         int bits{0};
+    };
+
+    struct DecodedQmeta {
+        MlxArray scales;
+        MlxArray biases;
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(
@@ -78,6 +94,11 @@ private:
         const QuantizedProjection& projection,
         std::size_t expert) const;
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_compact_routed(
+        const MlxArray& input,
+        const MlxArray& experts,
+        const MlxArray& weights) const;
+    [[nodiscard]] static DecodedQmeta decode_qmeta(const QuantizedProjection& projection);
     [[nodiscard]] MlxArray forward_shared(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_verify_impl(
         const MlxArray& input,
@@ -101,6 +122,7 @@ private:
     std::shared_ptr<MlxMetalKernel> fused_gate_up_;
     std::shared_ptr<MlxMetalKernel> fused_down_;
     bool fused_q8_exact_{false};
+    bool compact_qmeta_{false};
 };
 
 } // namespace qwen38

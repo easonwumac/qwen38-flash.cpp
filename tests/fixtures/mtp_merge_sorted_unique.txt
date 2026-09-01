@@ -1,0 +1,4 @@
+Complete this Python function efficiently and return only code:
+
+def merge_sorted_unique(a, b):
+    pass

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -27,6 +28,51 @@ int checked_int(const std::size_t value, const char* name) {
         throw std::runtime_error(std::string("invalid MoE parameter: ") + name);
     }
     return static_cast<int>(value);
+}
+
+int compact_qmeta_requested_bits() {
+    const char* value = std::getenv("QWEN38_COMPACT_QMETA");
+    if (value == nullptr || std::string_view(value) == "0") return 0;
+    const std::string_view mode(value);
+    if (mode == "1" || mode == "16" || mode == "lossless16") return 16;
+    if (mode == "13" || mode == "lossless13") return 13;
+    if (mode == "9" || mode == "lossy9") return 9;
+    throw std::runtime_error(
+        "QWEN38_COMPACT_QMETA must be 0, lossless13, lossless16, or lossy9");
+}
+
+std::shared_ptr<MlxMetalKernel> qmeta_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{
+            "x", "gate_weight", "gate_tags", "gate_dictionary",
+            "up_weight", "up_tags", "up_dictionary", "experts"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_compact_qmeta_gate_up", inputs, "hidden",
+            moe_metal::qmeta_gate_up, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> qmeta_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{
+            "x", "weight", "tags", "dictionary", "experts", "route_weights"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_compact_qmeta_down_reduce", inputs, "output",
+            moe_metal::qmeta_down_reduce, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> qmeta_decode_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"tags", "dictionary"};
+        const char* outputs[]{"scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_compact_qmeta_decode", inputs, outputs,
+            moe_metal::qmeta_decode, moe_metal::header);
+    }();
+    return kernel;
 }
 
 std::shared_ptr<MlxMetalKernel> fused_gate_up_kernel() {
@@ -224,6 +270,15 @@ SparseMoe::SparseMoe(
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
     }
+    compact_qmeta_ =
+        expert_gate_.qmeta.present() && expert_up_.qmeta.present() &&
+        expert_down_.qmeta.present();
+    if (compact_qmeta_requested_bits() != 0 &&
+        std::string_view(prefix).starts_with("language_model.model.layers.") &&
+        !compact_qmeta_) {
+        throw std::runtime_error(
+            "QWEN38_COMPACT_QMETA requires a complete sidecar for the requested mode");
+    }
     if (resident_layer_enabled(layer_index(prefix))) {
         make_resident(expert_gate_);
         make_resident(expert_up_);
@@ -258,18 +313,162 @@ SparseMoe::QuantizedProjection SparseMoe::load_projection(
     MlxArray scales = tensors.tensor(base + ".scales");
     const int bits = infer_affine_quantization_bits(
         weight.shape(), scales.shape(), group_size, "MoE");
+    CompactQmeta qmeta;
+    const int requested_qmeta_bits = compact_qmeta_requested_bits();
+    const std::string suffix = ".qmeta" + std::to_string(requested_qmeta_bits);
+    const std::string tags_name = base + suffix + "_tags";
+    const std::string dictionary_name = base + suffix + "_dict";
+    const bool has_tags = tensors.manifest().has_tensor(tags_name);
+    const bool has_dictionary = tensors.manifest().has_tensor(dictionary_name);
+    if (has_tags != has_dictionary) {
+        throw std::runtime_error("incomplete compact qmeta pair for " + base);
+    }
+    if (requested_qmeta_bits != 0 && has_tags) {
+        qmeta.tags = tensors.tensor(tags_name);
+        qmeta.dictionary = tensors.tensor(dictionary_name);
+        const std::vector<int> weight_shape = weight.shape();
+        const std::vector<int> scale_shape = scales.shape();
+        const std::vector<int> tag_shape = qmeta.tags.shape();
+        const std::vector<int> dictionary_shape = qmeta.dictionary.shape();
+        if (bits != 4 || weight_shape.size() != 3 || scale_shape.size() != 3 ||
+            tag_shape.size() != 3 || dictionary_shape.size() != 1 ||
+            dictionary_shape[0] <= 0 ||
+            dictionary_shape[0] > (1 << requested_qmeta_bits) ||
+            qmeta.tags.dtype() != MLX_UINT8 || qmeta.dictionary.dtype() != MLX_UINT32 ||
+            tag_shape[0] != scale_shape[0] || tag_shape[1] != scale_shape[1]) {
+            throw std::runtime_error("invalid compact qmeta geometry for " + base);
+        }
+        qmeta.bits = requested_qmeta_bits;
+        qmeta.groups = scale_shape[2];
+        qmeta.row_bytes = (qmeta.groups * qmeta.bits + 7) / 8;
+        if (tag_shape[2] != qmeta.row_bytes) {
+            throw std::runtime_error("compact qmeta row width mismatch for " + base);
+        }
+    }
     return {
         .weight = std::move(weight),
         .scales = std::move(scales),
         .biases = tensors.tensor(base + ".biases"),
+        .qmeta = std::move(qmeta),
         .bits = bits,
     };
 }
 
 void SparseMoe::make_resident(QuantizedProjection& projection) {
     projection.weight.lock_pages();
-    projection.scales.lock_pages();
-    projection.biases.lock_pages();
+    if (projection.qmeta.present()) {
+        projection.qmeta.tags.lock_pages();
+        projection.qmeta.dictionary.lock_pages();
+    } else {
+        projection.scales.lock_pages();
+        projection.biases.lock_pages();
+    }
+}
+
+SparseMoe::DecodedQmeta SparseMoe::decode_qmeta(
+    const QuantizedProjection& projection) {
+    if (!projection.qmeta.present()) {
+        throw std::runtime_error("compact qmeta decode requested without metadata");
+    }
+    const std::vector<int> weight_shape = projection.weight.shape();
+    if (weight_shape.size() != 3) {
+        throw std::runtime_error("compact qmeta projection must be rank three");
+    }
+    const std::vector<int> output_shape{
+        weight_shape[0], weight_shape[1], projection.qmeta.groups};
+    const std::array<MlxMetalOutputSpec, 2> outputs{{
+        {.shape = output_shape, .dtype = MLX_BFLOAT16},
+        {.shape = output_shape, .dtype = MLX_BFLOAT16},
+    }};
+    const std::array<int, 3> grid{
+        weight_shape[0] * weight_shape[1] * projection.qmeta.groups, 1, 1};
+    const std::array<int, 3> threadgroup{256, 1, 1};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = MLX_BFLOAT16},
+    }};
+    const std::array<MlxMetalIntTemplate, 3> int_templates{{
+        {.name = "QBITS", .value = projection.qmeta.bits},
+        {.name = "GROUPS", .value = projection.qmeta.groups},
+        {.name = "ROW_BYTES", .value = projection.qmeta.row_bytes},
+    }};
+    const MlxArray* inputs[]{&projection.qmeta.tags, &projection.qmeta.dictionary};
+    std::vector<MlxArray> decoded = qmeta_decode_kernel()->apply(
+        inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
+    return {
+        .scales = std::move(decoded[0]),
+        .biases = std::move(decoded[1]),
+    };
+}
+
+MlxArray SparseMoe::forward_compact_routed(
+    const MlxArray& input,
+    const MlxArray& experts,
+    const MlxArray& weights) const {
+    if (!compact_qmeta_) {
+        throw std::runtime_error("compact routed MoE requested without qmeta");
+    }
+    const std::vector<int> input_shape = input.shape();
+    if (input_shape.size() != 3 || input_shape[0] != 1 ||
+        input_shape[2] != 2560 || input_shape[1] < 1 || input_shape[1] > 8 ||
+        experts_per_token_ != 10) {
+        throw std::runtime_error("compact routed MoE requires [1,S,2560], S=1..8");
+    }
+    const int rows = input_shape[1];
+    const int slots = rows * 10;
+    MlxArray flat_experts = experts.reshape(std::vector<int>{slots}).astype(MLX_UINT32);
+    MlxArray flat_weights = weights.reshape(std::vector<int>{slots});
+
+    const MlxArray* gate_inputs[]{
+        &input,
+        &expert_gate_.weight, &expert_gate_.qmeta.tags, &expert_gate_.qmeta.dictionary,
+        &expert_up_.weight, &expert_up_.qmeta.tags, &expert_up_.qmeta.dictionary,
+        &flat_experts};
+    const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
+        {.shape = {slots, 640}, .dtype = input.dtype()},
+    }};
+    const std::array<int, 3> gate_grid{rows * 200 * 1024, 1, 1};
+    const std::array<int, 3> gate_threadgroup{1024, 1, 1};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = input.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 2> gate_int_templates{{
+        {.name = "QGBITS", .value = expert_gate_.qmeta.bits},
+        {.name = "QUBITS", .value = expert_up_.qmeta.bits},
+    }};
+    std::vector<MlxArray> gate_result = qmeta_gate_up_kernel()->apply(
+        gate_inputs,
+        gate_outputs,
+        gate_grid,
+        gate_threadgroup,
+        dtype_templates,
+        gate_int_templates);
+    MlxArray hidden = std::move(gate_result[0]);
+
+    const MlxArray* down_inputs[]{
+        &hidden, &expert_down_.weight, &expert_down_.qmeta.tags,
+        &expert_down_.qmeta.dictionary, &flat_experts, &flat_weights};
+    const std::array<MlxMetalOutputSpec, 1> down_outputs{{
+        {.shape = {rows, 2560}, .dtype = input.dtype()},
+    }};
+    const std::array<int, 3> down_grid{rows * 320 * 64, 1, 1};
+    const std::array<int, 3> down_threadgroup{64, 1, 1};
+    const std::array<MlxMetalIntTemplate, 1> down_int_templates{{
+        {.name = "QBITS", .value = expert_down_.qmeta.bits},
+    }};
+    std::vector<MlxArray> down_result = qmeta_down_kernel()->apply(
+        down_inputs,
+        down_outputs,
+        down_grid,
+        down_threadgroup,
+        dtype_templates,
+        down_int_templates);
+    static std::once_flag announced;
+    const int qmeta_bits = expert_down_.qmeta.bits;
+    std::call_once(announced, [rows, qmeta_bits] {
+        std::cerr << "[qmeta] compact " << qmeta_bits
+                  << "-bit routed MoE engaged: rows=" << rows << " topk=10\n";
+    });
+    return std::move(down_result[0]).reshape(std::vector<int>{1, rows, 2560});
 }
 
 MlxArray SparseMoe::project(
@@ -379,34 +578,39 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             experts = MlxArray::from_int32(expert_values, selected_shape);
             weights = MlxArray::from_float32(selection.weights, selected_shape);
         }
-        const MlxArray& sigmoid_table = bf16_sigmoid_table();
-        const MlxArray* q4_gate_inputs[]{
-            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
-            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts};
-        const MlxArray* q8_gate_inputs[]{
-            &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
-            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts,
-            &sigmoid_table};
-        const std::vector<int> hidden_shape{10, 640};
-        const std::array<int, 3> gate_grid{200 * 1024, 1, 1};
-        const std::array<int, 3> threadgroup{1024, 1, 1};
-        MlxArray hidden = fused_gate_up_->apply(
-            fused_q8_exact_
-                ? std::span<const MlxArray* const>(q8_gate_inputs)
-                : std::span<const MlxArray* const>(q4_gate_inputs),
-            hidden_shape, input.dtype(), gate_grid, threadgroup);
-        MlxArray down_weights = fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
-        const MlxArray* down_inputs[]{
-            &hidden,
-            &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
-            &experts, &down_weights};
-        const std::vector<int> output_shape{1, 1, 2560};
-        const std::array<int, 3> down_grid{
-            fused_q8_exact_ ? 640 * 320 : 320 * 64, 1, 1};
-        const std::array<int, 3> down_threadgroup{
-            fused_q8_exact_ ? 320 : 64, 1, 1};
-        expert_sum = fused_down_->apply(
-            down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
+        if (compact_qmeta_) {
+            expert_sum = forward_compact_routed(input, experts, weights);
+        } else {
+            const MlxArray& sigmoid_table = bf16_sigmoid_table();
+            const MlxArray* q4_gate_inputs[]{
+                &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+                &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts};
+            const MlxArray* q8_gate_inputs[]{
+                &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+                &expert_up_.weight, &expert_up_.scales, &expert_up_.biases, &experts,
+                &sigmoid_table};
+            const std::vector<int> hidden_shape{10, 640};
+            const std::array<int, 3> gate_grid{200 * 1024, 1, 1};
+            const std::array<int, 3> threadgroup{1024, 1, 1};
+            MlxArray hidden = fused_gate_up_->apply(
+                fused_q8_exact_
+                    ? std::span<const MlxArray* const>(q8_gate_inputs)
+                    : std::span<const MlxArray* const>(q4_gate_inputs),
+                hidden_shape, input.dtype(), gate_grid, threadgroup);
+            MlxArray down_weights =
+                fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
+            const MlxArray* down_inputs[]{
+                &hidden,
+                &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
+                &experts, &down_weights};
+            const std::vector<int> output_shape{1, 1, 2560};
+            const std::array<int, 3> down_grid{
+                fused_q8_exact_ ? 640 * 320 : 320 * 64, 1, 1};
+            const std::array<int, 3> down_threadgroup{
+                fused_q8_exact_ ? 320 : 64, 1, 1};
+            expert_sum = fused_down_->apply(
+                down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
+        }
     } else {
         const RouterSelection selection = route_decode(input);
         bool has_expert = false;
@@ -498,6 +702,30 @@ MlxArray SparseMoe::forward_verify_impl(
             const std::array<const MlxArray*, 2> routing_outputs{&experts, &weights};
             MlxArray::eval_all(routing_outputs);
             timings->routing_ms = elapsed_ms(routing_started);
+        }
+        if (compact_qmeta_ && rows <= 8) {
+            const auto compact_started = Clock::now();
+            MlxArray routed = forward_compact_routed(input, experts, weights);
+            if (timings != nullptr) {
+                routed.eval();
+                // Compact gate/up and down are one lazy chain. Attribute the
+                // combined routed cost here instead of inserting a diagnostic
+                // barrier that would alter production scheduling.
+                timings->down_ms = elapsed_ms(compact_started);
+            }
+            const auto shared_started = Clock::now();
+            MlxArray shared = forward_shared(input);
+            if (timings != nullptr) {
+                shared.eval();
+                timings->shared_expert_ms = elapsed_ms(shared_started);
+            }
+            const auto merge_started = Clock::now();
+            MlxArray output = MlxArray::add(routed, shared);
+            if (timings != nullptr) {
+                output.eval();
+                timings->merge_ms = elapsed_ms(merge_started);
+            }
+            return output;
         }
         const MlxArray& sigmoid_table = bf16_sigmoid_table();
         const MlxArray* q4_gate_inputs[]{
@@ -598,8 +826,12 @@ MlxArray SparseMoe::forward_prefill_impl(
     }
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     const bool mixed_quantization = !fused_gate_up_ || !fused_down_;
-    if ((!mixed_quantization && shape[1] < 16) || grouped == nullptr ||
-        std::string_view(grouped) != "1") {
+    if (compact_qmeta_ && shape[1] <= 8) {
+        return forward_verify(input);
+    }
+    if (!compact_qmeta_ &&
+        ((!mixed_quantization && shape[1] < 16) || grouped == nullptr ||
+         std::string_view(grouped) != "1")) {
         return forward_verify(input);
     }
 
@@ -639,13 +871,34 @@ MlxArray SparseMoe::forward_prefill_impl(
         timings->routing_ms = elapsed_ms(routing_started);
     }
 
+    DecodedQmeta decoded_gate;
+    DecodedQmeta decoded_up;
+    DecodedQmeta decoded_down;
+    const MlxArray* gate_scales = &expert_gate_.scales;
+    const MlxArray* gate_biases = &expert_gate_.biases;
+    const MlxArray* up_scales = &expert_up_.scales;
+    const MlxArray* up_biases = &expert_up_.biases;
+    const MlxArray* down_scales = &expert_down_.scales;
+    const MlxArray* down_biases = &expert_down_.biases;
+    if (compact_qmeta_) {
+        decoded_gate = decode_qmeta(expert_gate_);
+        decoded_up = decode_qmeta(expert_up_);
+        decoded_down = decode_qmeta(expert_down_);
+        gate_scales = &decoded_gate.scales;
+        gate_biases = &decoded_gate.biases;
+        up_scales = &decoded_up.scales;
+        up_biases = &decoded_up.biases;
+        down_scales = &decoded_down.scales;
+        down_biases = &decoded_down.biases;
+    }
+
     const auto gate_up_started = Clock::now();
     const auto gate_started = Clock::now();
     MlxArray raw_gate = MlxArray::gather_quantized_matmul(
         gathered_input,
         expert_gate_.weight,
-        expert_gate_.scales,
-        expert_gate_.biases,
+        *gate_scales,
+        *gate_biases,
         no_indices,
         sorted_experts,
         group_size_,
@@ -659,8 +912,8 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray up = MlxArray::gather_quantized_matmul(
         gathered_input,
         expert_up_.weight,
-        expert_up_.scales,
-        expert_up_.biases,
+        *up_scales,
+        *up_biases,
         no_indices,
         sorted_experts,
         group_size_,
@@ -686,8 +939,8 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray down = MlxArray::gather_quantized_matmul(
         expert_hidden,
         expert_down_.weight,
-        expert_down_.scales,
-        expert_down_.biases,
+        *down_scales,
+        *down_biases,
         no_indices,
         sorted_experts,
         group_size_,
@@ -703,6 +956,12 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray weighted = MlxArray::multiply(
         unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
     MlxArray routed = weighted.sum_axis(2);
+    if (compact_qmeta_) {
+        // The decoded 88 MiB side banks are layer-local. Materialize the
+        // reduced routed output before those temporary arrays leave scope so
+        // they cannot accumulate across the 48-layer lazy prefill graph.
+        routed.eval();
+    }
     if (timings != nullptr) {
         routed.eval();
         timings->route_reduce_ms = elapsed_ms(route_reduce_started);

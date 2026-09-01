@@ -30,16 +30,22 @@ void write_shard(const std::filesystem::path& path) {
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
-void write_qmeta_sidecar(const std::filesystem::path& path) {
+void write_qmeta_sidecar(
+    const std::filesystem::path& path,
+    const int bits,
+    const char second_tag) {
+    const std::string prefix = "layer.qmeta" + std::to_string(bits);
     const std::string header =
-        R"({"layer.qmeta9_tags":{"dtype":"U8","shape":[2],"data_offsets":[0,2]},"layer.qmeta9_dict":{"dtype":"U32","shape":[1],"data_offsets":[2,6]}})";
+        "{\"" + prefix + "_tags\":{\"dtype\":\"U8\",\"shape\":[2],"
+        "\"data_offsets\":[0,2]},\"" + prefix +
+        "_dict\":{\"dtype\":\"U32\",\"shape\":[1],\"data_offsets\":[2,6]}}";
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     const std::uint64_t size = header.size();
     for (unsigned int i = 0; i < 8; ++i) {
         output.put(static_cast<char>((size >> (i * 8U)) & 0xFFU));
     }
     output.write(header.data(), static_cast<std::streamsize>(header.size()));
-    const std::array<char, 6> bytes{3, 5, 7, 0, 0, 0};
+    const std::array<char, 6> bytes{3, second_tag, 7, 0, 0, 0};
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
@@ -91,7 +97,8 @@ void run_model_manifest_tests() {
       "weight_map":{"tensor":"model-00001-of-00001.safetensors"}
     })");
     write_shard(directory / "model-00001-of-00001.safetensors");
-    write_qmeta_sidecar(directory / "model-qmeta-joint9.safetensors");
+    write_qmeta_sidecar(directory / "model-qmeta-joint9.safetensors", 9, 5);
+    write_qmeta_sidecar(directory / "model-qmeta-lossless16.safetensors", 16, 6);
 
     qwen38::ModelManifest manifest = qwen38::ModelManifest::load(directory);
     QWEN38_CHECK(manifest.config().hidden_size == 2560);
@@ -119,6 +126,8 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.has_tensor("tensor"));
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_tags"));
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_dict"));
+    QWEN38_CHECK(manifest.has_tensor("layer.qmeta16_tags"));
+    QWEN38_CHECK(manifest.has_tensor("layer.qmeta16_dict"));
     QWEN38_CHECK(!manifest.has_tensor("missing"));
 
     qwen38::TensorStore store(std::move(manifest));
@@ -131,6 +140,10 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(store.open_shard_count() == 2);
     QWEN38_CHECK(qmeta_tags.bytes.size() == 2);
     QWEN38_CHECK(std::to_integer<unsigned char>(qmeta_tags.bytes[1]) == 5);
+    const auto qmeta16_tags = store.tensor("layer.qmeta16_tags");
+    QWEN38_CHECK(store.open_shard_count() == 3);
+    QWEN38_CHECK(qmeta16_tags.bytes.size() == 2);
+    QWEN38_CHECK(std::to_integer<unsigned char>(qmeta16_tags.bytes[1]) == 6);
     QWEN38_CHECK(store.mapped_virtual_bytes() > 2);
 
     std::filesystem::remove_all(directory);

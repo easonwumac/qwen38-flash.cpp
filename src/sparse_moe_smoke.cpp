@@ -3,6 +3,7 @@
 #include "qwen38/sparse_moe.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -15,7 +16,10 @@
 
 namespace {
 
-qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::size_t rows) {
+qwen38::MlxArray make_input(
+    qwen38::MlxTensorStore& tensors,
+    const std::size_t rows,
+    const std::size_t layer) {
     const auto& config = tensors.manifest().config();
     std::vector<std::int32_t> token_values;
     token_values.reserve(rows);
@@ -40,7 +44,7 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::size_t r
         embedding.reshape(embedding_shape), config.hyper_connection_count);
     qwen38::HyperConnection mixer(
         tensors,
-        "language_model.model.layers.0.mlp_hyper_connection",
+        "language_model.model.layers." + std::to_string(layer) + ".mlp_hyper_connection",
         config.hidden_size,
         config.hyper_connection_count,
         config.quantization_bits,
@@ -53,19 +57,27 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::size_t r
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2 || argc > 4) {
+    if (argc < 2 || argc > 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " MODEL_DIRECTORY [ROWS [components|verify-components]]\n";
+                  << " MODEL_DIRECTORY [ROWS [components|verify-components|layer=N [LAYER]]]\n";
         return EXIT_FAILURE;
     }
     try {
         const std::size_t rows = argc >= 3 ? std::stoul(argv[2]) : 1;
-        const bool profile_components = argc == 4 && std::string_view(argv[3]) == "components";
-        const bool profile_verify =
-            argc == 4 && std::string_view(argv[3]) == "verify-components";
-        if (argc == 4 && !profile_components && !profile_verify) {
+        const std::string_view mode = argc >= 4 ? std::string_view(argv[3]) : std::string_view{};
+        const bool profile_components = mode == "components";
+        const bool profile_verify = mode == "verify-components";
+        const bool layer_mode = mode.starts_with("layer=");
+        const bool explicit_profile_layer = argc == 5;
+        const std::size_t layer = explicit_profile_layer
+            ? std::stoul(argv[4])
+            : layer_mode ? std::stoul(std::string(mode.substr(6))) : 0;
+        if (argc >= 4 && !profile_components && !profile_verify && !layer_mode) {
             throw std::runtime_error(
-                "profiling mode must be 'components' or 'verify-components'");
+                "mode must be 'components', 'verify-components', or 'layer=N'");
+        }
+        if (explicit_profile_layer && !profile_components && !profile_verify) {
+            throw std::runtime_error("explicit LAYER requires a component profiling mode");
         }
         if ((profile_components || profile_verify) && rows == 1) {
             throw std::runtime_error("component profiling requires ROWS greater than 1");
@@ -83,10 +95,15 @@ int main(int argc, char** argv) {
         qwen38::apply_runtime_profile("speed");
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         const auto& config = tensors.manifest().config();
-        auto input = make_input(tensors, rows);
+        if (layer >= config.layer_count) {
+            throw std::runtime_error("layer index is out of range");
+        }
+        auto input = make_input(tensors, rows, layer);
+        const std::string prefix =
+            "language_model.model.layers." + std::to_string(layer) + ".mlp";
         qwen38::SparseMoe moe(
             tensors,
-            "language_model.model.layers.0.mlp",
+            prefix,
             config.expert_count,
             config.experts_per_token,
             config.quantization_bits,
@@ -124,6 +141,11 @@ int main(int argc, char** argv) {
             throw std::runtime_error("MoE output is invalid");
         }
         const double checksum = std::accumulate(values.begin(), values.end(), 0.0);
+        std::uint64_t bit_hash = 1469598103934665603ULL;
+        for (const float value : values) {
+            bit_hash ^= std::bit_cast<std::uint32_t>(value);
+            bit_hash *= 1099511628211ULL;
+        }
         std::vector<double> warm(timings.begin() + 1, timings.end());
         std::sort(warm.begin(), warm.end());
         const auto component_median = [&component_timings](
@@ -146,7 +168,8 @@ int main(int argc, char** argv) {
             std::sort(values.begin(), values.end());
             return values[values.size() / 2];
         };
-        std::cout << "{\"rows\":" << rows << ",\"experts\":[";
+        std::cout << "{\"rows\":" << rows << ",\"layer\":" << layer
+                  << ",\"experts\":[";
         for (std::size_t index = 0; index < selection.experts.size(); ++index) {
             if (index != 0) std::cout << ',';
             std::cout << selection.experts[index];
@@ -157,7 +180,9 @@ int main(int argc, char** argv) {
             std::cout << selection.weights[index];
         }
         std::cout << std::setprecision(10)
-                  << "],\"checksum\":" << checksum << ",\"cold_ms\":" << timings.front()
+                  << "],\"checksum\":" << checksum
+                  << ",\"bit_hash\":" << bit_hash
+                  << ",\"cold_ms\":" << timings.front()
                   << ",\"warm_median_ms\":" << warm[warm.size() / 2]
                   << ",\"prefill_tps\":"
                   << 1000.0 * static_cast<double>(rows) / warm[warm.size() / 2]

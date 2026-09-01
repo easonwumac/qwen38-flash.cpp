@@ -262,6 +262,31 @@ This is a smaller scheduling win: the 128-token fixture improved from
 `QWEN38_DEFER_VERIFY_HEAD_EVAL=0` to restore the separate head barrier. Developer
 benchmarks that request isolated head timing still materialize it explicitly.
 
+For a lower-resident-memory deployment, `devtools/build_lossless_qmeta.py`
+re-encodes the routed experts' BF16 scale/bias pairs as exact bank-local
+dictionaries without changing the Q4 weights. `--bits 16` is the recommended
+aligned format: its retained sidecar is 2.0 GiB for all 144 projection banks.
+Set `QWEN38_COMPACT_QMETA=1` (or `lossless16`) to use it; `lossless13` selects
+the denser 1.6 GiB diagnostic format. The runtime never enables either format
+implicitly and fails at startup if the requested sidecar is incomplete.
+
+```bash
+python3 devtools/build_lossless_qmeta.py /path/to/model --bits 16
+QWEN38_COMPACT_QMETA=1 ./build-all/qwen38-server \
+  --model /path/to/model --profile speed
+```
+
+On the 64 GiB M5 Pro, the same 1,152-token MTP workload measured 30.68 GiB RSS
+with lossless16 versus 36.49 GiB for the full-metadata control. The exact
+89/103 and 185/205 acceptance paths and generated output were preserved.
+Lossless16 reached 64.56 tok/s at 128 tokens and a thermally falling
+64.60/62.01 tok/s pair at 256, compared with control medians of 64.18 and
+64.995 tok/s. It is therefore a memory profile, not a claimed decode-speed
+promotion. A repeated 2,424-token prompt reached 335.4 PP tok/s warm versus
+397.1 for control, a 15.5% prefill cost because wide prefill reconstructs
+layer-local affine banks before the grouped QMM. Keep the normal `speed`
+profile when prompt throughput matters more than roughly 5.8 GiB of RSS.
+
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the

@@ -2,6 +2,7 @@
 
 #include "qwen38/json.hpp"
 
+#include <array>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -190,16 +191,22 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     // original checkpoint remains loadable by ordinary MLX tooling. Discover
     // its tensor names from the safetensors header instead of baking all 288
     // entries into another JSON manifest.
-    constexpr std::string_view qmeta_sidecar = "model-qmeta-joint9.safetensors";
-    const std::filesystem::path qmeta_path = result.directory_ / qmeta_sidecar;
-    if (std::filesystem::is_regular_file(qmeta_path)) {
-        const SafetensorsFile qmeta(qmeta_path);
-        for (const auto& [tensor_name, metadata] : qmeta.tensors()) {
-            static_cast<void>(metadata);
-            if (tensor_name.empty() || !result.weight_map_.emplace(
-                    tensor_name, std::string(qmeta_sidecar)).second) {
-                throw std::runtime_error(
-                    "compact qmeta sidecar duplicates a model tensor: " + tensor_name);
+    constexpr std::array<std::string_view, 3> qmeta_sidecars{
+        "model-qmeta-lossless16.safetensors",
+        "model-qmeta-lossless13.safetensors",
+        "model-qmeta-joint9.safetensors",
+    };
+    for (const std::string_view qmeta_sidecar : qmeta_sidecars) {
+        const std::filesystem::path qmeta_path = result.directory_ / qmeta_sidecar;
+        if (std::filesystem::is_regular_file(qmeta_path)) {
+            const SafetensorsFile qmeta(qmeta_path);
+            for (const auto& [tensor_name, metadata] : qmeta.tensors()) {
+                static_cast<void>(metadata);
+                if (tensor_name.empty() || !result.weight_map_.emplace(
+                        tensor_name, std::string(qmeta_sidecar)).second) {
+                    throw std::runtime_error(
+                        "compact qmeta sidecar duplicates a model tensor: " + tensor_name);
+                }
             }
         }
     }

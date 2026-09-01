@@ -240,6 +240,178 @@ inline constexpr std::string_view down_verify = R"metal(
     }
 )metal";
 
+// Compact qmeta kernels are adapted from mlx-serve (Copyright 2026 David
+// Dalcu), MIT licensed. The Q4 codes stay unchanged; only the BF16 affine
+// scale/bias pair is decoded from a bank-local packed dictionary index.
+inline constexpr std::string_view qmeta_gate_up = R"metal(
+    constexpr int K = 2560;
+    constexpr int GS = 64;
+    constexpr int NG = K / GS;
+    constexpr int WPG = GS / 8;
+    constexpr int SLOTS = 10;
+    constexpr int EXPERT_ROWS = 640;
+    constexpr int GROUPS_PER_BATCH = SLOTS * EXPERT_ROWS;
+    constexpr int GATE_ROW_BYTES = (NG * QGBITS + 7) / 8;
+    constexpr int UP_ROW_BYTES = (NG * QUBITS + 7) / 8;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = tid / 32;
+    const uint lane = tid % 32;
+    const uint group_id = threadgroup_position_in_grid.x * 32 + sg;
+    const uint batch = group_id / GROUPS_PER_BATCH;
+    const uint local = group_id % GROUPS_PER_BATCH;
+    const int slot = local / EXPERT_ROWS;
+    const int row_index = local % EXPERT_ROWS;
+    const uint expert = experts[batch * SLOTS + slot];
+    const device T* input_row = x + (size_t)batch * K;
+    const size_t row = (size_t)expert * EXPERT_ROWS + row_index;
+    const device uint32_t* gate_row = gate_weight + row * (K / 8);
+    const device uint32_t* up_row = up_weight + row * (K / 8);
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+    for (int group = (int)lane; group < NG; group += 32) {
+        const int gate_bit = group * QGBITS;
+        const size_t gate_pos = row * GATE_ROW_BYTES + (gate_bit >> 3);
+        const uint gate_shift = gate_bit & 7;
+        uint gate_window = uint(gate_tags[gate_pos]) |
+            (uint(gate_tags[gate_pos + 1]) << 8);
+        if (gate_shift + QGBITS > 16) gate_window |= uint(gate_tags[gate_pos + 2]) << 16;
+        const uint gate_pair = gate_dictionary[
+            (gate_window >> gate_shift) & ((1u << QGBITS) - 1u)];
+        const float gate_scale = float(as_type<T>(ushort(gate_pair & 65535u)));
+        const float gate_bias = float(as_type<T>(ushort(gate_pair >> 16)));
+        const int up_bit = group * QUBITS;
+        const size_t up_pos = row * UP_ROW_BYTES + (up_bit >> 3);
+        const uint up_shift = up_bit & 7;
+        uint up_window = uint(up_tags[up_pos]) | (uint(up_tags[up_pos + 1]) << 8);
+        if (up_shift + QUBITS > 16) up_window |= uint(up_tags[up_pos + 2]) << 16;
+        const uint up_pair = up_dictionary[
+            (up_window >> up_shift) & ((1u << QUBITS) - 1u)];
+        const float up_scale = float(as_type<T>(ushort(up_pair & 65535u)));
+        const float up_bias = float(as_type<T>(ushort(up_pair >> 16)));
+        const device T* input_group = input_row + group * GS;
+        float gate_dot = 0.0f;
+        float up_dot = 0.0f;
+        float input_sum = 0.0f;
+        for (int word = 0; word < WPG; ++word) {
+            const uint packed_gate = gate_row[group * WPG + word];
+            const uint packed_up = up_row[group * WPG + word];
+            for (int nibble = 0; nibble < 8; ++nibble) {
+                const float value = float(input_group[word * 8 + nibble]);
+                input_sum += value;
+                gate_dot += float((packed_gate >> (4 * nibble)) & 15u) * value;
+                up_dot += float((packed_up >> (4 * nibble)) & 15u) * value;
+            }
+        }
+        gate_acc += gate_scale * gate_dot + gate_bias * input_sum;
+        up_acc += up_scale * up_dot + up_bias * input_sum;
+    }
+    gate_acc = simd_sum(gate_acc);
+    up_acc = simd_sum(up_acc);
+    if (lane == 0) {
+        const float gate = float(T(gate_acc));
+        const float up = float(T(up_acc));
+        hidden[((size_t)batch * SLOTS + slot) * EXPERT_ROWS + row_index] =
+            T(float(T(gate / (1.0f + metal::exp(-gate)))) * up);
+    }
+)metal";
+
+inline constexpr std::string_view qmeta_down_reduce = R"metal(
+    constexpr int K = 640;
+    constexpr int GS = 64;
+    constexpr int ROWS_PER_SIMD = 4;
+    constexpr int VALUES = 8;
+    constexpr int BLOCK = VALUES * 32;
+    constexpr int GROUPS = K / 64;
+    constexpr int ROW_BYTES = (GROUPS * QBITS + 7) / 8;
+    constexpr int SLOTS = 10;
+    constexpr int OUTPUT_ROWS = 2560;
+    const uint simd = simdgroup_index_in_threadgroup;
+    const uint lane = thread_index_in_simdgroup;
+    const uint global_row = threadgroup_position_in_grid.x * 8 + simd * ROWS_PER_SIMD;
+    const uint batch = global_row / OUTPUT_ROWS;
+    const uint row0 = global_row % OUTPUT_ROWS;
+    float accumulated[ROWS_PER_SIMD] = {0.0f};
+    for (int slot = 0; slot < SLOTS; ++slot) {
+        const uint expert = experts[batch * SLOTS + slot];
+        const size_t base = (size_t)expert * OUTPUT_ROWS + row0;
+        const device uint8_t* weight_row =
+            (const device uint8_t*)(weight + base * (K / 8)) + lane * 4;
+        const device T* values = x + ((size_t)batch * SLOTS + slot) * K + lane * VALUES;
+        float dot[ROWS_PER_SIMD] = {0.0f};
+        for (int k0 = 0; k0 < K; k0 += BLOCK) {
+            float inputs[VALUES] = {0.0f};
+            float input_sum = 0.0f;
+            if (k0 + lane * VALUES < K) {
+                for (int i = 0; i < VALUES; i += 4) {
+                    const float x0 = float(values[i]);
+                    const float x1 = float(values[i + 1]);
+                    const float x2 = float(values[i + 2]);
+                    const float x3 = float(values[i + 3]);
+                    input_sum += x0 + x1 + x2 + x3;
+                    inputs[i] = x0;
+                    inputs[i + 1] = x1 / 16.0f;
+                    inputs[i + 2] = x2 / 256.0f;
+                    inputs[i + 3] = x3 / 4096.0f;
+                }
+            }
+            const int group = k0 / GS + lane / 8;
+            if (k0 + lane * VALUES < K) {
+                for (int row_offset = 0; row_offset < ROWS_PER_SIMD; ++row_offset) {
+                    const size_t row = base + row_offset;
+                    const int bit = group * QBITS;
+                    const size_t tag_pos = row * ROW_BYTES + (bit >> 3);
+                    const uint shift = bit & 7;
+                    uint window = uint(tags[tag_pos]) | (uint(tags[tag_pos + 1]) << 8);
+                    if (shift + QBITS > 16) window |= uint(tags[tag_pos + 2]) << 16;
+                    const uint pair = dictionary[
+                        (window >> shift) & ((1u << QBITS) - 1u)];
+                    const float scale = float(as_type<T>(ushort(pair & 65535u)));
+                    const float bias = float(as_type<T>(ushort(pair >> 16)));
+                    const device uint16_t* words =
+                        (const device uint16_t*)(weight_row + row_offset * (K / 8) * 4);
+                    float quantized = 0.0f;
+                    for (int i = 0; i < VALUES / 4; ++i) {
+                        const uint16_t packed = words[i];
+                        quantized += inputs[4 * i] * (packed & 0x000f) +
+                            inputs[4 * i + 1] * (packed & 0x00f0) +
+                            inputs[4 * i + 2] * (packed & 0x0f00) +
+                            inputs[4 * i + 3] * (packed & 0xf000);
+                    }
+                    dot[row_offset] += scale * quantized + bias * input_sum;
+                }
+            }
+            weight_row += BLOCK / 2;
+            values += BLOCK;
+        }
+        for (int row_offset = 0; row_offset < ROWS_PER_SIMD; ++row_offset) {
+            dot[row_offset] = simd_sum(dot[row_offset]);
+            accumulated[row_offset] += route_weights[batch * SLOTS + slot] *
+                float(T(dot[row_offset]));
+        }
+    }
+    if (lane == 0) {
+        for (int row_offset = 0; row_offset < ROWS_PER_SIMD; ++row_offset) {
+            output[(size_t)batch * OUTPUT_ROWS + row0 + row_offset] =
+                T(accumulated[row_offset]);
+        }
+    }
+)metal";
+
+inline constexpr std::string_view qmeta_decode = R"metal(
+    const uint index = thread_position_in_grid.x;
+    const uint group = index % uint(GROUPS);
+    const uint row = index / uint(GROUPS);
+    const uint bit = group * uint(QBITS);
+    const size_t tag_pos = (size_t)row * uint(ROW_BYTES) + (bit >> 3);
+    const uint shift = bit & 7u;
+    uint window = uint(tags[tag_pos]) | (uint(tags[tag_pos + 1]) << 8);
+    if (shift + uint(QBITS) > 16u) window |= uint(tags[tag_pos + 2]) << 16;
+    const uint tag = (window >> shift) & ((1u << uint(QBITS)) - 1u);
+    const uint pair = dictionary[tag];
+    scales[index] = as_type<T>(ushort(pair & 65535u));
+    biases[index] = as_type<T>(ushort(pair >> 16));
+)metal";
+
 // Portions of the Q8 kernels below are derived from mlx-serve,
 // Copyright (c) 2026 David Dalcu, under the MIT license. They reproduce its gather-QMV
 // accumulation and BF16 SwiGLU rounding order for the fixed Qwen3.8 MTP
