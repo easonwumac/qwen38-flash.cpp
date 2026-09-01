@@ -203,17 +203,39 @@ RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
-    const RouterSelection selection = route_decode(input);
     MlxArray expert_sum;
     if (fused_gate_up_ && fused_down_) {
-        std::vector<std::int32_t> expert_values;
-        expert_values.reserve(selection.experts.size());
-        for (const std::size_t expert : selection.experts) {
-            expert_values.push_back(static_cast<std::int32_t>(expert));
+        MlxArray experts;
+        MlxArray weights;
+        const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+        if (device_router != nullptr && std::string_view(device_router) == "1") {
+            MlxArray gates =
+                MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+            MlxArray partition =
+                gates.argpartition_axis(-static_cast<int>(experts_per_token_), -1);
+            const std::vector<int> start{
+                0, 0, static_cast<int>(expert_count_ - experts_per_token_)};
+            const std::vector<int> stop{1, 1, static_cast<int>(expert_count_)};
+            const std::vector<int> strides{1, 1, 1};
+            experts = partition.slice(start, stop, strides).reshape(
+                std::vector<int>{static_cast<int>(experts_per_token_)});
+            weights = MlxArray::take_along_axis(gates, partition.slice(start, stop, strides), -1)
+                          .reshape(std::vector<int>{static_cast<int>(experts_per_token_)});
+            if (normalize_topk_probability_) {
+                weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
+            }
+            weights = weights.astype(MLX_FLOAT32);
+        } else {
+            const RouterSelection selection = route_decode(input);
+            std::vector<std::int32_t> expert_values;
+            expert_values.reserve(selection.experts.size());
+            for (const std::size_t expert : selection.experts) {
+                expert_values.push_back(static_cast<std::int32_t>(expert));
+            }
+            const std::vector<int> selected_shape{static_cast<int>(experts_per_token_)};
+            experts = MlxArray::from_int32(expert_values, selected_shape);
+            weights = MlxArray::from_float32(selection.weights, selected_shape);
         }
-        const std::vector<int> selected_shape{static_cast<int>(experts_per_token_)};
-        MlxArray experts = MlxArray::from_int32(expert_values, selected_shape);
-        MlxArray weights = MlxArray::from_float32(selection.weights, selected_shape);
         const MlxArray* gate_inputs[]{
             &input,
             &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
@@ -233,6 +255,7 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
         expert_sum = fused_down_->apply(
             down_inputs, output_shape, input.dtype(), down_grid, threadgroup);
     } else {
+        const RouterSelection selection = route_decode(input);
         bool has_expert = false;
         for (std::size_t index = 0; index < selection.experts.size(); ++index) {
             const std::size_t expert = selection.experts[index];

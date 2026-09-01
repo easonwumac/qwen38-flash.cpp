@@ -198,6 +198,13 @@ MlxArray MlxArray::multiply(const MlxArray& left, const MlxArray& right) {
     return result;
 }
 
+MlxArray MlxArray::divide(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_divide(&result.value_, left.value_, right.value_, stream.get()), "divide");
+    return result;
+}
+
 MlxArray MlxArray::concatenate(
     const MlxArray& left,
     const MlxArray& right,
@@ -463,6 +470,40 @@ MlxArray MlxArray::take_axis(
     return result;
 }
 
+MlxArray MlxArray::take(const MlxArray& input, const MlxArray& indices) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_take(&result.value_, input.value_, indices.value_, stream.get()), "take");
+    return result;
+}
+
+MlxArray MlxArray::take_along_axis(
+    const MlxArray& input,
+    const MlxArray& indices,
+    const int axis) {
+    MlxArray result;
+    const Stream stream;
+    check(
+        mlx_take_along_axis(&result.value_, input.value_, indices.value_, axis, stream.get()),
+        "take_along_axis");
+    return result;
+}
+
+MlxArray MlxArray::argpartition_axis(const int kth, const int axis) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_argpartition_axis(&result.value_, value_, kth, axis, stream.get()),
+        "argpartition_axis");
+    return result;
+}
+
+MlxArray MlxArray::argmax_all() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_argmax(&result.value_, value_, false, stream.get()), "argmax");
+    return result;
+}
+
 MlxArray MlxArray::dequantize(
     const MlxArray& weight,
     const MlxArray& scales,
@@ -507,6 +548,20 @@ std::vector<float> MlxArray::to_float32() const {
         throw std::runtime_error("MLX returned null array data");
     }
     return {data, data + contiguous.size()};
+}
+
+std::uint32_t MlxArray::item_uint32() const {
+    eval();
+    std::uint32_t result = 0;
+    check(mlx_array_item_uint32(&result, value_), "item_uint32");
+    return result;
+}
+
+float MlxArray::item_float32() const {
+    eval();
+    float result = 0.0F;
+    check(mlx_array_item_float32(&result, value_), "item_float32");
+    return result;
 }
 
 std::vector<int> MlxArray::shape() const {

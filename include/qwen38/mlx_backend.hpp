@@ -39,6 +39,7 @@ public:
     [[nodiscard]] static MlxArray add(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray subtract(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray multiply(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray divide(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray concatenate(
         const MlxArray& left,
         const MlxArray& right,
@@ -88,6 +89,15 @@ public:
         const MlxArray& input,
         const MlxArray& indices,
         int axis);
+    [[nodiscard]] static MlxArray take(
+        const MlxArray& input,
+        const MlxArray& indices);
+    [[nodiscard]] static MlxArray take_along_axis(
+        const MlxArray& input,
+        const MlxArray& indices,
+        int axis);
+    [[nodiscard]] MlxArray argpartition_axis(int kth, int axis) const;
+    [[nodiscard]] MlxArray argmax_all() const;
     [[nodiscard]] static MlxArray dequantize(
         const MlxArray& weight,
         const MlxArray& scales,
@@ -98,6 +108,8 @@ public:
 
     void eval() const;
     [[nodiscard]] std::vector<float> to_float32() const;
+    [[nodiscard]] std::uint32_t item_uint32() const;
+    [[nodiscard]] float item_float32() const;
     [[nodiscard]] std::vector<int> shape() const;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] mlx_dtype dtype() const noexcept;

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import re
 import signal
@@ -34,13 +35,18 @@ def available_gib() -> float:
     return reclaimable * PAGE_SIZE / (1024**3)
 
 
-def rss_gib(pid: int) -> float:
+def process_group_rss_gib(pgid: int) -> float:
     try:
-        value = subprocess.check_output(
-            ["ps", "-o", "rss=", "-p", str(pid)], text=True
-        ).strip()
-        return int(value or "0") / (1024**2)
-    except (subprocess.CalledProcessError, ValueError):
+        output = subprocess.check_output(
+            ["ps", "-axo", "pgid=,rss="], text=True
+        )
+        total_kib = sum(
+            int(fields[1])
+            for line in output.splitlines()
+            if len(fields := line.split()) == 2 and int(fields[0]) == pgid
+        )
+        return total_kib / (1024**2)
+    except (subprocess.CalledProcessError, ValueError, IndexError):
         return 0.0
 
 
@@ -61,12 +67,22 @@ def main() -> int:
     parser.add_argument("--min-start-gib", type=float, default=42.0)
     parser.add_argument("--min-available-gib", type=float, default=8.0)
     parser.add_argument("--max-rss-gib", type=float, default=38.0)
-    parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--interval", type=float, default=0.25)
+    parser.add_argument("--lock-file", default="/tmp/qwen38-memory-guard.lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         parser.error("a command is required after --")
+
+    lock = open(args.lock_file, "w", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("memory_guard: refused: another guarded model run is active", file=sys.stderr)
+        return 75
+    lock.write(f"{os.getpid()}\n")
+    lock.flush()
 
     start_available = available_gib()
     if start_available < args.min_start_gib:
@@ -82,7 +98,7 @@ def main() -> int:
     minimum_available = start_available
     try:
         while child.poll() is None:
-            current_rss = rss_gib(child.pid)
+            current_rss = process_group_rss_gib(child.pid)
             current_available = available_gib()
             peak_rss = max(peak_rss, current_rss)
             minimum_available = min(minimum_available, current_available)

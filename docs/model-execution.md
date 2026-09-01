@@ -241,10 +241,24 @@ eight-step 12:28 run improved cold-inclusive sustained throughput from 2.48 to
 Resident paging therefore solves cold/short-request latency within the desired
 30--36 GiB envelope; warm decode still requires arithmetic/dispatch fusion.
 
+Combining the `12:34` resident tier with the selected-expert Metal kernels
+reduced the last six steps of an eight-token run to about 44.8--49.3 ms
+(roughly 22 tok/s). Moving router softmax, top-k selection, normalization, and
+expert IDs fully onto the device with `QWEN38_DEVICE_ROUTER=1` reduced the warm
+steps again to 36.2--41.3 ms (roughly 27 tok/s). The complete measured sequence
+was `1991.8,455.5,41.3,36.9,37.2,36.2,36.6,37.0 ms`, with 35.9 GiB peak RSS and
+the exact expected token sequence `11,271,40,599,264,3377,440,821`.
+
+GPU-side greedy argmax now avoids copying all 248,320 logits to the host. It
+preserved the token sequence and lowered one measured peak to 34.7 GiB, but did
+not improve token latency. A dedicated Q4-head/argmax Metal probe was likewise
+rejected: 1.83 ms warm versus MLX's 1.71 ms. The remaining warm bottleneck is
+therefore the repeated layer path, not vocabulary transfer or head selection.
+
 ## Performance implication
 
-A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s
-budget. The complete target cannot meet that gate if every greedy token pays this
-exact path unchanged. Exact argmax pruning/candidate certification, head layout,
-and overlap therefore form an explicit optimization track; sampled requests must
-retain the full distribution path.
+The earlier 21.5 ms head measurement included materializing all logits on the
+host. With GPU argmax, the actual warm QMM plus selection probe is about 1.7 ms.
+The 45 tok/s gate is therefore no longer blocked by the vocabulary head; further
+gains must fuse or compile per-layer attention, recurrent, normalization, and
+residual work. Sampled requests still require the full distribution path.

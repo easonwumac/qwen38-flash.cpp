@@ -94,14 +94,15 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
 ```
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
-attributed two-dispatch selected-MoE Metal research path. It is not currently a
-speed recommendation: the first valid 288-expert end-to-end A/B was slower than
-the stable route. It remains available for kernel development only.
+attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`
+to keep top-k selection and routing weights on the GPU. Together with the
+resident tier below, this is the current fastest verified native decode path.
 
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. The default guard refuses to start below
-42 GiB reclaimable memory and terminates the child before it exceeds 38 GiB RSS
-or leaves less than 8 GiB reclaimable, preventing benchmark-driven OOMs.
+42 GiB reclaimable memory and terminates the process group before it exceeds
+38 GiB RSS or leaves less than 8 GiB reclaimable. A system-wide lock prevents
+overlapping guarded model runs.
 
 For per-token warmup evidence rather than a two-token snapshot:
 
@@ -111,8 +112,9 @@ For per-token warmup evidence rather than a two-token snapshot:
 
 On the verified 64 GB configuration, `QWEN38_RESIDENT_EXPERT_RANGE=12:34`
 pins a bounded 22-layer expert tier. It is capped at 22 layers in code and must
-be used with the memory guard during experiments. The measured peak was
-35.4 GiB RSS; model outputs and logits were unchanged.
+be used with the memory guard during experiments. With fused MoE and device
+routing, the measured peak was 35.9 GiB RSS, outputs were unchanged, and warm
+decode reached about 27 tok/s.
 
 Validate a model manifest and lazily map one tensor without loading all weights:
 

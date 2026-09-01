@@ -141,15 +141,14 @@ void QwenModel::consume_decode(
 }
 
 GreedyStep QwenModel::greedy_decode(const std::uint32_t token, ModelDecodeState& state) const {
-    const std::vector<float> logits =
-        forward_decode(token, state).astype(MLX_FLOAT32).to_float32();
-    if (logits.size() != vocabulary_size_) {
-        throw std::runtime_error("language head output size mismatch");
-    }
-    const auto best = std::ranges::max_element(logits);
+    MlxArray logits = forward_decode(token, state);
+    if (logits.size() != vocabulary_size_) throw std::runtime_error("language head width mismatch");
+    MlxArray token_array = logits.argmax_all();
+    MlxArray selected_logit = MlxArray::take(logits, token_array).astype(MLX_FLOAT32);
+    selected_logit.eval();
     return {
-        .token = static_cast<std::uint32_t>(std::distance(logits.begin(), best)),
-        .logit = *best,
+        .token = token_array.item_uint32(),
+        .logit = selected_logit.item_float32(),
     };
 }
 
