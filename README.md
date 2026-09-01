@@ -199,6 +199,13 @@ retained 128-token Python fixture, counterposed warm runs improved from
 219--221 ms with identical output and 89/103 acceptance. Set
 `QWEN38_LAZY_MTP_DRAFT_CHAIN=0` for the serial-sync diagnostic rollback.
 
+Verifier row decisions likewise batch their argmax and selected-logit graphs
+behind one synchronization instead of synchronizing each row separately. The
+same fixture retained byte-identical output and 89/103 acceptance while warm
+throughput improved from 62.34--62.73 to 63.27--63.36 tok/s and total verifier
+time fell from 1686--1696 to 1666--1669 ms. Set
+`QWEN38_BATCH_VERIFY_ARGMAX=0` for the rowwise diagnostic rollback.
+
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the

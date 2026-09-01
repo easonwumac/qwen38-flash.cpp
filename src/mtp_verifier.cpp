@@ -1,6 +1,8 @@
 #include "qwen38/mtp_verifier.hpp"
 
+#include <cstdlib>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace qwen38 {
@@ -23,6 +25,33 @@ GreedyStep greedy_from_logits(const MlxArray& logits) {
         .token = token.item_uint32(),
         .logit = selected_logit.item_float32(),
     };
+}
+
+std::vector<GreedyStep> greedy_batch_from_logits(
+    const std::span<const MlxArray* const> logits) {
+    std::vector<MlxArray> tokens;
+    std::vector<MlxArray> selected_logits;
+    tokens.reserve(logits.size());
+    selected_logits.reserve(logits.size());
+    for (const MlxArray* row : logits) {
+        tokens.push_back(row->argmax_all());
+        selected_logits.push_back(
+            MlxArray::take(*row, tokens.back()).astype(MLX_FLOAT32));
+    }
+    std::vector<const MlxArray*> outputs;
+    outputs.reserve(selected_logits.size());
+    for (const MlxArray& selected : selected_logits) outputs.push_back(&selected);
+    MlxArray::eval_all(outputs);
+
+    std::vector<GreedyStep> result;
+    result.reserve(logits.size());
+    for (std::size_t row = 0; row < logits.size(); ++row) {
+        result.push_back({
+            .token = tokens[row].item_uint32(),
+            .logit = selected_logits[row].item_float32(),
+        });
+    }
+    return result;
 }
 
 } // namespace
@@ -72,9 +101,22 @@ MtpTargetVerification verify_mtp_target_layer_major_reference(
         .rows = {},
     };
     verification.rows.reserve(target.size());
-    for (TargetVerifyStep& row : target) {
+    const char* batch_argmax = std::getenv("QWEN38_BATCH_VERIFY_ARGMAX");
+    const bool batch_argmax_enabled =
+        batch_argmax == nullptr || std::string_view(batch_argmax) != "0";
+    std::vector<GreedyStep> greedy_rows;
+    if (batch_argmax_enabled) {
+        std::vector<const MlxArray*> logits;
+        logits.reserve(target.size());
+        for (const TargetVerifyStep& row : target) logits.push_back(&row.logits);
+        greedy_rows = greedy_batch_from_logits(logits);
+    }
+    for (std::size_t index = 0; index < target.size(); ++index) {
+        TargetVerifyStep& row = target[index];
         verification.rows.push_back({
-            .greedy = greedy_from_logits(row.logits),
+            .greedy = batch_argmax_enabled
+                ? greedy_rows[index]
+                : greedy_from_logits(row.logits),
             .pre_mixer_stream = std::move(row.pre_mixer_stream),
             .state_after = std::move(row.state_after),
         });
