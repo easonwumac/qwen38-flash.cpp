@@ -125,8 +125,9 @@ Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
 oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
 startup instead of failing partway through a request. A configured chunk 512
 is used only when the complete prompt has at most 512 tokens. Prompts through
-8,192 forwarded tokens automatically use chunk 256, while longer prompts use
-chunk 128 to retain the validated 64 GiB memory bound.
+6,144 forwarded tokens automatically use chunk 384, prompts through 8,192 use
+chunk 256, and longer prompts use chunk 128 to retain the validated 64 GiB
+memory bound.
 
 `QWEN38_SDPA_PREFILL=1` replaces the full-attention token loop with MLX causal
 SDPA at prompt widths of 16 or more. It retains the correct causal offset when
