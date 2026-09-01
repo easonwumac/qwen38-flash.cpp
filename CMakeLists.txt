@@ -148,6 +148,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-mtp-fixture-smoke src/mtp_fixture_smoke.cpp)
     target_link_libraries(qwen38-mtp-fixture-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-mtp-fixture-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+
+    add_executable(qwen38-mtp-head-compare src/mtp_head_compare.cpp)
+    target_link_libraries(qwen38-mtp-head-compare PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-mtp-head-compare PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-mtp-verifier-smoke src/mtp_verifier_smoke.cpp)
     target_link_libraries(qwen38-mtp-verifier-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-mtp-verifier-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
@@ -166,6 +170,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         qwen38-model-bench
         qwen38-mtp-head-smoke
         qwen38-mtp-fixture-smoke
+        qwen38-mtp-head-compare
         qwen38-mtp-verifier-smoke
         qwen38-mtp-verifier-bench
         qwen38-mtp-round-smoke
