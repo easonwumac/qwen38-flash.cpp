@@ -196,6 +196,20 @@ Qwen3.8 Flash Next MTP companion. It comes from the same lazy target graph as
 the logits, so speculative decoding will not require a second 48-layer forward
 or incorrectly consume the collapsed 2,560-wide hidden.
 
+The first native MTP-head path loads the retained Q8/group-64 REAP-288 sidecar
+and implements the documented one-row fusion contract: Q4 token embedding and
+the 10,240-wide target stream are independently delta-normalized/projected,
+broadcast-added across four streams, processed by the sidecar's attention/MoE
+layer, and collapsed through its own final mixer before the shared Q4 language
+head. Hyper-Connection projections are detected per tensor, because the
+sidecar combines Q8 projections with dense BF16 block-injection weights.
+
+This is not yet the speculative runtime. A guarded real-weight smoke produced a
+well-formed 10,240-wide recursive stream at 36.7 GiB peak RSS. Exact top-1/logit
+parity against the retained fold-capable P73 head remains the promotion gate;
+the current dense short-context attention implementation also lacks MTP QSA
+indexer state and cannot be used beyond its exact visible-history envelope.
+
 The first cold all-weight pass measured 6.64 s. With filesystem pages warm, the
 second token improved from 3.74 s to 1.56 s across repeated process runs. Peak
 footprint was about 41.3 GB. This is explicitly the unfused correctness graph,

@@ -35,18 +35,19 @@ public:
         const MlxArray& injection) const;
 
 private:
-    struct QuantizedProjection {
+    struct Projection {
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
+        bool quantized{false};
     };
 
-    [[nodiscard]] QuantizedProjection load_projection(
+    [[nodiscard]] Projection load_projection(
         MlxTensorStore& tensors,
         std::string_view name) const;
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
-        const QuantizedProjection& projection) const;
+        const Projection& projection) const;
 
     std::size_t hidden_size_;
     std::size_t stream_count_;
@@ -55,9 +56,9 @@ private:
     float rms_norm_epsilon_;
     bool with_injection_;
     MlxArray norm_weight_;
-    QuantizedProjection down_;
-    QuantizedProjection up_;
-    QuantizedProjection injection_;
+    Projection down_;
+    Projection up_;
+    Projection injection_;
 };
 
 } // namespace qwen38

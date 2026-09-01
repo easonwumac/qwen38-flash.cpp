@@ -43,7 +43,7 @@ HyperConnection::HyperConnection(
       up_(load_projection(tensors, std::string(prefix) + ".input_mix_weight_up")),
       injection_(with_injection
               ? load_projection(tensors, std::string(prefix) + ".block_inject_weight")
-              : QuantizedProjection{}) {
+              : Projection{}) {
     static_cast<void>(checked_dimension(hidden_size_, "hidden_size"));
     static_cast<void>(checked_dimension(stream_count_, "stream_count"));
     if (!(rms_norm_epsilon_ > 0.0F)) throw std::runtime_error("RMS norm epsilon must be positive");
@@ -57,20 +57,33 @@ HyperConnection::HyperConnection(
     norm_weight_ = MlxArray::add(raw_norm, ones);
 }
 
-HyperConnection::QuantizedProjection HyperConnection::load_projection(
+HyperConnection::Projection HyperConnection::load_projection(
     MlxTensorStore& tensors,
     const std::string_view name) const {
     const std::string base(name);
+    const bool quantized = tensors.manifest().weight_map().contains(base + ".scales");
+    if (!quantized) {
+        return {
+            .weight = tensors.tensor(base + ".weight"),
+            .scales = MlxArray{},
+            .biases = MlxArray{},
+            .quantized = false,
+        };
+    }
     return {
         .weight = tensors.tensor(base + ".weight"),
         .scales = tensors.tensor(base + ".scales"),
         .biases = tensors.tensor(base + ".biases"),
+        .quantized = true,
     };
 }
 
 MlxArray HyperConnection::project(
     const MlxArray& input,
-    const QuantizedProjection& projection) const {
+    const Projection& projection) const {
+    if (!projection.quantized) {
+        return MlxArray::matmul(input, projection.weight.transpose());
+    }
     return MlxArray::quantized_matmul(
         input, projection.weight, projection.scales, projection.biases, group_size_, bits_);
 }

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace qwen38 {
 
@@ -22,6 +23,11 @@ struct DecoderLayerState {
 class DecoderLayer final {
 public:
     DecoderLayer(MlxTensorStore& tensors, std::size_t layer_index, const ModelConfig& config);
+    DecoderLayer(
+        MlxTensorStore& tensors,
+        std::string prefix,
+        std::size_t layer_index,
+        const ModelConfig& config);
     ~DecoderLayer();
 
     [[nodiscard]] MlxArray forward_decode(

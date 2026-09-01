@@ -12,11 +12,21 @@ DecoderLayer::DecoderLayer(
     MlxTensorStore& tensors,
     const std::size_t layer_index,
     const ModelConfig& config)
+    : DecoderLayer(
+          tensors,
+          "language_model.model.layers." + std::to_string(layer_index),
+          layer_index,
+          config) {}
+
+DecoderLayer::DecoderLayer(
+    MlxTensorStore& tensors,
+    std::string prefix,
+    const std::size_t layer_index,
+    const ModelConfig& config)
     : layer_index_(layer_index),
       attention_hyper_connection_(
           tensors,
-          "language_model.model.layers." + std::to_string(layer_index) +
-              ".attn_hyper_connection",
+          prefix + ".attn_hyper_connection",
           config.hidden_size,
           config.hyper_connection_count,
           config.quantization_bits,
@@ -25,8 +35,7 @@ DecoderLayer::DecoderLayer(
           true),
       mlp_hyper_connection_(
           tensors,
-          "language_model.model.layers." + std::to_string(layer_index) +
-              ".mlp_hyper_connection",
+          prefix + ".mlp_hyper_connection",
           config.hidden_size,
           config.hyper_connection_count,
           config.quantization_bits,
@@ -35,7 +44,7 @@ DecoderLayer::DecoderLayer(
           true),
       mlp_(
           tensors,
-          "language_model.model.layers." + std::to_string(layer_index) + ".mlp",
+          prefix + ".mlp",
           config.expert_count,
           config.experts_per_token,
           config.quantization_bits,
@@ -44,7 +53,6 @@ DecoderLayer::DecoderLayer(
     if (layer_index >= config.layer_count || config.layer_types.size() != config.layer_count) {
         throw std::runtime_error("decoder layer index is out of range");
     }
-    const std::string prefix = "language_model.model.layers." + std::to_string(layer_index);
     if (config.layer_types[layer_index] == "linear_attention") {
         linear_attention_ = std::make_unique<GatedDeltaNet>(
             tensors, prefix + ".linear_attn", config);
