@@ -10,10 +10,11 @@ a UI and is not a wrapper around `mlx-serve`.
 
 > [!IMPORTANT]
 > The current milestone performs real end-to-end greedy generation through all
-> 48 layers and serves OpenAI-style completion APIs. It is a correctness runtime,
-> not yet the optimized release: the measured unfused decode path is far below
-> the 45 tok/s acceptance target, streaming and chunked prefill are outstanding,
-> and QSA contexts above the 2,048-token selection budget remain unsupported.
+> 48 layers, runs transactional depth-2 MTP when a companion is present, and
+> serves OpenAI-style completion APIs. It is not yet the optimized release: the
+> controlled decode gates remain unmet, streaming and chunked prefill are
+> outstanding, and QSA contexts above the 2,048-token selection budget remain
+> unsupported.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -84,7 +85,8 @@ explicitly unsupported until their exact template branches land.
 With both MLX and tokenizer options enabled, run the native inference server:
 
 ```bash
-./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model
+./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model \
+  --mtp-depth auto
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
@@ -92,6 +94,13 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Hello","max_tokens":1}'
 ```
+
+`--mtp-depth auto` is the default. It selects depth 2 when the model index has
+the Qwen3.8 MTP companion, otherwise it stays serial. `off`, `2`, `3`, and `4`
+are explicit alternatives. On a 64 GB Mac, auto mode also selects the verified
+`12:24` resident-expert safety tier unless `QWEN38_RESIDENT_EXPERT_RANGE` is
+already set, caps the MLX cache at 256 MiB, and falls back to serial after two
+consecutive zero-accept rounds.
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
 attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`

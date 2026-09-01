@@ -62,6 +62,10 @@ std::string completion_json(
         << (result.generation_ms > 0.0
                 ? 1000.0 * static_cast<double>(result.tokens.size()) / result.generation_ms
                 : 0.0)
+        << ",\"mtp\":{\"rounds\":" << result.mtp_rounds
+        << ",\"proposed\":" << result.mtp_proposed
+        << ",\"accepted\":" << result.mtp_accepted
+        << ",\"fallbacks\":" << result.mtp_fallbacks << "}"
         << "}}";
     return out.str();
 }

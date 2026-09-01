@@ -15,6 +15,10 @@ struct GenerationResult {
     double prompt_ms{0.0};
     double generation_ms{0.0};
     std::string finish_reason{"length"};
+    std::size_t mtp_rounds{0};
+    std::size_t mtp_proposed{0};
+    std::size_t mtp_accepted{0};
+    std::size_t mtp_fallbacks{0};
 };
 
 class InferenceEngine {

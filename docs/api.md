@@ -14,13 +14,14 @@ and concurrent scheduling remain later milestones.
 | `GET` | `/metrics` | Prometheus text metrics. |
 | `POST` | `/v1/chat/completions` | Native chat-template, tokenization, greedy generation, usage and timing. |
 | `POST` | `/v1/completions` | Native tokenization and greedy generation, usage and timing. |
-| `POST` | `/admin/cache/clear` | Clears engine-owned reusable caches; currently a no-op because decode state is request-owned. |
+| `POST` | `/admin/cache/clear` | Clears unused MLX allocator/cache blocks; active request state is serialized and never invalidated. |
 
 Completion requests accept a string `prompt` and `max_tokens` from 1 through
 256. Chat requests accept a non-empty OpenAI-style `messages` array and either
 `max_completion_tokens` or `max_tokens`. The current engine is greedy-only;
 `stream: true` returns 400. Responses include a non-standard `performance`
-object with prompt time, generation time, and measured generation tok/s.
+object with prompt time, generation time, measured generation tok/s, and an
+`mtp` object containing round, proposal, acceptance, and fallback counts.
 
 Errors use an OpenAI-style envelope:
 

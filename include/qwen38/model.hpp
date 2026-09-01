@@ -49,6 +49,9 @@ public:
     [[nodiscard]] TargetDecodeStep forward_decode_capture(
         std::uint32_t token,
         ModelDecodeState& state) const;
+    [[nodiscard]] MlxArray consume_decode_capture(
+        std::uint32_t token,
+        ModelDecodeState& state) const;
     [[nodiscard]] std::vector<TargetVerifyStep> forward_verify_layer_major_reference(
         std::span<const std::uint32_t> tokens,
         const ModelDecodeState& origin) const;

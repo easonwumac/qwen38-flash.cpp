@@ -112,6 +112,15 @@ TargetDecodeStep QwenModel::forward_decode_capture(
     };
 }
 
+MlxArray QwenModel::consume_decode_capture(
+    const std::uint32_t token,
+    ModelDecodeState& state) const {
+    HiddenDecodeStep hidden =
+        forward_hidden_decode_impl(token, state, nullptr, nullptr);
+    hidden.pre_mixer_stream.eval();
+    return std::move(hidden.pre_mixer_stream);
+}
+
 std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     const std::span<const std::uint32_t> tokens,
     const ModelDecodeState& origin) const {

@@ -68,5 +68,9 @@ int main() {
     passed &= check(tokenizer, "A__b... c", {32, 548, 65, 1076, 272});
     passed &= check(tokenizer, " \n \n  x", {30858, 220, 830});
     passed &= check(tokenizer, "x y", {87, 3966, 88});
+    if (tokenizer.decode(std::vector<std::uint32_t>{248068}) != "<think>") {
+        std::cerr << "non-special added token decode mismatch\n";
+        passed = false;
+    }
     return passed ? 0 : 1;
 }

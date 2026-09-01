@@ -55,6 +55,7 @@ void run_api_tests() {
         "/v1/completions", R"({"prompt":"hello","max_tokens":2})"));
     QWEN38_CHECK(completion.status == 200);
     QWEN38_CHECK(completion.body.find("answer") != std::string::npos);
+    QWEN38_CHECK(completion.body.find("\"mtp\":{\"rounds\":0") != std::string::npos);
     QWEN38_CHECK(engine.last_prompt == "hello");
     const auto chat = inference_api.handle(post(
         "/v1/chat/completions",

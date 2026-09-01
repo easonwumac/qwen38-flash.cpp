@@ -263,18 +263,19 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
 
     const Json tokenizer_config = Json::parse(read_text(model_directory / "tokenizer_config.json"));
     for (const auto& [id_text, description] : tokenizer_config.at("added_tokens_decoder").as_object()) {
-        if (!description.at("special").as_boolean()) continue;
         std::uint32_t id = 0;
         const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
         if (parsed.ec != std::errc{} || parsed.ptr != id_text.data() + id_text.size()) {
-            throw std::runtime_error("invalid special token ID");
+            throw std::runtime_error("invalid added token ID");
         }
         const std::string token = description.at("content").as_string();
-        result.special_to_id_.emplace(token, id);
-        result.special_ids_.insert(id);
         if (result.id_to_token_.size() <= id) result.id_to_token_.resize(static_cast<std::size_t>(id) + 1);
         result.id_to_token_[id] = token;
         result.token_to_id_[token] = id;
+        if (description.at("special").as_boolean()) {
+            result.special_to_id_.emplace(token, id);
+            result.special_ids_.insert(id);
+        }
     }
     return result;
 }

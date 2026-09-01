@@ -28,9 +28,19 @@ void handle_signal(const int) {
 
 void print_usage(const char* program) {
     std::cout
-        << "Usage: " << program << " [--host IPv4] [--port PORT] [--model PATH]\n"
+        << "Usage: " << program
+        << " [--host IPv4] [--port PORT] [--model PATH] [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
         << "qwen38-flash.cpp native inference server.\n";
+}
+
+std::optional<std::size_t> parse_mtp_depth(const std::string& value) {
+    if (value == "auto") return std::nullopt;
+    if (value == "off" || value == "0") return 0;
+    if (value == "2") return 2;
+    if (value == "3") return 3;
+    if (value == "4") return 4;
+    throw std::runtime_error("invalid MTP depth: " + value);
 }
 
 std::uint16_t parse_port(const std::string& value) {
@@ -48,6 +58,7 @@ std::uint16_t parse_port(const std::string& value) {
 int main(int argc, char** argv) {
     try {
         qwen38::ServerConfig config;
+        std::optional<std::size_t> mtp_depth;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
@@ -55,7 +66,8 @@ int main(int argc, char** argv) {
                 print_usage(argv[0]);
                 return EXIT_SUCCESS;
             }
-            if ((argument == "--host" || argument == "--port" || argument == "--model") &&
+            if ((argument == "--host" || argument == "--port" || argument == "--model" ||
+                 argument == "--mtp-depth") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
             }
@@ -65,6 +77,8 @@ int main(int argc, char** argv) {
                 config.port = parse_port(argv[++i]);
             } else if (argument == "--model") {
                 model_path = argv[++i];
+            } else if (argument == "--mtp-depth") {
+                mtp_depth = parse_mtp_depth(argv[++i]);
             } else {
                 throw std::runtime_error("unknown argument: " + argument);
             }
@@ -76,7 +90,10 @@ int main(int argc, char** argv) {
             runtime.begin_loading(*model_path);
             try {
 #ifdef QWEN38_HAS_INFERENCE
-                engine = std::make_unique<qwen38::NativeEngine>(*model_path);
+                qwen38::NativeEngineOptions engine_options;
+                engine_options.mtp_depth = mtp_depth;
+                engine = std::make_unique<qwen38::NativeEngine>(
+                    *model_path, engine_options);
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else
                 static_cast<void>(qwen38::ModelManifest::load(*model_path));
