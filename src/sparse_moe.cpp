@@ -42,6 +42,32 @@ std::shared_ptr<MlxMetalKernel> fused_down_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> fused_verify_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_gate_up_q4",
+            inputs,
+            "h",
+            moe_metal::gate_up_verify,
+            moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_verify_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_down_q4_qdot",
+            inputs,
+            "y",
+            moe_metal::down_verify,
+            moe_metal::header);
+    }();
+    return kernel;
+}
+
 std::size_t layer_index(const std::string_view prefix) {
     constexpr std::string_view marker = ".layers.";
     const std::size_t begin = prefix.find(marker);
@@ -319,6 +345,49 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 5) {
         throw std::runtime_error("MoE verifier requires shape [1,S,hidden], S=1..5");
     }
+    const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+    if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
+        std::string_view(device_router) == "1") {
+        const int rows = shape[1];
+        MlxArray gates = MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+        MlxArray partition = gates.argpartition_axis(-static_cast<int>(experts_per_token_), -1);
+        const std::vector<int> start{
+            0, 0, static_cast<int>(expert_count_ - experts_per_token_)};
+        const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};
+        const std::vector<int> strides{1, 1, 1};
+        MlxArray selected = partition.slice(start, stop, strides);
+        MlxArray experts = selected.reshape(
+            std::vector<int>{rows, static_cast<int>(experts_per_token_)});
+        MlxArray weights = MlxArray::take_along_axis(gates, selected, -1).reshape(
+            std::vector<int>{rows, static_cast<int>(experts_per_token_)});
+        if (normalize_topk_probability_) {
+            weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
+        }
+        weights = weights.astype(MLX_FLOAT32);
+        const MlxArray* gate_inputs[]{
+            &input,
+            &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
+            &expert_up_.weight, &expert_up_.scales, &expert_up_.biases,
+            &experts};
+        const std::vector<int> hidden_shape{rows, 10, 640};
+        const std::array<int, 3> gate_grid{
+            static_cast<int>(rows * 200 * 1024), 1, 1};
+        const std::array<int, 3> gate_threadgroup{1024, 1, 1};
+        MlxArray hidden = fused_verify_gate_up_kernel()->apply(
+            gate_inputs, hidden_shape, input.dtype(), gate_grid, gate_threadgroup);
+        const MlxArray* down_inputs[]{
+            &hidden,
+            &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
+            &experts, &weights};
+        const std::vector<int> output_shape{1, rows, 2560};
+        const std::array<int, 3> down_grid{
+            static_cast<int>(rows * 320 * 64), 1, 1};
+        const std::array<int, 3> down_threadgroup{64, 1, 1};
+        MlxArray routed = fused_verify_down_kernel()->apply(
+            down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
+        return MlxArray::add(routed, forward_shared(input));
+    }
+
     std::vector<MlxArray> routed;
     routed.reserve(static_cast<std::size_t>(shape[1]));
     for (int row = 0; row < shape[1]; ++row) {

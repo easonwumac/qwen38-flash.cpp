@@ -18,7 +18,7 @@ reference evidence, not measurements of this C++ runtime.
 | P60 corrected Q8 MTP | 44.36 decode tok/s versus 32.13 serial; about 60% acceptance | A broader workload can still benefit, but verifier cost and acceptance dominate | Different run and workload from P73 |
 | P268 serial Q4 sweep | 34.359 all-control median; candidate 34.392 | Shape-specific QMV tuning alone does not move end-to-end throughput | One selected projection geometry |
 | Current C++ runtime | about 31.0--31.3 warm decode tok/s; about 35.6 GiB peak | Correct full-model C++ baseline with bounded resident expert tier | No MTP, prefix cache, or complete long-context QSA yet |
-| C++ dense/state/shared-MoE-batched verifier | 60.37 ms for three rows versus 94.90 ms serial; 1.572x; exact token and rollback-continuation parity | Layer-major scheduling plus batched state projections and shared expert improve verifier cost | Depth 2, empty origin, one interleaved A/B/B/A run; routed experts remain row-serial and round cost is still above P73 |
+| C++ fully batched-dispatch verifier | 59.24 ms for three rows versus 94.98 ms serial; 1.603x; exact token and rollback-continuation parity | Layer-major scheduling plus S-row Q4 routed-expert Metal dispatch improves verifier cost | Depth 2, empty origin, one interleaved A/B/B/A run; routed expert weights are still reread per row and round cost is above P73 |
 
 P73's 59.866 tok/s is explained by `(1 + 1.57) / 43.95 ms`, approximately
 58.5 tok/s. It is not evidence of a universal 59 tok/s target path. The serial
