@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(qwen38_core
     src/api.cpp
+    src/chat_template.cpp
     src/http_server.cpp
     src/json.cpp
     src/mapped_file.cpp
@@ -103,6 +104,7 @@ if(QWEN38_BUILD_TESTS)
 
     add_executable(qwen38-tests
         tests/api_test.cpp
+        tests/chat_template_test.cpp
         tests/json_test.cpp
         tests/model_manifest_test.cpp
         tests/runtime_test.cpp

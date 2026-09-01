@@ -2,6 +2,7 @@
 
 int main() {
     run_json_tests();
+    run_chat_template_tests();
     run_safetensors_tests();
     run_model_manifest_tests();
     run_runtime_tests();

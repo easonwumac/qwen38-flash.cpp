@@ -57,6 +57,11 @@ BPE merges, NFC normalization, special tokens, and decoding in C++. Real-model
 parity fixtures cover English, CJK, Korean, code, whitespace, contractions,
 emoji, CRLF, combining marks, and chat control tokens.
 
+The core also implements the checkpoint's text chat-template behavior for system,
+user, and assistant turns, including default/low/medium reasoning controls,
+thinking preservation, and generation prompts. Tool and multimodal content remain
+explicitly unsupported until their exact template branches land.
+
 Run the server:
 
 ```bash

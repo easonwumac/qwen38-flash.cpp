@@ -22,6 +22,7 @@ inline void check(const bool condition, std::string_view expression, std::string
     ::qwen38::test::check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void run_api_tests();
+void run_chat_template_tests();
 void run_json_tests();
 void run_model_manifest_tests();
 void run_runtime_tests();
