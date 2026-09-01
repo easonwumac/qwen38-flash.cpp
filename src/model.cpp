@@ -19,6 +19,17 @@ int dimension(const std::size_t value, const char* name) {
     return static_cast<int>(value);
 }
 
+std::size_t verify_barrier_stride() {
+    const char* raw = std::getenv("QWEN38_VERIFY_BARRIER_STRIDE");
+    if (raw == nullptr) return 16;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed < 1 || parsed > 48) {
+        throw std::runtime_error("verify barrier stride must be between 1 and 48");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
     if (rows.empty()) throw std::runtime_error("cannot concatenate an empty model batch");
     MlxArray result = rows.front().share();
@@ -220,6 +231,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         checkpoints.back().token_count = origin.token_count + row + 1;
     }
 
+    const std::size_t barrier_stride = verify_barrier_stride();
+
     for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
         std::chrono::steady_clock::time_point layer_started;
         if (layer_ms != nullptr) layer_started = std::chrono::steady_clock::now();
@@ -229,12 +242,15 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         for (std::size_t row = 0; row < tokens.size(); ++row) {
             checkpoints[row].layers[layer] = std::move(layer_checkpoints[row]);
         }
-        // One graph barrier per layer retains bounded memory without the S
-        // extra synchronization points of evaluating each row separately.
-        std::vector<const MlxArray*> layer_outputs;
-        layer_outputs.reserve(streams.size());
-        for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
-        MlxArray::eval_all(layer_outputs);
+        // Adjacent layers share one lazy graph to remove synchronization
+        // overhead. The default 16-layer group is memory- and parity-gated;
+        // an explicit stride keeps a clean diagnostic rollback.
+        if ((layer + 1) % barrier_stride == 0 || layer + 1 == layers_.size()) {
+            std::vector<const MlxArray*> layer_outputs;
+            layer_outputs.reserve(streams.size());
+            for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
+            MlxArray::eval_all(layer_outputs);
+        }
         if (layer_ms != nullptr) {
             layer_ms->push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - layer_started).count());

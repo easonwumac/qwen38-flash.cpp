@@ -122,6 +122,11 @@ to keep top-k selection and routing weights on the GPU. `QWEN38_COMPILE_LAYER=1`
 compiles each non-PLE linear decoder layer after its first stateful step. Together
 with the resident tier below, these form the current fastest verified path.
 
+MTP verification evaluates the 48-layer lazy graph in three 16-layer groups by
+default. This preserves the retained S-row numerics while removing most
+per-layer synchronization overhead. `QWEN38_VERIFY_BARRIER_STRIDE=1` is the
+diagnostic rollback; accepted experimental values are 1 through 48.
+
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. Full-model smoke and benchmark binaries
 refuse unguarded execution. The default guard refuses to start below
