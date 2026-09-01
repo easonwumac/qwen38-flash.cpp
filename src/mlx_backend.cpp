@@ -13,20 +13,30 @@ void check(const int status, const char* operation) {
     }
 }
 
-class Stream final {
+class SharedStream final {
 public:
-    Stream() : value_(mlx_default_gpu_stream_new()) {
+    SharedStream() : value_(mlx_default_gpu_stream_new()) {
         if (value_.ctx == nullptr) {
             throw std::runtime_error("MLX did not provide a default GPU stream");
         }
     }
-    ~Stream() { static_cast<void>(mlx_stream_free(value_)); }
-    Stream(const Stream&) = delete;
-    Stream& operator=(const Stream&) = delete;
+    ~SharedStream() { static_cast<void>(mlx_stream_free(value_)); }
+    SharedStream(const SharedStream&) = delete;
+    SharedStream& operator=(const SharedStream&) = delete;
     [[nodiscard]] mlx_stream get() const noexcept { return value_; }
 
 private:
     mlx_stream value_{};
+};
+
+[[nodiscard]] mlx_stream default_gpu_stream() {
+    static const SharedStream stream;
+    return stream.get();
+}
+
+class Stream final {
+public:
+    [[nodiscard]] mlx_stream get() const { return default_gpu_stream(); }
 };
 
 } // namespace
@@ -70,7 +80,7 @@ MlxMetalKernel::MlxMetalKernel(
         outputs,
         std::string(source).c_str(),
         std::string(header).c_str(),
-        false,
+        true,
         false);
     static_cast<void>(mlx_vector_string_free(inputs));
     static_cast<void>(mlx_vector_string_free(outputs));

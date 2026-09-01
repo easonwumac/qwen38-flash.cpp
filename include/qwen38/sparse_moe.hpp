@@ -59,8 +59,8 @@ private:
     QuantizedProjection shared_up_;
     QuantizedProjection shared_down_;
     MlxArray shared_router_weight_;
-    std::unique_ptr<MlxMetalKernel> fused_gate_up_;
-    std::unique_ptr<MlxMetalKernel> fused_down_;
+    std::shared_ptr<MlxMetalKernel> fused_gate_up_;
+    std::shared_ptr<MlxMetalKernel> fused_down_;
 };
 
 } // namespace qwen38

@@ -94,8 +94,14 @@ curl -X POST http://127.0.0.1:11438/v1/completions \
 ```
 
 For Q4/gs64 REAP-288 developer testing, `QWEN38_FUSED_MOE=1` enables the
-attributed two-dispatch selected-MoE Metal path. It remains opt-in while
-sustained quality and thermal benchmarking continues.
+attributed two-dispatch selected-MoE Metal research path. It is not currently a
+speed recommendation: the first valid 288-expert end-to-end A/B was slower than
+the stable route. It remains available for kernel development only.
+
+On unified-memory Macs, run full-model experiments through
+`devtools/memory_guard.py -- COMMAND`. The default guard refuses to start below
+42 GiB reclaimable memory and terminates the child before it exceeds 38 GiB RSS
+or leaves less than 8 GiB reclaimable, preventing benchmark-driven OOMs.
 
 Validate a model manifest and lazily map one tensor without loading all weights:
 

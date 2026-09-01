@@ -23,6 +23,24 @@ int checked_int(const std::size_t value, const char* name) {
     return static_cast<int>(value);
 }
 
+std::shared_ptr<MlxMetalKernel> fused_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_gate_up_q4", inputs, "h", moe_metal::gate_up, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_down_q4", inputs, "y", moe_metal::down, moe_metal::header);
+    }();
+    return kernel;
+}
+
 } // namespace
 
 SparseMoe::SparseMoe(
@@ -52,21 +70,10 @@ SparseMoe::SparseMoe(
     }
     const char* fused = std::getenv("QWEN38_FUSED_MOE");
     if (fused != nullptr && std::string_view(fused) == "1" &&
-        expert_count_ == 512 && experts_per_token_ == 10 && bits_ == 4 && group_size_ == 64) {
-        const char* gate_inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts"};
-        fused_gate_up_ = std::make_unique<MlxMetalKernel>(
-            "qwen38_moe_gate_up_q4",
-            gate_inputs,
-            "h",
-            moe_metal::gate_up,
-            moe_metal::header);
-        const char* down_inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
-        fused_down_ = std::make_unique<MlxMetalKernel>(
-            "qwen38_moe_down_q4",
-            down_inputs,
-            "y",
-            moe_metal::down,
-            moe_metal::header);
+        expert_count_ >= experts_per_token_ && experts_per_token_ == 10 && bits_ == 4 &&
+        group_size_ == 64) {
+        fused_gate_up_ = fused_gate_up_kernel();
+        fused_down_ = fused_down_kernel();
     }
 }
 

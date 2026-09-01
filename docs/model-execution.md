@@ -81,16 +81,22 @@ step from the 1.3--1.6 second range to 2.30 seconds, so it was rejected.
 An opt-in two-dispatch Q4 Metal route is available with
 `QWEN38_FUSED_MOE=1`. Its structure is adapted from MTPLX's Apache-2.0
 `moe_glu_decode` work, modified to consume the checkpoint's separate gate/up
-packs. On the layer-0 fixture it retained the same expert IDs and output
-checksum at ten-digit reporting precision. A cold-process full-model A/B kept
-the exact `9419 -> 11 -> 271` trajectory and final logits while measuring
-2175.9 ms versus 1294.5 ms for token two (1.68x). This result is directionally
-useful but remains opt-in because filesystem cache and memory-pressure variance
-is high. A more representative fresh-server, eight-token greedy HTTP A/B on a
-64 GB M5 Pro used prompt `Hello`, an empty context cache, and the retained
-REAP-288 Q4 checkpoint. Output text was byte-identical; the stable route
-measured 1.050 tok/s and fused MoE measured 1.399 tok/s (+33.2%). Thermals were
-not pinned, so this is a development receipt rather than a release claim.
+packs. An initial guard incorrectly required 512 experts, so early 1.68x and
+1.33x observations did not engage the kernel and were invalidated. With the
+correct 288-expert guard and row-contiguous MLX contract, the layer-0 checksum
+is `0.09534358978` versus stable `0.09703278542`; the full model retains the
+`9419 -> 11 -> 271` trajectory and matches the independent oracle's reported
+logits (`13.6875`, `14.875`). A fresh-server eight-token greedy HTTP run on a
+64 GB M5 Pro, prompt `Hello`, empty cache, produced byte-identical text but
+measured 0.980 tok/s versus the stable route's earlier 1.050 tok/s. The fused
+route is therefore a research hook, not a speed recommendation.
+
+Direct custom-kernel access also requires row-contiguous inputs. Disabling that
+MLX contract caused a Metal watchdog timeout on later layers even after the
+40 GB trunk had been read into the filesystem cache. Full-model experiments now
+run through `devtools/memory_guard.py`; sequential whole-trunk prewarming is no
+longer used because it can combine filesystem cache and MLX residency into
+unsafe unified-memory pressure.
 
 ## Stateful Gated DeltaNet decode
 
