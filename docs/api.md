@@ -41,7 +41,11 @@ boundary. The `requests.cancelled` status field and
 `qwen38_requests_cancelled_total` metric count these requests.
 Non-streaming responses include a non-standard `performance` object with prompt
 time, generation time, measured generation tok/s, and an `mtp` object containing
-round, proposal, acceptance, and fallback counts.
+round, proposal, acceptance, and fallback counts. The four-element
+`proposed_by_position` and `accepted_by_position` arrays count draft positions
+one through four; unused positions remain zero. They include learned and history
+draft rounds, so disable history drafting when using them to tune the learned
+depth policy.
 `mtp.profitability_cache_keep` marks a replay that retained cumulatively
 profitable MTP despite a late fallback; `mtp.profitability_cache_skip` marks a
 cached losing probe that was skipped.

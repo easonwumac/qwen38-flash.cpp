@@ -71,3 +71,9 @@ cap over the P271 probe policy rather than an instruction to start every round
 at depth 3. The benchmark now records promotion/demotion counts and can require
 promotion explicitly, preventing a depth-2-only run from passing solely on
 aggregate acceptance.
+
+The report also aggregates four-element `proposed_by_position`,
+`accepted_by_position`, and `acceptance_by_position` vectors. These distinguish
+an inexpensive first/second-position drafter from a genuinely profitable third
+or fourth position. Run with `QWEN38_HISTORY_DRAFT=0` when using the vectors to
+tune learned-MTP depth; otherwise they intentionally include history rounds too.

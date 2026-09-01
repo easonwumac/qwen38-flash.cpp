@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -23,6 +24,8 @@ struct GenerationResult {
     std::size_t mtp_rounds{0};
     std::size_t mtp_proposed{0};
     std::size_t mtp_accepted{0};
+    std::array<std::size_t, 4> mtp_proposed_by_position{};
+    std::array<std::size_t, 4> mtp_accepted_by_position{};
     std::size_t mtp_fallbacks{0};
     std::size_t mtp_final_depth{0};
     std::size_t mtp_promotions{0};

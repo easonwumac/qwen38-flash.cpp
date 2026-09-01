@@ -437,6 +437,10 @@ GenerationResult NativeEngine::complete_impl(
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
+        for (std::size_t position = 0; position < step.draft_tokens.size(); ++position) {
+            ++result.mtp_proposed_by_position[position];
+            if (position < step.accepted) ++result.mtp_accepted_by_position[position];
+        }
         result.mtp_draft_ms += step.draft_ms;
         result.mtp_verify_ms += step.verify_ms;
         result.mtp_commit_ms += step.commit_ms;

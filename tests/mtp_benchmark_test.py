@@ -25,6 +25,8 @@ def fixture_response(tokens: int = 128, tps: float = 65.0) -> dict:
                 "rounds": 37,
                 "proposed": 103,
                 "accepted": 89,
+                "proposed_by_position": [37, 37, 29, 0],
+                "accepted_by_position": [34, 33, 22, 0],
                 "fallbacks": 0,
                 "depth": 3,
                 "promotions": 1,
@@ -40,6 +42,8 @@ class MtpBenchmarkTest(unittest.TestCase):
             fixture_response(), requested_tokens=128, wall_ms=2200.0
         )
         self.assertEqual(result.accepted, 89)
+        self.assertEqual(result.proposed_by_position, (37, 37, 29, 0))
+        self.assertEqual(result.accepted_by_position, (34, 33, 22, 0))
         self.assertEqual(result.promotions, 1)
         self.assertAlmostEqual(result.acceptance, 89 / 103)
         self.assertEqual(result.completion_tokens, 128)
@@ -54,6 +58,16 @@ class MtpBenchmarkTest(unittest.TestCase):
         summary = mtp_benchmark.summarize(samples)
         self.assertEqual(summary["median_tps"], 65.0)
         self.assertEqual(summary["paths"], ["37:89/103:d3:p1/m0"])
+        self.assertEqual(summary["proposed_by_position"], [111, 111, 87, 0])
+        self.assertEqual(summary["accepted_by_position"], [102, 99, 66, 0])
+
+    def test_rejects_invalid_position_counts(self) -> None:
+        response = fixture_response()
+        response["performance"]["mtp"]["accepted_by_position"] = [1, 2, 3]
+        with self.assertRaisesRegex(ValueError, "four non-negative integers"):
+            mtp_benchmark.measurement_from_response(
+                response, requested_tokens=128, wall_ms=2200.0
+            )
 
     def test_gate_detects_speed_acceptance_and_missing_mtp(self) -> None:
         sample = mtp_benchmark.measurement_from_response(

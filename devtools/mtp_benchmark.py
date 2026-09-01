@@ -29,6 +29,8 @@ class Measurement:
     rounds: int
     proposed: int
     accepted: int
+    proposed_by_position: tuple[int, int, int, int]
+    accepted_by_position: tuple[int, int, int, int]
     fallbacks: int
     depth: int
     promotions: int
@@ -77,6 +79,17 @@ def measurement_from_response(
         usage = response["usage"]
         performance = response["performance"]
         mtp = performance["mtp"]
+
+        def position_counts(name: str) -> tuple[int, int, int, int]:
+            raw = mtp.get(name, [0, 0, 0, 0])
+            if (
+                not isinstance(raw, list)
+                or len(raw) != 4
+                or any(not isinstance(value, int) or value < 0 for value in raw)
+            ):
+                raise ValueError(f"mtp.{name} must contain four non-negative integers")
+            return raw[0], raw[1], raw[2], raw[3]
+
         return Measurement(
             requested_tokens=requested_tokens,
             completion_tokens=int(usage["completion_tokens"]),
@@ -85,6 +98,8 @@ def measurement_from_response(
             rounds=int(mtp["rounds"]),
             proposed=int(mtp["proposed"]),
             accepted=int(mtp["accepted"]),
+            proposed_by_position=position_counts("proposed_by_position"),
+            accepted_by_position=position_counts("accepted_by_position"),
             fallbacks=int(mtp["fallbacks"]),
             depth=int(mtp["depth"]),
             promotions=int(mtp.get("promotions", 0)),
@@ -131,12 +146,26 @@ def summarize(samples: list[Measurement]) -> dict[str, Any]:
         raise ValueError("at least one sample is required")
     tps = [sample.generation_tps for sample in samples]
     acceptance = [sample.acceptance for sample in samples]
+    proposed_by_position = [
+        sum(sample.proposed_by_position[position] for sample in samples)
+        for position in range(4)
+    ]
+    accepted_by_position = [
+        sum(sample.accepted_by_position[position] for sample in samples)
+        for position in range(4)
+    ]
     return {
         "samples": len(samples),
         "median_tps": statistics.median(tps),
         "min_tps": min(tps),
         "max_tps": max(tps),
         "median_acceptance": statistics.median(acceptance),
+        "proposed_by_position": proposed_by_position,
+        "accepted_by_position": accepted_by_position,
+        "acceptance_by_position": [
+            accepted / proposed if proposed else 0.0
+            for accepted, proposed in zip(accepted_by_position, proposed_by_position)
+        ],
         "paths": sorted(
             {
                 f"{sample.rounds}:{sample.accepted}/{sample.proposed}:d{sample.depth}:"

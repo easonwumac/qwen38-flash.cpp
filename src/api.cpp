@@ -215,6 +215,16 @@ std::string completion_json(
         << ",\"mtp\":{\"rounds\":" << result.mtp_rounds
         << ",\"proposed\":" << result.mtp_proposed
         << ",\"accepted\":" << result.mtp_accepted
+        << ",\"proposed_by_position\":["
+        << result.mtp_proposed_by_position[0] << ','
+        << result.mtp_proposed_by_position[1] << ','
+        << result.mtp_proposed_by_position[2] << ','
+        << result.mtp_proposed_by_position[3] << ']'
+        << ",\"accepted_by_position\":["
+        << result.mtp_accepted_by_position[0] << ','
+        << result.mtp_accepted_by_position[1] << ','
+        << result.mtp_accepted_by_position[2] << ','
+        << result.mtp_accepted_by_position[3] << ']'
         << ",\"fallbacks\":" << result.mtp_fallbacks
         << ",\"depth\":" << result.mtp_final_depth
         << ",\"promotions\":" << result.mtp_promotions
