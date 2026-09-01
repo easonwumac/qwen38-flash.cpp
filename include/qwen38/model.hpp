@@ -57,7 +57,9 @@ public:
         ModelDecodeState& state) const;
     [[nodiscard]] std::vector<TargetVerifyStep> forward_verify_layer_major_reference(
         std::span<const std::uint32_t> tokens,
-        const ModelDecodeState& origin) const;
+        const ModelDecodeState& origin,
+        std::vector<double>* layer_ms = nullptr,
+        double* head_ms = nullptr) const;
     void consume_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,

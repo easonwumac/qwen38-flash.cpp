@@ -180,7 +180,9 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
 
 std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     const std::span<const std::uint32_t> tokens,
-    const ModelDecodeState& origin) const {
+    const ModelDecodeState& origin,
+    std::vector<double>* layer_ms,
+    double* head_ms) const {
     if (tokens.empty() || tokens.size() > 5) {
         throw std::runtime_error("target verify row count must be between 1 and 5");
     }
@@ -190,6 +192,11 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     if (origin.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
         throw std::runtime_error("target verify token count overflow");
     }
+    if (layer_ms != nullptr) {
+        layer_ms->clear();
+        layer_ms->reserve(layers_.size());
+    }
+    if (head_ms != nullptr) *head_ms = 0.0;
 
     std::vector<MlxArray> streams;
     streams.reserve(tokens.size());
@@ -202,6 +209,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     }
 
     for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
+        std::chrono::steady_clock::time_point layer_started;
+        if (layer_ms != nullptr) layer_started = std::chrono::steady_clock::now();
         std::vector<DecoderLayerState> layer_checkpoints;
         streams = layers_[layer]->forward_verify_dense_batched(
             std::move(streams), tokens, origin.layers[layer], layer_checkpoints);
@@ -214,6 +223,10 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         layer_outputs.reserve(streams.size());
         for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
         MlxArray::eval_all(layer_outputs);
+        if (layer_ms != nullptr) {
+            layer_ms->push_back(std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - layer_started).count());
+        }
     }
 
     std::vector<TargetVerifyStep> result;
@@ -238,6 +251,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         return result;
     }
 
+    std::chrono::steady_clock::time_point head_started;
+    if (head_ms != nullptr) head_started = std::chrono::steady_clock::now();
     MlxArray stream_batch = concatenate_sequence_rows(streams);
     HyperConnectionRead final = final_mixer_.read(stream_batch);
     MlxArray logits_batch = MlxArray::quantized_matmul(
@@ -248,6 +263,10 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         group_size_,
         bits_);
     logits_batch.eval();
+    if (head_ms != nullptr) {
+        *head_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - head_started).count();
+    }
     for (std::size_t row = 0; row < tokens.size(); ++row) {
         result.push_back({
             .logits = slice_sequence_row(logits_batch, row),

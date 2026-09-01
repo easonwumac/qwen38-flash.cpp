@@ -1,6 +1,7 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_verifier.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
@@ -74,11 +75,29 @@ int main(int argc, char** argv) {
         const double control_ms = (control_a.milliseconds + control_b.milliseconds) / 2.0;
         const double candidate_ms =
             (candidate_a.milliseconds + candidate_b.milliseconds) / 2.0;
+        static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "1", 1));
+        std::vector<double> layer_ms;
+        double head_ms = 0.0;
+        const std::vector<std::uint32_t> profile_tokens{9419, 11, 271};
+        static_cast<void>(model.forward_verify_layer_major_reference(
+            profile_tokens, origin, &layer_ms, &head_ms));
+        double linear_ms = 0.0;
+        double full_ms = 0.0;
+        for (std::size_t layer = 0; layer < layer_ms.size(); ++layer) {
+            (layer + 1) % 4 == 0 ? full_ms += layer_ms[layer] : linear_ms += layer_ms[layer];
+        }
+        const auto slowest = std::max_element(layer_ms.begin(), layer_ms.end());
         std::cout << "{\"depth\":2,\"rows\":3,\"serial_ms\":" << serial_ms
                   << ",\"separate_head_ms\":" << control_ms
                   << ",\"batched_head_ms\":" << candidate_ms
                   << ",\"head_speedup\":" << control_ms / candidate_ms
                   << ",\"serial_speedup\":" << serial_ms / candidate_ms
+                  << ",\"profile\":{\"linear_layers_ms\":" << linear_ms
+                  << ",\"full_layers_ms\":" << full_ms
+                  << ",\"head_ms\":" << head_ms
+                  << ",\"slowest_layer\":"
+                  << std::distance(layer_ms.begin(), slowest)
+                  << ",\"slowest_layer_ms\":" << *slowest << "}"
                   << ",\"parity\":true}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
