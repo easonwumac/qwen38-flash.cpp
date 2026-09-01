@@ -144,6 +144,24 @@ can round later channels by one ULP. The second-token component path measures
 about 1.3--1.7 ms warm. Persistent parallel reads and fusion remain optimization
 work, but PLE is no longer missing from the correctness graph.
 
+## Composed decoder layer
+
+The native decoder layer now composes the retained execution order rather than
+testing blocks only in isolation: optional PLE injection, attention
+Hyper-Connection read/write, stateful GDN or full attention, then MoE
+Hyper-Connection read/write. Real two-token smoke runs cover all three distinct
+layer shapes in the checkpoint:
+
+| Layer | Shape | Warm second-token latency |
+|---:|---|---:|
+| 0 | GDN + MoE | 2.1--3.0 ms |
+| 1 | PLE + GDN + MoE | 2.4--2.7 ms |
+| 3 | full attention + MoE | 2.0--3.0 ms |
+
+These are isolated component numbers with hot filesystem pages, not end-to-end
+throughput claims. They establish state continuity and graph composition before
+the 48-layer model loop is optimized.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

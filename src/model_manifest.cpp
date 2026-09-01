@@ -129,6 +129,13 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     if (result.config_.layer_types.size() != result.config_.layer_count) {
         throw std::runtime_error("layer_types count does not match num_hidden_layers");
     }
+    for (const Json& layer_id : text.at("ple_layer_ids").as_array()) {
+        const std::size_t one_based = size_value(layer_id, "ple_layer_ids");
+        if (one_based == 0 || one_based > result.config_.layer_count) {
+            throw std::runtime_error("PLE layer id is out of range");
+        }
+        result.config_.ple_layer_ids.push_back(one_based);
+    }
 
     const Json* quantization = root.find("quantization");
     if (quantization == nullptr) quantization = root.find("quantization_config");

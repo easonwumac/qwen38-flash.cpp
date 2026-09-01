@@ -53,6 +53,7 @@ struct ModelConfig {
     std::uint32_t end_of_sequence_token{0};
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
+    std::vector<std::size_t> ple_layer_ids;
 };
 
 class ModelManifest final {
