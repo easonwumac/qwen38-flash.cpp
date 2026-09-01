@@ -44,14 +44,18 @@ int main(int argc, char** argv) {
         }
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
-        const std::vector<std::uint32_t> drafts{11, 271};
-        const qwen38::ModelDecodeState origin = model.make_state();
+        const bool seeded_origin = std::getenv("QWEN38_VERIFY_SEEDED_ORIGIN") != nullptr;
+        const std::vector<std::uint32_t> drafts = seeded_origin
+            ? std::vector<std::uint32_t>{271, 40}
+            : std::vector<std::uint32_t>{11, 271};
+        qwen38::ModelDecodeState origin = model.make_state();
+        const std::uint32_t current = seeded_origin ? 11 : 9419;
+        if (seeded_origin) model.consume_decode(9419, origin);
         const auto serial = [&] {
-            return qwen38::verify_mtp_target_serial_oracle(model, 9419, drafts, origin);
+            return qwen38::verify_mtp_target_serial_oracle(model, current, drafts, origin);
         };
         const auto layer_major = [&] {
-            return qwen38::verify_mtp_target_layer_major_reference(
-                model, 9419, drafts, origin);
+            return qwen38::verify_mtp_target_layer_major_reference(model, current, drafts, origin);
         };
 
         static_cast<void>(measure(serial));
@@ -78,7 +82,9 @@ int main(int argc, char** argv) {
         static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "1", 1));
         std::vector<double> layer_ms;
         double head_ms = 0.0;
-        const std::vector<std::uint32_t> profile_tokens{9419, 11, 271};
+        const std::vector<std::uint32_t> profile_tokens = seeded_origin
+            ? std::vector<std::uint32_t>{11, 271, 40}
+            : std::vector<std::uint32_t>{9419, 11, 271};
         static_cast<void>(model.forward_verify_layer_major_reference(
             profile_tokens, origin, &layer_ms, &head_ms));
         double linear_ms = 0.0;
