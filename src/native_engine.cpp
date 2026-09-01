@@ -120,6 +120,18 @@ bool use_long_history_depth_four(const std::size_t token_count) {
     return batch_verify == nullptr || std::string_view(batch_verify) != "0";
 }
 
+bool cache_completed_mtp_as_profitable(
+    const std::size_t rounds,
+    const std::size_t accepted,
+    const std::size_t fallbacks) {
+    const char* cumulative =
+        std::getenv("QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE");
+    if (cumulative == nullptr || std::string_view(cumulative) != "1") {
+        return fallbacks == 0;
+    }
+    return cache_mtp_as_profitable(rounds, accepted, fallbacks);
+}
+
 std::size_t complete_utf8_prefix(const std::string_view text) {
     std::size_t offset = 0;
     while (offset < text.size()) {
@@ -212,6 +224,7 @@ GenerationResult NativeEngine::complete_impl(
         : mtp_head_->make_state();
     std::optional<MlxArray> previous_target_stream;
     std::optional<bool> cached_mtp_profitability;
+    bool cached_mtp_cumulative_keep = false;
     std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
     const std::size_t request_prefill_chunk =
@@ -238,6 +251,8 @@ GenerationResult NativeEngine::complete_impl(
         if (prefill_offset == prefill_rows &&
             prefix_cache_->mtp_profitability_current_token == prompt_tokens.back()) {
             cached_mtp_profitability = prefix_cache_->mtp_profitable;
+            cached_mtp_cumulative_keep =
+                prefix_cache_->mtp_cumulative_profitability_keep;
         }
     }
     for (std::size_t offset = prefill_offset; offset < prefill_rows;
@@ -295,6 +310,7 @@ GenerationResult NativeEngine::complete_impl(
             .pending_mtp_tokens = {},
             .mtp_profitable = std::nullopt,
             .mtp_profitability_current_token = std::nullopt,
+            .mtp_cumulative_profitability_keep = false,
         });
     }
     result.tokens.reserve(max_tokens);
@@ -315,6 +331,8 @@ GenerationResult NativeEngine::complete_impl(
         cached_mtp_profitability.value_or(true);
     result.mtp_profitability_cache_skip =
         cached_mtp_profitability.has_value() && !*cached_mtp_profitability;
+    result.mtp_profitability_cache_keep =
+        cached_mtp_profitability.value_or(false) && cached_mtp_cumulative_keep;
     if (result.mtp_profitability_cache_skip) {
         const char* mtp_trace = std::getenv("QWEN38_MTP_TRACE");
         if (mtp_trace != nullptr && std::string_view(mtp_trace) == "1") {
@@ -447,8 +465,11 @@ GenerationResult NativeEngine::complete_impl(
     if (prefix_cache_ != nullptr && prefill_rows == prefix_cache_->tokens.size() &&
         std::equal(prefix_cache_->tokens.begin(), prefix_cache_->tokens.end(),
             prompt_tokens.begin()) && result.mtp_rounds >= 2) {
-        prefix_cache_->mtp_profitable = result.mtp_fallbacks == 0;
+        prefix_cache_->mtp_profitable = cache_completed_mtp_as_profitable(
+            result.mtp_rounds, result.mtp_accepted, result.mtp_fallbacks);
         prefix_cache_->mtp_profitability_current_token = prompt_tokens.back();
+        prefix_cache_->mtp_cumulative_profitability_keep =
+            result.mtp_fallbacks != 0 && *prefix_cache_->mtp_profitable;
     }
     const std::size_t complete_token_count = prompt_tokens.size() + result.tokens.size();
     const bool target_matches_output = stopped_on_terminator
@@ -472,7 +493,8 @@ GenerationResult NativeEngine::complete_impl(
             consumed_tokens.end(), result.tokens.begin(), result.tokens.end());
         consumed_tokens.resize(state.token_count);
         const std::optional<bool> extended_profitability = result.mtp_rounds >= 2
-            ? std::optional<bool>(result.mtp_fallbacks == 0)
+            ? std::optional<bool>(cache_completed_mtp_as_profitable(
+                  result.mtp_rounds, result.mtp_accepted, result.mtp_fallbacks))
             : std::nullopt;
         prefix_cache_ = std::make_unique<PrefixCacheEntry>(PrefixCacheEntry{
             .tokens = std::move(consumed_tokens),
@@ -487,6 +509,8 @@ GenerationResult NativeEngine::complete_impl(
             .mtp_profitability_current_token = extended_profitability.has_value()
                 ? std::optional<std::uint32_t>(current)
                 : std::nullopt,
+            .mtp_cumulative_profitability_keep =
+                result.mtp_fallbacks != 0 && extended_profitability.value_or(false),
         });
     }
     if (on_delta != nullptr && !pending_stream_bytes.empty()) {

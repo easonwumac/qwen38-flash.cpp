@@ -132,6 +132,8 @@ std::string completion_json(
         << ",\"demotions\":" << result.mtp_demotions
         << ",\"profitability_cache_skip\":"
         << (result.mtp_profitability_cache_skip ? "true" : "false")
+        << ",\"profitability_cache_keep\":"
+        << (result.mtp_profitability_cache_keep ? "true" : "false")
         << ",\"draft_ms\":" << result.mtp_draft_ms
         << ",\"verify_ms\":" << result.mtp_verify_ms
         << ",\"commit_ms\":" << result.mtp_commit_ms << "}"

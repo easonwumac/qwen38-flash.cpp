@@ -17,6 +17,16 @@ namespace qwen38 {
     return zero_accept_streak >= fallback_streak && accepted < rounds;
 }
 
+// An exact-prefix replay should skip MTP only when the completed probe was
+// cumulatively below the same one-accepted-token-per-round break-even proxy.
+// A late local fallback does not invalidate profitable earlier rounds.
+[[nodiscard]] inline bool cache_mtp_as_profitable(
+    const std::size_t rounds,
+    const std::size_t accepted,
+    const std::size_t fallbacks) noexcept {
+    return fallbacks == 0 || (rounds != 0 && accepted >= rounds);
+}
+
 class MtpProfitabilityGuard final {
 public:
     static constexpr std::size_t window_size = 16;

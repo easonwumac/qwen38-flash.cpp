@@ -68,6 +68,7 @@ void apply_profile(const std::string& profile) {
         {"QWEN38_PREFILL_BARRIER_STRIDE", "8"},
         {"QWEN38_SELECTED_SOFTMAX_ROUTER", "1"},
         {"QWEN38_MTP_EARLY_DEMOTION", "1"},
+        {"QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE", "1"},
         {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
     };
     for (const auto& [name, value] : settings) set_environment_default(name, value);

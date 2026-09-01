@@ -63,6 +63,10 @@ void run_mtp_depth_policy_tests() {
     QWEN38_CHECK(!qwen38::should_fallback_mtp(1, 2, 2, 0));
     QWEN38_CHECK(!qwen38::should_fallback_mtp(2, 2, 28, 39));
     QWEN38_CHECK(!qwen38::should_fallback_mtp(2, 2, 11, 11));
+    QWEN38_CHECK(!qwen38::cache_mtp_as_profitable(2, 0, 1));
+    QWEN38_CHECK(!qwen38::cache_mtp_as_profitable(4, 3, 1));
+    QWEN38_CHECK(qwen38::cache_mtp_as_profitable(47, 59, 1));
+    QWEN38_CHECK(qwen38::cache_mtp_as_profitable(59, 70, 0));
 
     qwen38::MtpProfitabilityGuard early_loss;
     early_loss.observe(0);

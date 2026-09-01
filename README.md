@@ -113,6 +113,10 @@ selected-expert decode softmax, grouped SDPA prefill, the `12:28` resident
 expert tier, chunk 512 for short prompts, and the bounded tiered long-prompt
 policy. It also extends a successful prefix-cache entry through generated
 assistant tokens, including lazily batched MTP-state catch-up after a fallback.
+For an exact cached prompt, it also keeps an MTP path that was cumulatively
+profitable before a late local fallback instead of disabling all speculation
+on the replay. Set `QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE=0` for the legacy
+all-or-nothing decision.
 Set `QWEN38_EXTEND_PREFIX_CACHE=0` for the prompt-only cache. Existing
 environment variables and an explicit `--prefill-chunk`
 override the preset. It normally settles around 35--37 GiB on the validated

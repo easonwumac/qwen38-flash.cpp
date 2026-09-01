@@ -30,6 +30,9 @@ contains `finish_reason`, and the stream terminates with `data: [DONE]`.
 Non-streaming responses include a non-standard `performance` object with prompt
 time, generation time, measured generation tok/s, and an `mtp` object containing
 round, proposal, acceptance, and fallback counts.
+`mtp.profitability_cache_keep` marks a replay that retained cumulatively
+profitable MTP despite a late fallback; `mtp.profitability_cache_skip` marks a
+cached losing probe that was skipped.
 
 ```bash
 curl -N http://127.0.0.1:11438/v1/chat/completions \

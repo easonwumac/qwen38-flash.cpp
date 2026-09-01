@@ -27,6 +27,7 @@ struct GenerationResult {
     std::size_t mtp_promotions{0};
     std::size_t mtp_demotions{0};
     bool mtp_profitability_cache_skip{false};
+    bool mtp_profitability_cache_keep{false};
     double mtp_draft_ms{0.0};
     double mtp_verify_ms{0.0};
     double mtp_commit_ms{0.0};

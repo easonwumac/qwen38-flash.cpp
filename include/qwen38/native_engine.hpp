@@ -57,6 +57,7 @@ private:
         std::vector<std::uint32_t> pending_mtp_tokens;
         std::optional<bool> mtp_profitable;
         std::optional<std::uint32_t> mtp_profitability_current_token;
+        bool mtp_cumulative_profitability_keep{false};
     };
 
     NativeEngineOptions options_;
