@@ -281,3 +281,8 @@ host. With GPU argmax, the actual warm QMM plus selection probe is about 1.7 ms.
 The 45 tok/s gate is therefore no longer blocked by the vocabulary head; further
 gains must fuse or compile per-layer attention, recurrent, normalization, and
 residual work. Sampled requests still require the full distribution path.
+
+The benchmark memory guard aggregates both the launched process group and its
+recursive descendant tree. This closes the wrapper/profiler case where a child
+starts a new process group. A detached 100 MB child fixture was terminated with
+the expected guard status, and both parent and child were confirmed gone.

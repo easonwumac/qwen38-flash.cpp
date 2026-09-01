@@ -35,31 +35,60 @@ def available_gib() -> float:
     return reclaimable * PAGE_SIZE / (1024**3)
 
 
-def process_group_rss_gib(pgid: int) -> float:
+def process_rows() -> list[tuple[int, int, int, int]]:
+    output = subprocess.check_output(
+        ["ps", "-axo", "pid=,ppid=,pgid=,rss="], text=True
+    )
+    return [tuple(map(int, line.split())) for line in output.splitlines()]
+
+
+def guarded_pids(root_pid: int) -> set[int]:
+    rows = process_rows()
+    protected = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, ppid, pgid, _ in rows:
+            if (ppid in protected or pgid == root_pid) and pid not in protected:
+                protected.add(pid)
+                changed = True
+    return protected
+
+
+def guarded_tree_rss_gib(root_pid: int) -> float:
     try:
-        output = subprocess.check_output(
-            ["ps", "-axo", "pgid=,rss="], text=True
-        )
-        total_kib = sum(
-            int(fields[1])
-            for line in output.splitlines()
-            if len(fields := line.split()) == 2 and int(fields[0]) == pgid
-        )
+        rows = process_rows()
+        protected = guarded_pids(root_pid)
+        total_kib = sum(rss for pid, _, _, rss in rows if pid in protected)
         return total_kib / (1024**2)
     except (subprocess.CalledProcessError, ValueError, IndexError):
         return 0.0
 
 
-def stop_group(pid: int) -> None:
+def stop_tree(pid: int) -> None:
+    try:
+        protected = guarded_pids(pid)
+    except subprocess.CalledProcessError:
+        protected = {pid}
+    for child_pid in sorted(protected - {pid}, reverse=True):
+        try:
+            os.kill(child_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
     try:
         os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return
     time.sleep(0.5)
     try:
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
+    for child_pid in sorted(protected - {pid}, reverse=True):
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def main() -> int:
@@ -98,7 +127,7 @@ def main() -> int:
     minimum_available = start_available
     try:
         while child.poll() is None:
-            current_rss = process_group_rss_gib(child.pid)
+            current_rss = guarded_tree_rss_gib(child.pid)
             current_available = available_gib()
             peak_rss = max(peak_rss, current_rss)
             minimum_available = min(minimum_available, current_available)
@@ -108,12 +137,12 @@ def main() -> int:
                     f"available={current_available:.1f} GiB",
                     file=sys.stderr,
                 )
-                stop_group(child.pid)
+                stop_tree(child.pid)
                 child.wait()
                 return 76
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        stop_group(child.pid)
+        stop_tree(child.pid)
         child.wait()
         return 130
     print(

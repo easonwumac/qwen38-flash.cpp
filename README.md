@@ -101,9 +101,9 @@ with the resident tier below, these form the current fastest verified path.
 
 On unified-memory Macs, run full-model experiments through
 `devtools/memory_guard.py -- COMMAND`. The default guard refuses to start below
-42 GiB reclaimable memory and terminates the process group before it exceeds
-38 GiB RSS or leaves less than 8 GiB reclaimable. A system-wide lock prevents
-overlapping guarded model runs.
+42 GiB reclaimable memory and terminates the process group plus recursively
+spawned descendants before they exceed 38 GiB aggregate RSS or leave less than
+8 GiB reclaimable. A system-wide lock prevents overlapping guarded model runs.
 
 For per-token warmup evidence rather than a two-token snapshot:
 
