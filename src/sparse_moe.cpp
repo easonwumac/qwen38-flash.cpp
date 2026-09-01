@@ -447,6 +447,23 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
+    return forward_verify_impl(input, nullptr);
+}
+
+MlxArray SparseMoe::forward_verify_profiled(
+    const MlxArray& input,
+    MoeVerifyTimings& timings) const {
+    timings = {};
+    return forward_verify_impl(input, &timings);
+}
+
+MlxArray SparseMoe::forward_verify_impl(
+    const MlxArray& input,
+    MoeVerifyTimings* timings) const {
+    using Clock = std::chrono::steady_clock;
+    const auto elapsed_ms = [](const Clock::time_point started) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+    };
     const std::vector<int> shape = input.shape();
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 512) {
         throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..512");
@@ -455,6 +472,7 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
     if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
         std::string_view(device_router) == "1") {
         const int rows = shape[1];
+        const auto routing_started = Clock::now();
         MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
         const bool use_selected_softmax =
             selected_softmax_router_enabled(normalize_topk_probability_);
@@ -476,6 +494,11 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
         weights = weights.reshape(
             std::vector<int>{rows, static_cast<int>(experts_per_token_)});
         weights = weights.astype(MLX_FLOAT32);
+        if (timings != nullptr) {
+            const std::array<const MlxArray*, 2> routing_outputs{&experts, &weights};
+            MlxArray::eval_all(routing_outputs);
+            timings->routing_ms = elapsed_ms(routing_started);
+        }
         const MlxArray& sigmoid_table = bf16_sigmoid_table();
         const MlxArray* q4_gate_inputs[]{
             &input, &expert_gate_.weight, &expert_gate_.scales, &expert_gate_.biases,
@@ -488,6 +511,7 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
         const std::array<int, 3> gate_grid{
             static_cast<int>(rows * 200 * 1024), 1, 1};
         const std::array<int, 3> gate_threadgroup{1024, 1, 1};
+        const auto gate_up_started = Clock::now();
         MlxArray hidden = (fused_q8_exact_
             ? fused_q8_verify_gate_up_kernel()
             : fused_verify_gate_up_kernel())->apply(
@@ -495,6 +519,10 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
                     ? std::span<const MlxArray* const>(q8_gate_inputs)
                     : std::span<const MlxArray* const>(q4_gate_inputs),
                 hidden_shape, input.dtype(), gate_grid, gate_threadgroup);
+        if (timings != nullptr) {
+            hidden.eval();
+            timings->gate_up_ms = elapsed_ms(gate_up_started);
+        }
         MlxArray down_weights = fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
         const MlxArray* down_inputs[]{
             &hidden,
@@ -506,11 +534,28 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
             1, 1};
         const std::array<int, 3> down_threadgroup{
             fused_q8_exact_ ? 320 : 64, 1, 1};
+        const auto down_started = Clock::now();
         MlxArray routed = (fused_q8_exact_
             ? fused_q8_verify_down_kernel()
             : fused_verify_down_kernel())->apply(
             down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
-        return MlxArray::add(routed, forward_shared(input));
+        if (timings != nullptr) {
+            routed.eval();
+            timings->down_ms = elapsed_ms(down_started);
+        }
+        const auto shared_started = Clock::now();
+        MlxArray shared = forward_shared(input);
+        if (timings != nullptr) {
+            shared.eval();
+            timings->shared_expert_ms = elapsed_ms(shared_started);
+        }
+        const auto merge_started = Clock::now();
+        MlxArray output = MlxArray::add(routed, shared);
+        if (timings != nullptr) {
+            output.eval();
+            timings->merge_ms = elapsed_ms(merge_started);
+        }
+        return output;
     }
 
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");

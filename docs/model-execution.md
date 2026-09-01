@@ -91,6 +91,13 @@ logits (`13.6875`, `14.875`). A fresh-server eight-token greedy HTTP run on a
 measured 0.980 tok/s versus the stable route's earlier 1.050 tok/s. The fused
 route is therefore a research hook, not a speed recommendation.
 
+For verifier-width diagnosis, `qwen38-sparse-moe-smoke MODEL 3
+verify-components` inserts explicit barriers around routing, routed gate/up,
+routed down, the shared expert, and the final merge. Run it through
+`devtools/memory_guard.py`. These phase totals explain the critical path but
+are not production latency; compare them with the ordinary `MODEL 3` run,
+which preserves the normal lazy schedule.
+
 Direct custom-kernel access also requires row-contiguous inputs. Disabling that
 MLX contract caused a Metal watchdog timeout on later layers even after the
 40 GB trunk had been read into the filesystem cache. Full-model experiments now

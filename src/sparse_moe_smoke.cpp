@@ -55,17 +55,23 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::size_t r
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 4) {
         std::cerr << "Usage: " << argv[0]
-                  << " MODEL_DIRECTORY [PREFILL_ROWS [components]]\n";
+                  << " MODEL_DIRECTORY [ROWS [components|verify-components]]\n";
         return EXIT_FAILURE;
     }
     try {
         const std::size_t rows = argc >= 3 ? std::stoul(argv[2]) : 1;
         const bool profile_components = argc == 4 && std::string_view(argv[3]) == "components";
-        if (argc == 4 && !profile_components) {
-            throw std::runtime_error("the only supported profiling mode is 'components'");
+        const bool profile_verify =
+            argc == 4 && std::string_view(argv[3]) == "verify-components";
+        if (argc == 4 && !profile_components && !profile_verify) {
+            throw std::runtime_error(
+                "profiling mode must be 'components' or 'verify-components'");
         }
-        if (profile_components && rows == 1) {
-            throw std::runtime_error("component profiling requires PREFILL_ROWS greater than 1");
+        if ((profile_components || profile_verify) && rows == 1) {
+            throw std::runtime_error("component profiling requires ROWS greater than 1");
+        }
+        if (profile_verify && rows > 4) {
+            throw std::runtime_error("verify component profiling requires ROWS <= 4");
         }
         if (rows == 0 || rows > 512) {
             throw std::runtime_error("PREFILL_ROWS must be between 1 and 512");
@@ -91,20 +97,25 @@ int main(int argc, char** argv) {
             : qwen38::RouterSelection{};
         std::vector<double> timings;
         std::vector<qwen38::MoePrefillTimings> component_timings;
+        std::vector<qwen38::MoeVerifyTimings> verify_timings;
         std::vector<float> values;
-        const int iterations = profile_components ? 21 : 6;
+        const int iterations = profile_components || profile_verify ? 21 : 6;
         for (int iteration = 0; iteration < iterations; ++iteration) {
             const auto started = std::chrono::steady_clock::now();
             qwen38::MoePrefillTimings components;
+            qwen38::MoeVerifyTimings verify_components;
             auto output = rows == 1
                 ? moe.forward_decode(input)
-                : profile_components
-                    ? moe.forward_prefill_profiled(input, components)
-                    : moe.forward_prefill(input);
+                : profile_verify
+                    ? moe.forward_verify_profiled(input, verify_components)
+                    : profile_components
+                        ? moe.forward_prefill_profiled(input, components)
+                        : moe.forward_prefill(input);
             values = output.astype(MLX_FLOAT32).to_float32();
             timings.push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count());
             if (profile_components) component_timings.push_back(components);
+            if (profile_verify) verify_timings.push_back(verify_components);
         }
         if (values.size() != rows * config.hidden_size ||
             !std::all_of(values.begin(), values.end(), [](const float value) {
@@ -121,6 +132,16 @@ int main(int argc, char** argv) {
             values.reserve(component_timings.size() - 1);
             for (std::size_t index = 1; index < component_timings.size(); ++index) {
                 values.push_back(component_timings[index].*field);
+            }
+            std::sort(values.begin(), values.end());
+            return values[values.size() / 2];
+        };
+        const auto verify_median = [&verify_timings](
+                                       const auto qwen38::MoeVerifyTimings::* field) {
+            std::vector<double> values;
+            values.reserve(verify_timings.size() - 1);
+            for (std::size_t index = 1; index < verify_timings.size(); ++index) {
+                values.push_back(verify_timings[index].*field);
             }
             std::sort(values.begin(), values.end());
             return values[values.size() / 2];
@@ -163,6 +184,18 @@ int main(int argc, char** argv) {
                       << component_median(&qwen38::MoePrefillTimings::shared_expert_ms)
                       << ",\"merge\":"
                       << component_median(&qwen38::MoePrefillTimings::merge_ms)
+                      << '}';
+        } else if (profile_verify) {
+            std::cout << ",\"verify_components_ms\":{\"routing\":"
+                      << verify_median(&qwen38::MoeVerifyTimings::routing_ms)
+                      << ",\"gate_up\":"
+                      << verify_median(&qwen38::MoeVerifyTimings::gate_up_ms)
+                      << ",\"down\":"
+                      << verify_median(&qwen38::MoeVerifyTimings::down_ms)
+                      << ",\"shared_expert\":"
+                      << verify_median(&qwen38::MoeVerifyTimings::shared_expert_ms)
+                      << ",\"merge\":"
+                      << verify_median(&qwen38::MoeVerifyTimings::merge_ms)
                       << '}';
         }
         std::cout << "}\n";
