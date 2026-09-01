@@ -57,6 +57,7 @@ public:
         std::span<const std::uint32_t> tokens,
         ModelDecodeState& state,
         std::vector<double>* layer_ms = nullptr) const;
+    void set_prefill_qmeta_cache_allowed(bool allowed) const noexcept;
     void clear_prefill_qmeta_cache() const;
     [[nodiscard]] std::vector<TargetVerifyStep> forward_verify_layer_major_reference(
         std::span<const std::uint32_t> tokens,

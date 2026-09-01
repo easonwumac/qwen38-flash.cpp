@@ -127,6 +127,10 @@ DecoderLayer::~DecoderLayer() {
     if (compiled_.ctx != nullptr) static_cast<void>(mlx_closure_free(compiled_));
 }
 
+void DecoderLayer::set_prefill_qmeta_cache_allowed(const bool allowed) const noexcept {
+    mlp_.set_prefill_qmeta_cache_allowed(allowed);
+}
+
 bool DecoderLayer::clear_prefill_qmeta_cache() const {
     return mlp_.clear_prefill_qmeta_cache();
 }

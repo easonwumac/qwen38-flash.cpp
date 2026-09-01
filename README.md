@@ -161,7 +161,11 @@ requests approaching 262K on the tested 64 GiB machine; existing
 `QWEN38_RESIDENT_EXPERT_RANGE` settings still take precedence. For maximum
 headroom, pair it with `--mtp-depth off --prefix-cache-tokens 0`. It trades
 cold-weight residency and short-request latency for memory capacity, so keep
-`speed` for normal prompts.
+`speed` for normal prompts. When compact qmeta prefill caching is enabled, the
+server automatically disables the decoded-bank cache above 32,768 prompt
+tokens so it cannot grow alongside the long-context attention state. Override
+that crossover with `--qmeta-cache-max-prompt-tokens`; zero disables decoded
+qmeta prefill caching for every request.
 
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote
@@ -298,7 +302,9 @@ kept identical first-token hashes, and an 8,664-token request reached 294.85 PP
 with a 24.84 GiB sampled peak. Set
 `QWEN38_QMETA_PREFILL_DEFER_REDUCE=0` to restore the per-layer barrier. The
 request cache remains opt-in because it has not yet been validated near the
-64 GiB capacity boundary at the full 262K context limit.
+64 GiB capacity boundary at the full 262K context limit. The server therefore
+uses it only through 32,768 prompt tokens by default, even when the environment
+flag is set.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
@@ -322,9 +328,12 @@ at about 35.7 GiB sampled RSS and the lowest manual availability sample was
 With resident-expert locking disabled—the behavior now exposed as
 `--profile long-context`—an uncached 258,457-token request completed in
 2,443.71 seconds at 105.77 prompt tok/s and generated one token in 196.5 ms.
-MTP, history drafting, and prefix caching were disabled. The memory guard kept
-at least 6 GiB available; the final sample had 16.4 GiB available and about
-4.4 GiB process RSS after reclaim. This validates the API path within 3,687
+MTP, history drafting, and prefix caching were disabled. The earlier RSS-only
+memory guard kept at least 6 GiB available; the final sample had 16.4 GiB
+available and about 4.4 GiB process RSS after reclaim. Those RSS figures exclude
+Metal allocations and are retained only as historical throughput evidence;
+current runs enforce a 44 GiB physical-footprint limit. This validates the API
+path within 3,687
 tokens of the model limit on the 64 GiB M5 Pro. It does not establish an exact
 262,144-token boundary test or acceptable sustained decode speed at that
 context; QSA decode and long-context retrieval quality remain open gates.

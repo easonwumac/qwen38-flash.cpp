@@ -244,6 +244,9 @@ GenerationResult NativeEngine::complete_impl(
     const std::size_t request_prefill_chunk = qwen38::select_prefill_chunk_rows(
         options_.prefill_chunk_rows, prefill_rows);
     model_.clear_prefill_qmeta_cache();
+    model_.set_prefill_qmeta_cache_allowed(
+        options_.qmeta_cache_max_prompt_tokens != 0 &&
+        prefill_rows <= options_.qmeta_cache_max_prompt_tokens);
     const auto prompt_started = std::chrono::steady_clock::now();
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,

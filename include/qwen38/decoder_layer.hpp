@@ -60,6 +60,7 @@ public:
         MlxArray stream_batch,
         std::span<const std::uint32_t> tokens,
         DecoderLayerState& state) const;
+    void set_prefill_qmeta_cache_allowed(bool allowed) const noexcept;
     [[nodiscard]] bool clear_prefill_qmeta_cache() const;
 
     [[nodiscard]] std::size_t layer_index() const noexcept { return layer_index_; }

@@ -184,6 +184,12 @@ MlxArray QwenModel::consume_decode_capture(
     return std::move(hidden.pre_mixer_stream);
 }
 
+void QwenModel::set_prefill_qmeta_cache_allowed(const bool allowed) const noexcept {
+    for (const auto& layer : layers_) {
+        layer->set_prefill_qmeta_cache_allowed(allowed);
+    }
+}
+
 void QwenModel::clear_prefill_qmeta_cache() const {
     bool cleared = false;
     for (const auto& layer : layers_) {

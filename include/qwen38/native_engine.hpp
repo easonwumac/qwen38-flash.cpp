@@ -25,6 +25,10 @@ struct NativeEngineOptions {
     std::size_t prefill_chunk_rows{64};
     // Retain one exact complete-state prefix. Zero disables caching.
     std::size_t prefix_cache_max_tokens{8192};
+    // Decoded compact-qmeta materially accelerates short prefill but competes
+    // with growing attention state. Disable it automatically above this prompt
+    // size on 64 GiB systems. Zero disables it for every request.
+    std::size_t qmeta_cache_max_prompt_tokens{32768};
     // nullopt selects the verified adaptive depth-3 policy when an MTP sidecar
     // is present: start at 2, promote only on strong short-prompt acceptance,
     // and demote if verification becomes unprofitable.

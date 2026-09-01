@@ -34,6 +34,7 @@ void print_usage(const char* program) {
         << " [--host IPv4] [--port PORT] [--model PATH]"
         << " [--profile safe|speed|latency|long-context]"
         << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
+        << " [--qmeta-cache-max-prompt-tokens N]"
         << " [--max-generation-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
@@ -88,6 +89,7 @@ int main(int argc, char** argv) {
         std::size_t prefill_chunk_rows = 64;
         bool prefill_chunk_explicit = false;
         std::size_t prefix_cache_max_tokens = 8192;
+        std::size_t qmeta_cache_max_prompt_tokens = 32768;
         std::size_t max_generation_tokens = 4096;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
@@ -99,6 +101,7 @@ int main(int argc, char** argv) {
             if ((argument == "--host" || argument == "--port" || argument == "--model" ||
                  argument == "--mtp-depth" || argument == "--prefill-chunk" ||
                  argument == "--prefix-cache-tokens" ||
+                 argument == "--qmeta-cache-max-prompt-tokens" ||
                  argument == "--max-generation-tokens" || argument == "--profile") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
@@ -118,6 +121,9 @@ int main(int argc, char** argv) {
                 prefill_chunk_explicit = true;
             } else if (argument == "--prefix-cache-tokens") {
                 prefix_cache_max_tokens = parse_size(argv[++i], "prefix cache token limit");
+            } else if (argument == "--qmeta-cache-max-prompt-tokens") {
+                qmeta_cache_max_prompt_tokens =
+                    parse_size(argv[++i], "qmeta cache prompt token limit");
             } else if (argument == "--max-generation-tokens") {
                 max_generation_tokens = parse_size(argv[++i], "generation token limit");
                 if (max_generation_tokens == 0) {
@@ -145,10 +151,14 @@ int main(int argc, char** argv) {
                 engine_options.mtp_depth = mtp_depth;
                 engine_options.prefill_chunk_rows = prefill_chunk_rows;
                 engine_options.prefix_cache_max_tokens = prefix_cache_max_tokens;
+                engine_options.qmeta_cache_max_prompt_tokens =
+                    qmeta_cache_max_prompt_tokens;
                 engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
                           << " prefill_chunk=" << prefill_chunk_rows
+                          << " qmeta_cache_max_prompt_tokens="
+                          << qmeta_cache_max_prompt_tokens
                           << " max_generation_tokens=" << max_generation_tokens << '\n';
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else

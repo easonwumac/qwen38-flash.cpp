@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import sys
 import time
@@ -105,6 +106,8 @@ def request_once(url: str, lines: int, timeout: float) -> Measurement:
         raise RuntimeError(f"HTTP {error.code}: {detail}") from error
     except urllib.error.URLError as error:
         raise RuntimeError(f"request failed: {error.reason}") from error
+    except (http.client.RemoteDisconnected, TimeoutError, ConnectionError) as error:
+        raise RuntimeError(f"request failed: {error}") from error
     wall_ms = 1000.0 * (time.perf_counter() - started)
     if not isinstance(payload, dict):
         raise ValueError("server response must be a JSON object")

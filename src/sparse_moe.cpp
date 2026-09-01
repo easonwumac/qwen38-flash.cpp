@@ -41,9 +41,18 @@ int compact_qmeta_requested_bits() {
         "QWEN38_COMPACT_QMETA must be 0, lossless13, lossless16, or lossy9");
 }
 
-bool qmeta_prefill_cache_enabled() {
+bool qmeta_prefill_cache_enabled(const std::size_t layer) {
     const char* value = std::getenv("QWEN38_QMETA_PREFILL_CACHE");
-    return value != nullptr && std::string_view(value) == "1";
+    if (value == nullptr || std::string_view(value) != "1") return false;
+    const char* layers_value = std::getenv("QWEN38_QMETA_PREFILL_CACHE_LAYERS");
+    if (layers_value == nullptr) return true;
+    std::size_t layers = 0;
+    const std::string_view text(layers_value);
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), layers);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() || layers > 48) {
+        throw std::runtime_error("QWEN38_QMETA_PREFILL_CACHE_LAYERS must be between 0 and 48");
+    }
+    return layer < layers;
 }
 
 bool qmeta_prefill_defer_reduce_enabled() {
@@ -257,7 +266,8 @@ SparseMoe::SparseMoe(
     const std::size_t quantization_bits,
     const std::size_t quantization_group_size,
     const bool normalize_topk_probability)
-    : expert_count_(expert_count),
+    : layer_index_(layer_index(prefix)),
+      expert_count_(expert_count),
       experts_per_token_(experts_per_token),
       group_size_(checked_int(quantization_group_size, "quantization_group_size")),
       normalize_topk_probability_(normalize_topk_probability),
@@ -289,7 +299,7 @@ SparseMoe::SparseMoe(
         throw std::runtime_error(
             "QWEN38_COMPACT_QMETA requires a complete sidecar for the requested mode");
     }
-    if (resident_layer_enabled(layer_index(prefix))) {
+    if (resident_layer_enabled(layer_index_)) {
         make_resident(expert_gate_);
         make_resident(expert_up_);
         make_resident(expert_down_);
@@ -422,6 +432,10 @@ bool SparseMoe::clear_prefill_qmeta_cache() const {
     clear_projection(expert_up_);
     clear_projection(expert_down_);
     return cleared;
+}
+
+void SparseMoe::set_prefill_qmeta_cache_allowed(const bool allowed) const noexcept {
+    prefill_qmeta_cache_allowed_ = allowed;
 }
 
 MlxArray SparseMoe::forward_compact_routed(
@@ -904,8 +918,10 @@ MlxArray SparseMoe::forward_prefill_impl(
     const MlxArray* up_biases = &expert_up_.biases;
     const MlxArray* down_scales = &expert_down_.scales;
     const MlxArray* down_biases = &expert_down_.biases;
+    const bool cache_qmeta = compact_qmeta_ && prefill_qmeta_cache_allowed_ &&
+        qmeta_prefill_cache_enabled(layer_index_);
     if (compact_qmeta_) {
-        if (qmeta_prefill_cache_enabled()) {
+        if (cache_qmeta) {
             const auto ensure_cached = [](const QuantizedProjection& projection) {
                 if (projection.qmeta_cached) return;
                 projection.cached_qmeta = decode_qmeta(projection);
@@ -997,8 +1013,8 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray weighted = MlxArray::multiply(
         unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
     MlxArray routed = weighted.sum_axis(2);
-    const bool defer_cached_qmeta_reduce = compact_qmeta_ &&
-        qmeta_prefill_cache_enabled() && qmeta_prefill_defer_reduce_enabled();
+    const bool defer_cached_qmeta_reduce =
+        cache_qmeta && qmeta_prefill_defer_reduce_enabled();
     if (defer_cached_qmeta_reduce) {
         static std::once_flag announced;
         std::call_once(announced, [] {

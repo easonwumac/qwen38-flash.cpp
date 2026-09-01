@@ -56,6 +56,7 @@ public:
     [[nodiscard]] MlxArray forward_prefill_profiled(
         const MlxArray& input,
         MoePrefillTimings& timings) const;
+    void set_prefill_qmeta_cache_allowed(bool allowed) const noexcept;
     [[nodiscard]] bool clear_prefill_qmeta_cache() const;
 
 private:
@@ -110,6 +111,7 @@ private:
         const MlxArray& input,
         MoePrefillTimings* timings) const;
 
+    std::size_t layer_index_;
     std::size_t expert_count_;
     std::size_t experts_per_token_;
     int group_size_;
@@ -126,6 +128,7 @@ private:
     std::shared_ptr<MlxMetalKernel> fused_down_;
     bool fused_q8_exact_{false};
     bool compact_qmeta_{false};
+    mutable bool prefill_qmeta_cache_allowed_{true};
 };
 
 } // namespace qwen38
