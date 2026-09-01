@@ -31,6 +31,8 @@ class Measurement:
     accepted: int
     fallbacks: int
     depth: int
+    promotions: int
+    demotions: int
     wall_ms: float
 
     @property
@@ -85,6 +87,8 @@ def measurement_from_response(
             accepted=int(mtp["accepted"]),
             fallbacks=int(mtp["fallbacks"]),
             depth=int(mtp["depth"]),
+            promotions=int(mtp.get("promotions", 0)),
+            demotions=int(mtp.get("demotions", 0)),
             wall_ms=wall_ms,
         )
     except (KeyError, TypeError, ValueError) as error:
@@ -135,7 +139,8 @@ def summarize(samples: list[Measurement]) -> dict[str, Any]:
         "median_acceptance": statistics.median(acceptance),
         "paths": sorted(
             {
-                f"{sample.rounds}:{sample.accepted}/{sample.proposed}:d{sample.depth}"
+                f"{sample.rounds}:{sample.accepted}/{sample.proposed}:d{sample.depth}:"
+                f"p{sample.promotions}/m{sample.demotions}"
                 for sample in samples
             }
         ),
@@ -147,6 +152,7 @@ def gate_failures(
     minimum_tps: dict[int, float],
     minimum_acceptance: float,
     require_mtp: bool,
+    require_promotion: bool = False,
 ) -> list[str]:
     failures: list[str] = []
     for tokens, samples in samples_by_tokens.items():
@@ -168,6 +174,8 @@ def gate_failures(
                 )
             if require_mtp and sample.proposed == 0:
                 failures.append(f"{tokens} sample {index}: MTP did not engage")
+            if require_promotion and sample.promotions == 0:
+                failures.append(f"{tokens} sample {index}: MTP did not promote")
     for tokens in minimum_tps:
         if tokens not in samples_by_tokens:
             failures.append(f"no samples collected for {tokens}-token speed gate")
@@ -191,6 +199,7 @@ def main() -> int:
     )
     parser.add_argument("--min-acceptance", type=float, default=0.0)
     parser.add_argument("--require-mtp", action="store_true")
+    parser.add_argument("--require-promotion", action="store_true")
     args = parser.parse_args()
     if args.warmups < 0 or args.samples <= 0 or args.timeout <= 0:
         parser.error("warmups must be non-negative; samples and timeout must be positive")
@@ -228,6 +237,7 @@ def main() -> int:
         args.min_median_tps,
         args.min_acceptance,
         args.require_mtp,
+        args.require_promotion,
     )
     report["gate"] = {"passed": not failures, "failures": failures}
     print(json.dumps(report, indent=2, sort_keys=True))

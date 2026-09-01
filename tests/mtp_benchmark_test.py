@@ -27,6 +27,8 @@ def fixture_response(tokens: int = 128, tps: float = 65.0) -> dict:
                 "accepted": 89,
                 "fallbacks": 0,
                 "depth": 3,
+                "promotions": 1,
+                "demotions": 0,
             },
         },
     }
@@ -38,6 +40,7 @@ class MtpBenchmarkTest(unittest.TestCase):
             fixture_response(), requested_tokens=128, wall_ms=2200.0
         )
         self.assertEqual(result.accepted, 89)
+        self.assertEqual(result.promotions, 1)
         self.assertAlmostEqual(result.acceptance, 89 / 103)
         self.assertEqual(result.completion_tokens, 128)
 
@@ -50,7 +53,7 @@ class MtpBenchmarkTest(unittest.TestCase):
         ]
         summary = mtp_benchmark.summarize(samples)
         self.assertEqual(summary["median_tps"], 65.0)
-        self.assertEqual(summary["paths"], ["37:89/103:d3"])
+        self.assertEqual(summary["paths"], ["37:89/103:d3:p1/m0"])
 
     def test_gate_detects_speed_acceptance_and_missing_mtp(self) -> None:
         sample = mtp_benchmark.measurement_from_response(
@@ -60,6 +63,18 @@ class MtpBenchmarkTest(unittest.TestCase):
             {128: [sample]}, {128: 65.0}, minimum_acceptance=0.9, require_mtp=True
         )
         self.assertEqual(len(failures), 2)
+
+    def test_gate_detects_missing_required_promotion(self) -> None:
+        response = fixture_response()
+        response["performance"]["mtp"]["promotions"] = 0
+        sample = mtp_benchmark.measurement_from_response(
+            response, requested_tokens=128, wall_ms=2200.0
+        )
+        failures = mtp_benchmark.gate_failures(
+            {128: [sample]}, {}, minimum_acceptance=0.0,
+            require_mtp=True, require_promotion=True
+        )
+        self.assertEqual(failures, ["128 sample 1: MTP did not promote"])
 
     def test_rejects_incomplete_generation(self) -> None:
         sample = mtp_benchmark.measurement_from_response(

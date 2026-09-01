@@ -6,7 +6,8 @@ will reach the same throughput.
 
 The historical run used an M5 Pro with 64 GiB unified memory, a REAP-288 Q4
 target plus the Q8/g64 L47 MTP sidecar, temperature zero, thinking disabled,
-fixed MTP depth 3, and no prefix cache. After warming model pages and kernels,
+the P271 depth-2 probe with a depth-3 cap, and no prefix cache. After warming
+model pages and kernels,
 the 128-token path accepted 89/103 proposals and measured 64.87--65.03 tok/s.
 The 256-token path accepted 185/205 and measured 66.97 tok/s. Peak sampled RSS
 was about 35.5--37.8 GiB.
@@ -19,7 +20,7 @@ QWEN38_HISTORY_DRAFT=0 ./devtools/memory_guard.py \
   --min-start-gib 42 --min-available-gib 6 --max-rss-gib 40 -- \
   ./build-all/qwen38-server \
   --host 127.0.0.1 --port 11438 --model /path/to/q4-target-q8-l47 \
-  --profile speed --prefix-cache-tokens 0 --mtp-depth 3
+  --profile speed --prefix-cache-tokens 0 --mtp-depth auto
 ```
 
 In another terminal, collect one warmup and two measured samples per length:
@@ -27,7 +28,8 @@ In another terminal, collect one warmup and two measured samples per length:
 ```bash
 python3 devtools/mtp_benchmark.py \
   --url http://127.0.0.1:11438 --tokens 128,256 \
-  --warmups 1 --samples 2 --require-mtp --min-acceptance 0.85 \
+  --warmups 1 --samples 2 --require-mtp --require-promotion \
+  --min-acceptance 0.85 \
   --min-median-tps 128:64.0,256:65.0
 ```
 
@@ -49,9 +51,9 @@ creative, JSON, and long-context corpus.
 
 ## Current reproduction
 
-On 2026-09-02 the same 64 GiB M5 Pro, Q4-target/Q8-L47 model directory, fixed
-depth 3, disabled prefix/history cache, and memory guard reproduced the exact
-historical numerical paths. Two measured warm samples after one warmup gave:
+On 2026-09-02 the same 64 GiB M5 Pro, Q4-target/Q8-L47 model directory,
+depth-3 cap, disabled prefix/history cache, and memory guard reproduced the
+exact historical numerical paths. Two measured warm samples after one warmup gave:
 
 | Length | Acceptance | Warm tok/s | Median |
 |---:|---:|---:|---:|
@@ -62,3 +64,10 @@ Both requests completed the requested token count with no fallback. The run was
 guarded at 40 GiB process RSS and 6 GiB minimum available memory. Thermal state
 was not externally controlled, so this validates the 65+ 256-token path and
 exact acceptance trajectory, not the old 66.97 peak as a guaranteed floor.
+
+A same-binary `--mtp-depth auto` retest produced the same promotion and token
+paths, with medians of 64.367 and 66.429 tok/s. This confirms that `3` is a hard
+cap over the P271 probe policy rather than an instruction to start every round
+at depth 3. The benchmark now records promotion/demotion counts and can require
+promotion explicitly, preventing a depth-2-only run from passing solely on
+aggregate acceptance.
