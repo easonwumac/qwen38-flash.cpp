@@ -59,6 +59,8 @@ private:
     Projection down_;
     Projection up_;
     Projection injection_;
+    MlxArray injection_dense_;
+    bool fused_injection_ready_{false};
 };
 
 } // namespace qwen38

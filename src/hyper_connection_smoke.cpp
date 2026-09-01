@@ -56,7 +56,10 @@ int main(int argc, char** argv) {
     try {
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         const auto& config = tensors.manifest().config();
-        const std::vector<std::int32_t> token_values{9419, 11, 1814, 0};
+        const bool single_row = std::getenv("QWEN38_HC_SINGLE_ROW_SMOKE") != nullptr;
+        const std::vector<std::int32_t> token_values = single_row
+            ? std::vector<std::int32_t>{9419}
+            : std::vector<std::int32_t>{9419, 11, 1814, 0};
         auto stream = qwen38::HyperConnection::initialize_stream(
             embedding(tensors, token_values), config.hyper_connection_count);
         qwen38::HyperConnection layer(
@@ -87,10 +90,18 @@ int main(int argc, char** argv) {
         const double injection_checksum = checked_checksum(
             read.injection,
             {1, sequence, static_cast<int>(config.hyper_connection_count), 1});
+        const std::vector<float> injection_values =
+            read.injection.astype(MLX_FLOAT32).to_float32();
         const double stream_checksum = checked_checksum(written, {1, sequence, stream_width});
         const double final_checksum = checked_checksum(final.mixed, {1, sequence, hidden});
         std::cout << "{\"mixed_checksum\":" << mixed_checksum
                   << ",\"injection_checksum\":" << injection_checksum
+                  << ",\"injection_values\":[";
+        for (std::size_t index = 0; index < injection_values.size(); ++index) {
+            if (index != 0) std::cout << ',';
+            std::cout << injection_values[index];
+        }
+        std::cout << ']'
                   << ",\"stream_checksum\":" << stream_checksum
                   << ",\"final_checksum\":" << final_checksum
                   << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";

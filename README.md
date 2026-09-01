@@ -136,6 +136,13 @@ attributed two-dispatch selected-MoE Metal path. Add `QWEN38_DEVICE_ROUTER=1`
 to keep top-k selection and routing weights on the GPU. `QWEN38_COMPILE_LAYER=1`
 compiles each non-PLE linear decoder layer after its first stateful step. Together
 with the resident tier below, these form the current fastest verified path.
+`QWEN38_HC_FUSED_INJECTION=1` completes the attributed decode-width HC read by
+folding each four-row injection projection into a small dense resident matrix
+and reducing it inside the existing normalize/down dispatches. A guarded
+64-step fixed-start benchmark repeated at 41.7--42.6 tok/s versus 33.3 tok/s
+for the retained read-only HC control, at 34.9--35.0 GiB peak RSS. The fused
+gate may differ from the generic Q4 chain by one BF16 ULP, so this remains an
+explicit speed/quality mode while mixed-corpus scoring is completed.
 
 MTP verification evaluates the 48-layer lazy graph in three 16-layer groups by
 default. This preserves the retained S-row numerics while removing most
