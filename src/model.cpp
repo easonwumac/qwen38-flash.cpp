@@ -30,6 +30,17 @@ std::size_t verify_barrier_stride() {
     return static_cast<std::size_t>(parsed);
 }
 
+std::size_t prefill_barrier_stride() {
+    const char* raw = std::getenv("QWEN38_PREFILL_BARRIER_STRIDE");
+    if (raw == nullptr) return 1;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed < 1 || parsed > 48) {
+        throw std::runtime_error("prefill barrier stride must be between 1 and 48");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
     if (rows.empty()) throw std::runtime_error("cannot concatenate an empty model batch");
     MlxArray result = rows.front().share();
@@ -182,15 +193,28 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
     }
     MlxArray stream_batch = concatenate_sequence_rows(streams);
     streams.clear();
+    const std::size_t barrier_stride = prefill_barrier_stride();
+    auto barrier_started = std::chrono::steady_clock::now();
+    std::size_t barrier_begin = 0;
     for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
-        std::chrono::steady_clock::time_point layer_started;
-        if (layer_ms != nullptr) layer_started = std::chrono::steady_clock::now();
         stream_batch = layers_[layer]->forward_prefill(
             std::move(stream_batch), tokens, state.layers[layer]);
-        stream_batch.eval();
-        if (layer_ms != nullptr) {
-            (*layer_ms)[layer] += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - layer_started).count();
+        const bool barrier = (layer + 1) % barrier_stride == 0 ||
+            layer + 1 == layers_.size();
+        if (barrier) {
+            stream_batch.eval();
+            if (layer_ms != nullptr) {
+                const auto now = std::chrono::steady_clock::now();
+                const double window_ms = std::chrono::duration<double, std::milli>(
+                    now - barrier_started).count();
+                const double per_layer_ms = window_ms /
+                    static_cast<double>(layer + 1 - barrier_begin);
+                for (std::size_t profiled = barrier_begin; profiled <= layer; ++profiled) {
+                    (*layer_ms)[profiled] += per_layer_ms;
+                }
+                barrier_started = now;
+                barrier_begin = layer + 1;
+            }
         }
     }
     state.token_count += tokens.size();

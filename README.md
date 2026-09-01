@@ -117,7 +117,9 @@ startup instead of failing partway through a request.
 SDPA at prompt widths of 16 or more. It retains the correct causal offset when
 the key/value cache contains earlier chunks. The current experimental fast
 prompt profile combines it with `QWEN38_GDN_METAL_PREFILL=1` and
-`QWEN38_GROUPED_PREFILL=1`; keep `--prefill-chunk 64` and leave these unset for
+`QWEN38_GROUPED_PREFILL=1`. `QWEN38_PREFILL_BARRIER_STRIDE=8` evaluates this
+lazy graph every eight layers instead of every layer; values from 1 through 48
+are accepted. Keep `--prefill-chunk 64` and leave these unset for
 the retained numerical mode. On the 64 GiB validation machine, chunk 256 is
 guarded through 512 prompt tokens; use chunk 128 for longer experiments until
 the remaining per-chunk temporary graph pressure is reduced.
