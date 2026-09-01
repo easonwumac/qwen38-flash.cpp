@@ -13,6 +13,82 @@ inline constexpr std::string_view header = R"metal(
 using namespace metal;
 )metal";
 
+inline constexpr std::string_view prework_header = R"metal(
+inline float qwen38_log1p(float x) {
+    float plus_one = 1.0f + x;
+    if (plus_one == metal::numeric_limits<float>::max()) {
+        return metal::numeric_limits<float>::max();
+    }
+    if (plus_one == 1.0f) return x;
+    return x * (metal::log(plus_one) / (plus_one - 1.0f));
+}
+)metal";
+
+// Decode-width packed prework adapted from mlx-serve's MIT-licensed kernel.
+inline constexpr std::string_view prework = R"metal(
+    uint lane = thread_position_in_threadgroup.x;
+    uint logical_head = threadgroup_position_in_grid.z;
+    constexpr uint q_heads = uint(HK);
+    constexpr uint key_head_base = uint(HK);
+    constexpr uint value_head_base = 2 * uint(HK);
+    bool is_query = logical_head < q_heads;
+    bool is_key = logical_head >= key_head_base && logical_head < value_head_base;
+    uint head = is_query ? logical_head
+        : (is_key ? logical_head - key_head_base : logical_head - value_head_base);
+    uint channel_base = is_query ? head * uint(DK)
+        : (is_key ? uint(HK) * uint(DK) + head * uint(DK)
+                  : 2 * uint(HK) * uint(DK) + head * uint(DV));
+    T activated[4];
+    float square_sum = 0.0f;
+    for (uint i = 0; i < 4; ++i) {
+        uint channel = channel_base + lane * 4 + i;
+        float accumulated = 0.0f;
+        for (uint tap = 0; tap < 4; ++tap) {
+            T value = tap < 3
+                ? conv_state[tap * uint(C) + channel]
+                : qkv[channel];
+            accumulated += float(value) * float(conv_weight[channel * 4 + tap]);
+        }
+        T convolved = T(accumulated);
+        T small = T(1) / (T(1) + metal::exp(metal::abs(convolved)));
+        T value = convolved * ((convolved < T(0)) ? small : T(1) - small);
+        activated[i] = value;
+        square_sum += float(value) * float(value);
+        conv_out[(2 * uint(C)) + channel] = qkv[channel];
+    }
+    if (is_query || is_key) {
+        square_sum = simd_sum(square_sum);
+        float inverse_rms = metal::precise::rsqrt(square_sum / float(DK) + 1e-6f);
+        T scale = is_query ? q_scale : k_scale;
+        uint output_base = head * uint(DK) + lane * 4;
+        for (uint i = 0; i < 4; ++i) {
+            T rms = T(float(activated[i]) * inverse_rms);
+            T value = scale * rms;
+            if (is_query) q_out[output_base + i] = value;
+            else k_out[output_base + i] = value;
+        }
+    } else {
+        uint output_base = head * uint(DV) + lane * 4;
+        for (uint i = 0; i < 4; ++i) v_out[output_base + i] = activated[i];
+        if (lane == 0) {
+            T beta_value = beta_in[head];
+            T small = T(1) / (T(1) + metal::exp(metal::abs(beta_value)));
+            beta_out[head] = (beta_value < T(0)) ? small : T(1) - small;
+            T biased = T(float(decay_in[head]) + float(decay_bias[head]));
+            float softplus = qwen38_log1p(metal::precise::exp(float(biased)));
+            float rate = metal::precise::exp(float(decay_log[head]));
+            decay_out[head] = T(metal::precise::exp(-(rate * softplus)));
+        }
+    }
+    if (logical_head < uint(2 * HK + HV)) {
+        for (uint i = 0; i < 4; ++i) {
+            uint channel = channel_base + lane * 4 + i;
+            conv_out[channel] = conv_state[uint(C) + channel];
+            conv_out[uint(C) + channel] = conv_state[2 * uint(C) + channel];
+        }
+    }
+)metal";
+
 inline constexpr std::string_view recurrence = R"metal(
     const int n = thread_position_in_grid.z;
     const int b_idx = n / Hv;

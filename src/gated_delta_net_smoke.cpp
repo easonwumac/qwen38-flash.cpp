@@ -44,6 +44,19 @@ qwen38::MlxArray make_input(
     return mixer.read(stream).mixed;
 }
 
+float maximum_absolute_error(
+    const std::vector<float>& reference,
+    const std::vector<float>& candidate) {
+    if (reference.size() != candidate.size()) {
+        throw std::runtime_error("GatedDeltaNet comparison size mismatch");
+    }
+    float result = 0.0F;
+    for (std::size_t index = 0; index < reference.size(); ++index) {
+        result = std::max(result, std::abs(reference[index] - candidate[index]));
+    }
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -59,6 +72,41 @@ int main(int argc, char** argv) {
             tensors,
             "language_model.model.layers.0.linear_attn",
             tensors.manifest().config());
+        if (std::getenv("QWEN38_GDN_COMPARE") != nullptr) {
+            unsetenv("QWEN38_GDN_PREWORK");
+            unsetenv("QWEN38_GDN_NORM_GATE");
+            qwen38::GatedDeltaNetState reference_state;
+            auto reference_first = layer.forward_decode(first_input, reference_state)
+                .astype(MLX_FLOAT32).to_float32();
+            auto reference_second = layer.forward_decode(second_input, reference_state)
+                .astype(MLX_FLOAT32).to_float32();
+            auto reference_convolution = reference_state.convolution.astype(
+                MLX_FLOAT32).to_float32();
+            auto reference_recurrent = reference_state.recurrent.astype(
+                MLX_FLOAT32).to_float32();
+
+            setenv("QWEN38_GDN_PREWORK", "1", 1);
+            setenv("QWEN38_GDN_NORM_GATE", "1", 1);
+            qwen38::GatedDeltaNetState candidate_state;
+            auto candidate_first = layer.forward_decode(first_input, candidate_state)
+                .astype(MLX_FLOAT32).to_float32();
+            auto candidate_second = layer.forward_decode(second_input, candidate_state)
+                .astype(MLX_FLOAT32).to_float32();
+            auto candidate_convolution = candidate_state.convolution.astype(
+                MLX_FLOAT32).to_float32();
+            auto candidate_recurrent = candidate_state.recurrent.astype(
+                MLX_FLOAT32).to_float32();
+            std::cout << "{\"first_max_abs\":"
+                      << maximum_absolute_error(reference_first, candidate_first)
+                      << ",\"second_max_abs\":"
+                      << maximum_absolute_error(reference_second, candidate_second)
+                      << ",\"convolution_max_abs\":"
+                      << maximum_absolute_error(reference_convolution, candidate_convolution)
+                      << ",\"recurrent_max_abs\":"
+                      << maximum_absolute_error(reference_recurrent, candidate_recurrent)
+                      << "}\n";
+            return EXIT_SUCCESS;
+        }
         std::vector<double> timings;
         std::vector<float> first_values;
         std::vector<float> second_values;
