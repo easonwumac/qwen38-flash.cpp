@@ -196,11 +196,7 @@ GenerationResult NativeEngine::complete(
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
-        // The recovered production policy makes its first request-static
-        // decision from all eight probe rounds. Do not let the supplemental
-        // zero-accept guard truncate that evidence window.
-        if (!depth_policy.probing() &&
-            zero_accept_streak >= options_.zero_accept_fallback_rounds) {
+        if (zero_accept_streak >= options_.zero_accept_fallback_rounds) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
         }
