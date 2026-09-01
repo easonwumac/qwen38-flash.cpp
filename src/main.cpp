@@ -58,6 +58,7 @@ void apply_profile(const std::string& profile) {
         {"QWEN38_GDN_NORM_GATE", "1"},
         {"QWEN38_GDN_PREWORK", "1"},
         {"QWEN38_GDN_METAL_VERIFY_BF16_SUM", "1"},
+        {"QWEN38_BATCH_KV_VERIFY", "1"},
         {"QWEN38_SDPA_PREFILL", "1"},
         {"QWEN38_GDN_METAL_PREFILL", "1"},
         {"QWEN38_GROUPED_PREFILL", "1"},

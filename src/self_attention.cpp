@@ -406,6 +406,24 @@ MlxArray SelfAttention::forward_verify(
     std::vector<MlxArray> gated_rows;
     gated_rows.reserve(rows);
     const std::vector<int> strides{1, 1, 1, 1};
+    const char* batch_kv_verify = std::getenv("QWEN38_BATCH_KV_VERIFY");
+    const bool batch_kv_enabled = rows > 1 && batch_kv_verify != nullptr &&
+        std::string_view(batch_kv_verify) == "1";
+    MlxArray complete_keys;
+    MlxArray complete_values;
+    if (batch_kv_enabled) {
+        MlxArray new_keys = key_batch.rms_norm(
+            key_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray new_values = value_batch.swapaxes(1, 2);
+        new_keys = apply_rope_prefill(
+            new_keys, origin.position_base + origin.token_count);
+        complete_keys = origin.token_count == 0
+            ? new_keys.share()
+            : MlxArray::concatenate(origin.keys, new_keys, 2);
+        complete_values = origin.token_count == 0
+            ? new_values.share()
+            : MlxArray::concatenate(origin.values, new_values, 2);
+    }
     for (std::size_t row = 0; row < rows; ++row) {
         MlxArray query_gate = slice_sequence_row(query_gate_batch, row);
         MlxArray query = query_gate.slice(
@@ -417,20 +435,33 @@ MlxArray SelfAttention::forward_verify(
             std::vector<int>{1, 1, heads, 2 * head_dimension},
             strides);
         query = query.rms_norm(query_norm_weight_, epsilon_).swapaxes(1, 2);
-        MlxArray key = slice_sequence_row(key_batch, row)
-            .rms_norm(key_norm_weight_, epsilon_).swapaxes(1, 2);
-        MlxArray value = slice_sequence_row(value_batch, row).swapaxes(1, 2);
         const std::size_t position = working.position_base + working.token_count;
         query = apply_rope(query, position);
-        key = apply_rope(key, position);
-        if (working.token_count == 0) {
-            working.keys = std::move(key);
-            working.values = std::move(value);
+        if (batch_kv_enabled) {
+            ++working.token_count;
+            const int stop = dimension(working.token_count, "attention checkpoint length");
+            working.keys = complete_keys.slice(
+                std::vector<int>{0, 0, 0, 0},
+                std::vector<int>{1, kv_heads, stop, head_dimension},
+                strides);
+            working.values = complete_values.slice(
+                std::vector<int>{0, 0, 0, 0},
+                std::vector<int>{1, kv_heads, stop, head_dimension},
+                strides);
         } else {
-            working.keys = MlxArray::concatenate(working.keys, key, 2);
-            working.values = MlxArray::concatenate(working.values, value, 2);
+            MlxArray key = slice_sequence_row(key_batch, row)
+                .rms_norm(key_norm_weight_, epsilon_).swapaxes(1, 2);
+            MlxArray value = slice_sequence_row(value_batch, row).swapaxes(1, 2);
+            key = apply_rope(key, position);
+            if (working.token_count == 0) {
+                working.keys = std::move(key);
+                working.values = std::move(value);
+            } else {
+                working.keys = MlxArray::concatenate(working.keys, key, 2);
+                working.values = MlxArray::concatenate(working.values, value, 2);
+            }
+            ++working.token_count;
         }
-        ++working.token_count;
         checkpoints[row].keys = working.keys.share();
         checkpoints[row].values = working.values.share();
         checkpoints[row].token_count = working.token_count;

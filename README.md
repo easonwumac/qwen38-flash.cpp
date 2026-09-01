@@ -195,6 +195,12 @@ default. This preserves the retained S-row numerics while removing most
 per-layer synchronization overhead. `QWEN38_VERIFY_BARRIER_STRIDE=1` is the
 diagnostic rollback; accepted experimental values are 1 through 48.
 
+`QWEN38_BATCH_KV_VERIFY=1` builds each short-context full-attention layer's new
+K/V rows once, appends them to the cached prefix once, and gives each verifier
+row a prefix slice. Queries and attention remain rowwise, preserving the
+retained short-context numerical path while avoiding repeated growing K/V
+concatenations. The `speed` profile enables it; set it to `0` for rollback.
+
 `QWEN38_GDN_METAL_VERIFY_BF16_SUM=1` replaces the S=2..4 GDN recurrence loop
 with one Metal dispatch while retaining MLX's BF16 reduction tree: 32 virtual
 threads each fold four consecutive values before the SIMD reduction. On an
