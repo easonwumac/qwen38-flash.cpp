@@ -149,6 +149,14 @@ default. This preserves the retained S-row numerics while removing most
 per-layer synchronization overhead. `QWEN38_VERIFY_BARRIER_STRIDE=1` is the
 diagnostic rollback; accepted experimental values are 1 through 48.
 
+`QWEN38_GDN_METAL_VERIFY_BF16_SUM=1` replaces the S=2..4 GDN recurrence loop
+with one Metal dispatch while retaining MLX's BF16 reduction tree: 32 virtual
+threads each fold four consecutive values before the SIMD reduction. On an
+initialized-state S=3 verifier it reduced 47.18 ms to 39.90 ms with identical
+greedy tokens and rollback continuation, at the same 34.3 GiB peak RSS. A warm
+256-token depth-2 HTTP completion improved 40.90 to 42.18 tok/s and produced an
+identical output hash. It remains opt-in pending a wider prompt corpus.
+
 Accepted MTP rows are committed back into the drafter with one S=2..4 batched
 state pass instead of serially replaying each row. This changes proposal-state
 scheduling only; target verification remains authoritative. Set

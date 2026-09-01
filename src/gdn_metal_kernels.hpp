@@ -2,7 +2,8 @@
 
 // Adapted from oMLX's gated-delta recurrence kernel (Copyright 2026 oMLX
 // contributors), Apache-2.0. oMLX in turn follows the MLX-LM GatedDeltaNet
-// implementation. This fixed contract serves Qwen3.8 Flash prefill only.
+// implementation. These fixed contracts serve Qwen3.8 Flash prefill and
+// exact low-row MTP verification.
 
 #include <string_view>
 
@@ -150,6 +151,51 @@ inline constexpr std::string_view recurrence = R"metal(
     for (int i = 0; i < n_per_t; ++i) {
         const int state_index = n_per_t * dk_idx + i;
         output_state[state_index] = static_cast<StT>(state[i]);
+    }
+)metal";
+
+inline constexpr std::string_view verify_recurrence_bf16_sum = R"metal(
+    const int hv_idx = thread_position_in_grid.z;
+    const int lane = thread_position_in_threadgroup.x;
+    const int dv_idx = thread_position_in_grid.y;
+    constexpr int ITEMS = DK / 32;
+    const device InT* q_row = q + hv_idx * DK;
+    const device InT* k_row = k + hv_idx * DK;
+    const device InT* v_row = v + hv_idx * DV;
+    const device InT* gate_row = g + hv_idx;
+    const device InT* beta_row = beta + hv_idx;
+    const device StT* input_state = state_in + (hv_idx * DV + dv_idx) * DK;
+    StT state[ITEMS];
+    for (int i = 0; i < ITEMS; ++i) state[i] = input_state[lane * ITEMS + i];
+    for (int token = 0; token < ROWS; ++token) {
+        InT recalled = InT(0);
+        for (int i = 0; i < ITEMS; ++i) {
+            const int index = lane * ITEMS + i;
+            state[i] = StT(float(state[i]) * float(gate_row[0]));
+            InT product = InT(float(state[i]) * float(k_row[index]));
+            recalled = InT(float(recalled) + float(product));
+        }
+        recalled = simd_sum(recalled);
+        InT residual = InT(float(v_row[dv_idx]) - float(recalled));
+        InT delta = InT(float(residual) * float(beta_row[0]));
+        InT output = InT(0);
+        for (int i = 0; i < ITEMS; ++i) {
+            const int index = lane * ITEMS + i;
+            StT update = StT(float(k_row[index]) * float(delta));
+            state[i] = StT(float(state[i]) + float(update));
+            InT product = InT(float(state[i]) * float(q_row[index]));
+            output = InT(float(output) + float(product));
+            state_rows[(((token * HV + hv_idx) * DV + dv_idx) * DK) + index] = state[i];
+        }
+        output = simd_sum(output);
+        if (thread_index_in_simdgroup == 0) {
+            y[(token * HV + hv_idx) * DV + dv_idx] = OutT(output);
+        }
+        q_row += HV * DK;
+        k_row += HV * DK;
+        v_row += HV * DV;
+        gate_row += HV;
+        beta_row += HV;
     }
 )metal";
 
