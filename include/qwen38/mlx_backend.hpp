@@ -19,6 +19,21 @@ namespace qwen38 {
 
 class MlxMetalKernel;
 
+struct MlxMetalOutputSpec {
+    std::vector<int> shape;
+    mlx_dtype dtype;
+};
+
+struct MlxMetalDtypeTemplate {
+    std::string name;
+    mlx_dtype value;
+};
+
+struct MlxMetalIntTemplate {
+    std::string name;
+    int value;
+};
+
 class MlxArray final {
 public:
     MlxArray() noexcept;
@@ -99,6 +114,10 @@ public:
         const MlxArray& indices,
         int axis);
     [[nodiscard]] MlxArray argpartition_axis(int kth, int axis) const;
+    [[nodiscard]] MlxArray argsort_axis(int axis) const;
+    [[nodiscard]] static MlxArray floor_divide(
+        const MlxArray& left,
+        const MlxArray& right);
     [[nodiscard]] MlxArray argmax_all() const;
     [[nodiscard]] static MlxArray dequantize(
         const MlxArray& weight,
@@ -107,6 +126,17 @@ public:
         int group_size,
         int bits,
         mlx_dtype output_dtype = MLX_BFLOAT16);
+    [[nodiscard]] static MlxArray gather_quantized_matmul(
+        const MlxArray& input,
+        const MlxArray& weight,
+        const MlxArray& scales,
+        const MlxArray& biases,
+        const MlxArray& lhs_indices,
+        const MlxArray& rhs_indices,
+        int group_size,
+        int bits,
+        bool sorted_indices,
+        bool transpose = true);
 
     void eval() const;
     static void eval_all(std::span<const MlxArray* const> arrays);
@@ -136,6 +166,12 @@ public:
         std::string_view output_name,
         std::string_view source,
         std::string_view header = {});
+    MlxMetalKernel(
+        std::string_view name,
+        std::span<const char* const> input_names,
+        std::span<const char* const> output_names,
+        std::string_view source,
+        std::string_view header = {});
     ~MlxMetalKernel();
 
     MlxMetalKernel(const MlxMetalKernel&) = delete;
@@ -149,9 +185,18 @@ public:
         mlx_dtype output_dtype,
         std::span<const int, 3> grid,
         std::span<const int, 3> threadgroup) const;
+    [[nodiscard]] std::vector<MlxArray> apply(
+        std::span<const MlxArray* const> inputs,
+        std::span<const MlxMetalOutputSpec> outputs,
+        std::span<const int, 3> grid,
+        std::span<const int, 3> threadgroup,
+        std::span<const MlxMetalDtypeTemplate> dtype_templates,
+        std::span<const MlxMetalIntTemplate> int_templates) const;
 
 private:
     mlx_fast_metal_kernel kernel_{};
+    mutable std::mutex config_mutex_;
+    mutable std::unordered_map<std::string, mlx_fast_metal_kernel_config> configs_;
 };
 
 class MlxSafetensors final {

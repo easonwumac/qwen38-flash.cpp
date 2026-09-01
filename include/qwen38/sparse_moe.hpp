@@ -28,6 +28,7 @@ public:
     [[nodiscard]] RouterSelection route_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_verify(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_prefill(const MlxArray& input) const;
 
 private:
     struct QuantizedProjection {

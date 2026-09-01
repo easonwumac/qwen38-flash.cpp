@@ -144,10 +144,11 @@ MlxArray QwenModel::consume_decode_capture(
 
 std::vector<MlxArray> QwenModel::prefill_chunk(
     const std::span<const std::uint32_t> tokens,
-    ModelDecodeState& state) const {
-    constexpr std::size_t max_prefill_rows = 64;
+    ModelDecodeState& state,
+    std::vector<double>* layer_ms) const {
+    constexpr std::size_t max_prefill_rows = 256;
     if (tokens.empty() || tokens.size() > max_prefill_rows) {
-        throw std::runtime_error("prefill chunk must contain 1 to 64 tokens");
+        throw std::runtime_error("prefill chunk must contain 1 to 256 tokens");
     }
     if (state.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");
@@ -155,26 +156,37 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
     if (state.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
         throw std::runtime_error("prefill token count overflow");
     }
+    if (layer_ms != nullptr) {
+        if (layer_ms->empty()) {
+            layer_ms->resize(layers_.size(), 0.0);
+        } else if (layer_ms->size() != layers_.size()) {
+            throw std::runtime_error("prefill profile layer count mismatch");
+        }
+    }
 
     std::vector<MlxArray> streams;
     streams.reserve(tokens.size());
     for (const std::uint32_t token : tokens) {
         streams.push_back(HyperConnection::initialize_stream(embed(token), stream_count_));
     }
+    MlxArray stream_batch = concatenate_sequence_rows(streams);
+    streams.clear();
     for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
-        std::vector<DecoderLayerState> checkpoints;
-        streams = layers_[layer]->forward_verify_dense_batched(
-            std::move(streams), tokens, state.layers[layer], checkpoints);
-        if (checkpoints.size() != tokens.size()) {
-            throw std::runtime_error("prefill layer checkpoint count mismatch");
+        std::chrono::steady_clock::time_point layer_started;
+        if (layer_ms != nullptr) layer_started = std::chrono::steady_clock::now();
+        stream_batch = layers_[layer]->forward_prefill(
+            std::move(stream_batch), tokens, state.layers[layer]);
+        stream_batch.eval();
+        if (layer_ms != nullptr) {
+            (*layer_ms)[layer] += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - layer_started).count();
         }
-        state.layers[layer] = std::move(checkpoints.back());
-        std::vector<const MlxArray*> layer_outputs;
-        layer_outputs.reserve(streams.size());
-        for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
-        MlxArray::eval_all(layer_outputs);
     }
     state.token_count += tokens.size();
+    streams.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        streams.push_back(slice_sequence_row(stream_batch, row));
+    }
     return streams;
 }
 

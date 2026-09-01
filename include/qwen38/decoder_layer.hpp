@@ -56,6 +56,10 @@ public:
         std::span<const std::uint32_t> tokens,
         const DecoderLayerState& origin,
         std::vector<DecoderLayerState>& checkpoints) const;
+    [[nodiscard]] MlxArray forward_prefill(
+        MlxArray stream_batch,
+        std::span<const std::uint32_t> tokens,
+        DecoderLayerState& state) const;
 
     [[nodiscard]] std::size_t layer_index() const noexcept { return layer_index_; }
     [[nodiscard]] bool uses_full_attention() const noexcept {

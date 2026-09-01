@@ -13,6 +13,8 @@ reference evidence, not measurements of this C++ runtime.
 
 | Artifact | Controlled result | What it establishes | Limitation |
 |---|---:|---|---|
+| P124 stock split-K prefill | 759--766 tok/s at 256 tokens; 930--937 at 512; 1107--1113 at 1024 | The retained MLX/`mlx-serve` graph already proves PP 7xx locally; C++ must reproduce its layer-major whole-prompt path before inventing another prefill design | Q4 REAP-288 without MTP, one-token completion; the attempted direct-NAX replacement was rejected |
+| P271 request-static MTP | 68.1--68.3 tok/s on short code, 39.5 prose, 42.2 JSON, and 46.75 at 7.3K context with 731.9 PP | Probe at depth 2, lock depth 3 only for high acceptance, and keep long prompts at depth 2; this is the retained MTP 6x-class reference | Workload-dependent; fixed depth 3 regressed prose, JSON, and long context |
 | P73 serial | 35.028 decode tok/s; 479.357 prefill tok/s | The retained Zig/MLX target path can exceed the current C++ runtime | Fixed 186-token code prompt, 512 generated tokens, hot run |
 | P73 Q8 MTP depth 2 | 59.866 decode tok/s; 463.316 prefill tok/s; 78.6% per-draft acceptance; 1.57 accepted drafts/round | Correct MTP can be strongly profitable on this machine | Workload-specific high-acceptance code result, not universal throughput |
 | P60 corrected Q8 MTP | 44.36 decode tok/s versus 32.13 serial; about 60% acceptance | A broader workload can still benefit, but verifier cost and acceptance dominate | Different run and workload from P73 |
@@ -29,6 +31,8 @@ reference evidence, not measurements of this C++ runtime.
 | C++ batched-prefill Q4 MTP check | The warmed 186-token P73 prompt accepted 18/28 drafts and emitted 32 tokens at 27.12 tok/s; prefill was 80.3 tok/s; peak 35.5 GiB | Batched target prefill correctly primes complete MTP state, but serial MTP-head prompt priming and current round cost remain unprofitable | One code prompt, depth 2, short 32-token generation; correctness check, not a speed promotion |
 | C++ exact complete-state prefix cache | A repeated P73 request reused 185/186 prompt tokens with byte-identical output. No-MTP prompt time fell from 1955.67 ms after clear to 0.000042 ms on hit; MTP preserved 18/28 acceptance and identical 32-token output with 0 ms reported prompt time. Peaks were 34.5 GiB serial and 35.2 GiB MTP | One snapshot can safely reuse target KV, GDN, PLE, QSA, prior target stream, and the complete MTP head state together | One-entry RAM tier, capped at 8192 tokens by default; no partial rollback checkpoint or SSD tier yet |
 | C++ batched verifier final head | A/B/A in guarded processes reduced the exact 3-row verifier by 3--5% to about 57 ms, versus about 94.5 ms serial; token parity held. Profiling attributed 42.59 ms to 36 GDN layers, 11.60 ms to 12 full-attention layers, and only 1.50 ms to the batched final head | The final mixer and LM head should consume `[1,S,H]` once, but 95% of remaining verifier cost is now the 48-layer trunk | A warmed 64-token HTTP run still reached just 31.98 tok/s with 22/38 accepted and one fallback; trunk/round cost remains dominant |
+| C++ compiled-vs-batched numerical audit | On the 64-token P73 continuation, eager serial and the fast S=3 verifier emitted byte-identical text; compiled S=1 serial emitted a different valid greedy continuation. Warm decode was 29.87 / 31.98 / 32.07 tok/s for eager serial / fast MTP / compiled serial | The production MTP lifecycle is not the source of the observed text difference. MLX graph shape and whole-layer fusion change borderline argmax decisions, so a compiled S=1 run is not a valid bitwise oracle for an eager S=3 graph | Quality promotion still requires corpus-level scoring; exact-token parity must compare like-for-like numerical execution modes |
+| C++ opt-in fused-GDN + sorted-MoE prefill | 185 prefill rows in 608.8 ms, about 304 tok/s and 9.10x over its row-serial diagnostic; 34.8 GiB peak; batched token matched that diagnostic | Cached Metal configurations remove repeated FFI setup and the recovered whole-prompt strategy is directionally correct | Still far below P124 and differs from the retained production token; both kernels remain opt-in |
 
 P73's 59.866 tok/s is explained by `(1 + 1.57) / 43.95 ms`, approximately
 58.5 tok/s. It is not evidence of a universal 59 tok/s target path. The serial
@@ -81,6 +85,10 @@ directions. New code should build on them.
     keeps one exact target/MTP snapshot rather than multiplying hybrid entries.
     Its public cached-token count and cache-clear behavior are part of the API
     contract; an MTP hit must preserve both committed tokens and acceptance.
+12. **Treat P124/P271 as the implementation baseline.** Prefill must reproduce
+    the stock split-K whole-prompt graph, while MTP starts with the eight-round
+    depth-2 probe and request-static depth-3 promotion/demotion policy. Do not
+    substitute the older P73 numbers for this later production lineage.
 
 ## Reject or do not repeat
 
@@ -91,6 +99,7 @@ directions. New code should build on them.
 | Grouped verify down/reduce prototype | Isolated Q4 gain 1.05x; Q8 generalization produced incorrect values | Do not port as-is; require a new exact Q8 design and end-to-end cost case |
 | Routed-expert union gate/up prototype | The guarded depth-2 full-model parity run reached 38.3 GiB RSS before completion and was terminated at the 38 GiB cap | Rejected for the 64 GiB product profile; do not raise the safety cap to promote it |
 | Interleaving verifier rows by top-k slot | Exact 3-row A/B/A was 56.94 ms row-major versus 57.01 ms interleaved (0.999x) | Rejected; argpartition slots do not provide useful cross-row expert locality |
+| Compiling three serial rows inside one fixed S=3 layer closure | Exact layer-major control was 78.368 ms and the compiled closure was 78.344 ms (1.0003x), with token parity and 35.4 GiB peak RSS | Rejected; enclosing three sequential decode graphs in one closure does not remove their weight reads or synchronization cost |
 | Q4 MTP depth 3/4 on P73 | Warm 64-token results: depth 2 = 31.98 tok/s (22/38 accepted), depth 3 = 30.96 (24/51), depth 4 = 29.92 (5/20 and early fallback). Depth 4 also diverged from the depth-2/3 greedy text | Keep depth 2 as the safe default; deeper drafting does not repay extra head/verifier rows on this runtime and 5-row numerical parity is not promoted |
 | Qwen4 Fused-QKV flag used in P73 | The Qwen4 geometry declined the path, so apparent timing differences were environmental | No performance claim and no blind rerun |
 | Decode async ladder used in P73 | The Qwen4 layer loop never engaged it | No performance claim and no blind rerun |

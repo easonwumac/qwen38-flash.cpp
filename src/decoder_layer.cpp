@@ -192,6 +192,46 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
     return result;
 }
 
+MlxArray DecoderLayer::forward_prefill(
+    MlxArray stream_batch,
+    const std::span<const std::uint32_t> tokens,
+    DecoderLayerState& state) const {
+    const std::vector<int> shape = stream_batch.shape();
+    if (tokens.empty() || tokens.size() > 256 || shape.size() != 3 || shape[0] != 1 ||
+        shape[1] != static_cast<int>(tokens.size())) {
+        throw std::runtime_error("decoder prefill requires a matching [1,S,streams] batch");
+    }
+    if (tokens.size() == 1) {
+        return forward_decode(stream_batch, tokens.front(), state);
+    }
+
+    if (ple_ != nullptr) {
+        std::vector<PleState> checkpoints;
+        MlxArray ple_output = ple_->forward_verify(
+            stream_batch, tokens, state.ple, checkpoints);
+        stream_batch = MlxArray::add(stream_batch, ple_output);
+        state.ple = std::move(checkpoints.back());
+    }
+
+    HyperConnectionRead attention = attention_hyper_connection_.read(stream_batch);
+    MlxArray attention_output;
+    if (linear_attention_ != nullptr) {
+        attention_output = linear_attention_->forward_prefill(
+            attention.mixed, state.linear_attention);
+    } else {
+        std::vector<SelfAttentionState> checkpoints;
+        attention_output = full_attention_->forward_verify(
+            attention.mixed, state.full_attention, checkpoints);
+        state.full_attention = std::move(checkpoints.back());
+    }
+    MlxArray post_attention = attention_hyper_connection_.write(
+        stream_batch, attention_output, attention.injection);
+    HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention);
+    MlxArray mlp_output = mlp_.forward_prefill(mlp.mixed);
+    return mlp_hyper_connection_.write(
+        post_attention, mlp_output, mlp.injection);
+}
+
 MlxArray DecoderLayer::forward_decode_graph(
     const MlxArray& input_stream,
     const std::uint32_t token,

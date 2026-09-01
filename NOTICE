@@ -6,3 +6,10 @@ Portions of the fused selected-MoE Metal kernel design are adapted from MTPLX
 
 The Q4 down-projection unpacking pattern is adapted from MLX
 (Copyright Apple Inc.), licensed under the MIT License.
+
+The fused GatedDeltaNet prefill recurrence is adapted from oMLX
+(Copyright 2026 oMLX contributors), licensed under the Apache License,
+Version 2.0. oMLX's implementation follows MLX-LM.
+
+The sorted multi-row MoE dispatch design is adapted from mlx-serve
+(Copyright 2026 David Dalcu), licensed under the MIT License.

@@ -107,7 +107,36 @@ MlxMetalKernel::MlxMetalKernel(
     if (kernel_.ctx == nullptr) throw std::runtime_error("MLX could not create Metal kernel");
 }
 
+MlxMetalKernel::MlxMetalKernel(
+    const std::string_view name,
+    const std::span<const char* const> input_names,
+    const std::span<const char* const> output_names,
+    const std::string_view source,
+    const std::string_view header) {
+    std::vector<const char*> mutable_input_names(input_names.begin(), input_names.end());
+    mlx_vector_string inputs = mlx_vector_string_new_data(
+        mutable_input_names.data(), mutable_input_names.size());
+    std::vector<const char*> mutable_output_names(output_names.begin(), output_names.end());
+    mlx_vector_string outputs = mlx_vector_string_new_data(
+        mutable_output_names.data(), mutable_output_names.size());
+    kernel_ = mlx_fast_metal_kernel_new(
+        std::string(name).c_str(),
+        inputs,
+        outputs,
+        std::string(source).c_str(),
+        std::string(header).c_str(),
+        true,
+        false);
+    static_cast<void>(mlx_vector_string_free(inputs));
+    static_cast<void>(mlx_vector_string_free(outputs));
+    if (kernel_.ctx == nullptr) throw std::runtime_error("MLX could not create Metal kernel");
+}
+
 MlxMetalKernel::~MlxMetalKernel() {
+    for (const auto& [key, config] : configs_) {
+        static_cast<void>(key);
+        if (config.ctx != nullptr) mlx_fast_metal_kernel_config_free(config);
+    }
     if (kernel_.ctx != nullptr) mlx_fast_metal_kernel_free(kernel_);
 }
 
@@ -149,6 +178,110 @@ MlxArray MlxMetalKernel::apply(
     mlx_fast_metal_kernel_config_free(config);
     check(status, "metal_kernel apply");
     return result;
+}
+
+std::vector<MlxArray> MlxMetalKernel::apply(
+    const std::span<const MlxArray* const> inputs,
+    const std::span<const MlxMetalOutputSpec> outputs,
+    const std::span<const int, 3> grid,
+    const std::span<const int, 3> threadgroup,
+    const std::span<const MlxMetalDtypeTemplate> dtype_templates,
+    const std::span<const MlxMetalIntTemplate> int_templates) const {
+    if (outputs.empty()) throw std::runtime_error("Metal kernel requires an output");
+
+    std::string config_key;
+    const auto append_int = [&config_key](const int value) {
+        config_key.append(std::to_string(value));
+        config_key.push_back(',');
+    };
+    for (const MlxMetalOutputSpec& output : outputs) {
+        append_int(static_cast<int>(output.dtype));
+        append_int(static_cast<int>(output.shape.size()));
+        for (const int dimension : output.shape) append_int(dimension);
+    }
+    for (const int dimension : grid) append_int(dimension);
+    for (const int dimension : threadgroup) append_int(dimension);
+    for (const MlxMetalDtypeTemplate& argument : dtype_templates) {
+        config_key.append(argument.name);
+        config_key.push_back('=');
+        append_int(static_cast<int>(argument.value));
+    }
+    for (const MlxMetalIntTemplate& argument : int_templates) {
+        config_key.append(argument.name);
+        config_key.push_back('=');
+        append_int(argument.value);
+    }
+
+    std::scoped_lock config_lock(config_mutex_);
+    std::vector<mlx_array> raw_inputs;
+    raw_inputs.reserve(inputs.size());
+    for (const MlxArray* input : inputs) {
+        if (input == nullptr) throw std::runtime_error("null Metal kernel input");
+        raw_inputs.push_back(input->value_);
+    }
+    mlx_vector_array input_vector = mlx_vector_array_new_data(raw_inputs.data(), raw_inputs.size());
+    mlx_vector_array output_vector = mlx_vector_array_new();
+    auto cached = configs_.find(config_key);
+    mlx_fast_metal_kernel_config config = cached == configs_.end()
+        ? mlx_fast_metal_kernel_config_new()
+        : cached->second;
+    const bool new_config = cached == configs_.end();
+    bool config_retained = !new_config;
+    const auto cleanup = [&] {
+        if (input_vector.ctx != nullptr) mlx_vector_array_free(input_vector);
+        if (output_vector.ctx != nullptr) mlx_vector_array_free(output_vector);
+        if (!config_retained && config.ctx != nullptr) {
+            mlx_fast_metal_kernel_config_free(config);
+        }
+    };
+    if (input_vector.ctx == nullptr || output_vector.ctx == nullptr || config.ctx == nullptr) {
+        cleanup();
+        throw std::runtime_error("MLX could not create Metal kernel arguments");
+    }
+    try {
+        if (new_config) {
+            for (const MlxMetalOutputSpec& output : outputs) {
+                check(mlx_fast_metal_kernel_config_add_output_arg(
+                          config, output.shape.data(), output.shape.size(), output.dtype),
+                    "metal_kernel output");
+            }
+            check(mlx_fast_metal_kernel_config_set_grid(config, grid[0], grid[1], grid[2]),
+                "metal_kernel grid");
+            check(mlx_fast_metal_kernel_config_set_thread_group(
+                      config, threadgroup[0], threadgroup[1], threadgroup[2]),
+                "metal_kernel threadgroup");
+            for (const MlxMetalDtypeTemplate& argument : dtype_templates) {
+                check(mlx_fast_metal_kernel_config_add_template_arg_dtype(
+                          config, argument.name.c_str(), argument.value),
+                    "metal_kernel dtype template");
+            }
+            for (const MlxMetalIntTemplate& argument : int_templates) {
+                check(mlx_fast_metal_kernel_config_add_template_arg_int(
+                          config, argument.name.c_str(), argument.value),
+                    "metal_kernel integer template");
+            }
+            configs_.emplace(config_key, config);
+            config_retained = true;
+        }
+        const Stream stream;
+        check(mlx_fast_metal_kernel_apply(
+                  &output_vector, kernel_, input_vector, config, stream.get()),
+            "metal_kernel apply");
+        if (mlx_vector_array_size(output_vector) != outputs.size()) {
+            throw std::runtime_error("Metal kernel returned an unexpected output count");
+        }
+        std::vector<MlxArray> result(outputs.size());
+        for (std::size_t index = 0; index < result.size(); ++index) {
+            check(mlx_vector_array_get(&result[index].value_, output_vector, index),
+                "metal_kernel get");
+        }
+        static_cast<void>(mlx_vector_array_free(input_vector));
+        static_cast<void>(mlx_vector_array_free(output_vector));
+        return result;
+    } catch (...) {
+        cleanup();
+        throw;
+    }
 }
 
 MlxArray MlxArray::from_float32(
@@ -503,6 +636,21 @@ MlxArray MlxArray::argpartition_axis(const int kth, const int axis) const {
     return result;
 }
 
+MlxArray MlxArray::argsort_axis(const int axis) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_argsort_axis(&result.value_, value_, axis, stream.get()), "argsort");
+    return result;
+}
+
+MlxArray MlxArray::floor_divide(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_floor_divide(&result.value_, left.value_, right.value_, stream.get()),
+        "floor_divide");
+    return result;
+}
+
 MlxArray MlxArray::argmax_all() const {
     MlxArray result;
     const Stream stream;
@@ -534,6 +682,40 @@ MlxArray MlxArray::dequantize(
               mlx_optional_dtype{.value = output_dtype, .has_value = true},
               stream.get()),
         "dequantize");
+    return result;
+}
+
+MlxArray MlxArray::gather_quantized_matmul(
+    const MlxArray& input,
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const MlxArray& lhs_indices,
+    const MlxArray& rhs_indices,
+    const int group_size,
+    const int bits,
+    const bool sorted_indices,
+    const bool transpose) {
+    if (group_size <= 0 || bits <= 0) {
+        throw std::runtime_error("invalid gathered quantization parameters");
+    }
+    MlxArray result;
+    const Stream stream;
+    check(mlx_gather_qmm(
+              &result.value_,
+              input.value_,
+              weight.value_,
+              scales.value_,
+              biases.value_,
+              lhs_indices.value_,
+              rhs_indices.value_,
+              transpose,
+              mlx_optional_int{.value = group_size, .has_value = true},
+              mlx_optional_int{.value = bits, .has_value = true},
+              "affine",
+              sorted_indices,
+              stream.get()),
+        "gather_qmm");
     return result;
 }
 

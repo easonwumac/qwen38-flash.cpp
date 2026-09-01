@@ -99,6 +99,54 @@ int main() {
         std::cerr << "MLX shared reference mismatch\n";
         return 1;
     }
+    {
+        constexpr std::string_view source = R"metal(
+            const uint i = thread_position_in_grid.x;
+            plus[i] = static_cast<T>((float)x[i] + N);
+            times[i] = static_cast<T>((float)x[i] * N);
+        )metal";
+        const char* inputs[]{"x"};
+        const char* outputs[]{"plus", "times"};
+        const qwen38::MlxMetalKernel kernel(
+            "qwen38_multi_output_test", inputs, outputs, source);
+        const std::array<const qwen38::MlxArray*, 1> kernel_inputs{&left};
+        const std::array<qwen38::MlxMetalOutputSpec, 2> output_specs{{
+            {.shape = {2, 2}, .dtype = MLX_FLOAT32},
+            {.shape = {2, 2}, .dtype = MLX_FLOAT32},
+        }};
+        const std::array<int, 3> grid{4, 1, 1};
+        const std::array<int, 3> threadgroup{4, 1, 1};
+        const std::array<qwen38::MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = MLX_FLOAT32},
+        }};
+        const std::array<qwen38::MlxMetalIntTemplate, 1> int_templates{{
+            {.name = "N", .value = 3},
+        }};
+        const auto kernel_outputs = kernel.apply(
+            kernel_inputs,
+            output_specs,
+            grid,
+            threadgroup,
+            dtype_templates,
+            int_templates);
+        if (kernel_outputs[0].to_float32() != std::vector<float>({4, 5, 6, 7}) ||
+            kernel_outputs[1].to_float32() != std::vector<float>({3, 6, 9, 12})) {
+            std::cerr << "MLX multi-output Metal kernel mismatch\n";
+            return 1;
+        }
+        auto cached_outputs = kernel.apply(
+            kernel_inputs,
+            output_specs,
+            grid,
+            threadgroup,
+            dtype_templates,
+            int_templates);
+        if (cached_outputs[0].to_float32() != std::vector<float>({4, 5, 6, 7}) ||
+            cached_outputs[1].to_float32() != std::vector<float>({3, 6, 9, 12})) {
+            std::cerr << "cached MLX Metal configuration mismatch\n";
+            return 1;
+        }
+    }
     qwen38::ModelDecodeState state(1);
     state.token_count = 7;
     state.layers[0].linear_attention.initialized = true;

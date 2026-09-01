@@ -32,6 +32,9 @@ public:
         const MlxArray& input,
         const GatedDeltaNetState& origin,
         std::vector<GatedDeltaNetState>& checkpoints) const;
+    [[nodiscard]] MlxArray forward_prefill(
+        const MlxArray& input,
+        GatedDeltaNetState& state) const;
 
 private:
     struct QuantizedProjection {

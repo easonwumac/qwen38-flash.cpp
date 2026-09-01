@@ -1,7 +1,12 @@
 #include "qwen38/gated_delta_net.hpp"
 
+#include "gdn_metal_kernels.hpp"
+
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -42,6 +47,20 @@ MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
         result = MlxArray::concatenate(result, rows[row], 1);
     }
     return result;
+}
+
+std::shared_ptr<MlxMetalKernel> prefill_recurrence_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"q", "k", "v", "g", "beta", "state_in", "T"};
+        const char* outputs[]{"y", "state_out"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_gated_delta_prefill",
+            inputs,
+            outputs,
+            gdn_metal::recurrence,
+            gdn_metal::header);
+    }();
+    return kernel;
 }
 
 } // namespace
@@ -311,6 +330,120 @@ MlxArray GatedDeltaNet::forward_verify(
         checkpoints[row].initialized = true;
     }
     return project(concatenate_sequence_rows(gated_rows), output_projection_);
+}
+
+MlxArray GatedDeltaNet::forward_prefill(
+    const MlxArray& input,
+    GatedDeltaNetState& state) const {
+    const std::vector<int> input_shape = input.shape();
+    if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 2 ||
+        input_shape[1] > 256) {
+        throw std::runtime_error("GatedDeltaNet prefill requires shape [1,S,hidden], S=2..256");
+    }
+    const char* enabled = std::getenv("QWEN38_GDN_METAL_PREFILL");
+    if (enabled == nullptr || std::string_view(enabled) != "1") {
+        std::vector<GatedDeltaNetState> checkpoints;
+        MlxArray output = forward_verify(input, state, checkpoints);
+        state = std::move(checkpoints.back());
+        return output;
+    }
+
+    const int rows = input_shape[1];
+    const int key_heads = dimension(key_head_count_, "key_head_count");
+    const int value_heads = dimension(value_head_count_, "value_head_count");
+    const int key_dimension = dimension(key_head_dimension_, "key_head_dimension");
+    const int value_dimension = dimension(value_head_dimension_, "value_head_dimension");
+    if (key_dimension % 32 != 0 || value_heads % key_heads != 0) {
+        throw std::runtime_error("unsupported GatedDeltaNet Metal prefill geometry");
+    }
+    const int key_width = key_heads * key_dimension;
+    const int value_width = value_heads * value_dimension;
+    const int convolution_width = 2 * key_width + value_width;
+
+    MlxArray qkv = project(input, qkv_projection_);
+    MlxArray convolution_state = state.initialized
+        ? state.convolution.share()
+        : MlxArray::zeros(std::vector<int>{1, 3, convolution_width}, qkv.dtype());
+    MlxArray recurrent = state.initialized
+        ? state.recurrent.share()
+        : MlxArray::zeros(
+              std::vector<int>{1, value_heads, value_dimension, key_dimension},
+              qkv.dtype());
+    MlxArray convolution_input = MlxArray::concatenate(convolution_state, qkv, 1);
+    MlxArray convolved = MlxArray::conv1d(
+        convolution_input, convolution_weight_, 1, 0, 1, convolution_width).silu();
+
+    const std::vector<int> strides{1, 1, 1};
+    MlxArray query = convolved.slice(
+        std::vector<int>{0, 0, 0},
+        std::vector<int>{1, rows, key_width},
+        strides).reshape(std::vector<int>{1, rows, key_heads, key_dimension});
+    MlxArray key = convolved.slice(
+        std::vector<int>{0, 0, key_width},
+        std::vector<int>{1, rows, 2 * key_width},
+        strides).reshape(std::vector<int>{1, rows, key_heads, key_dimension});
+    MlxArray value = convolved.slice(
+        std::vector<int>{0, 0, 2 * key_width},
+        std::vector<int>{1, rows, convolution_width},
+        strides).reshape(std::vector<int>{1, rows, value_heads, value_dimension});
+    const std::vector<float> ones_data(key_head_dimension_, 1.0F);
+    MlxArray ones = MlxArray::from_float32(
+        ones_data, std::vector<int>{key_dimension}).astype(query.dtype());
+    query = MlxArray::multiply(
+        query.rms_norm(ones, 1.0e-6F),
+        scalar(1.0F / static_cast<float>(key_head_dimension_), query.dtype()));
+    key = MlxArray::multiply(
+        key.rms_norm(ones, 1.0e-6F),
+        scalar(1.0F / std::sqrt(static_cast<float>(key_head_dimension_)), key.dtype()));
+
+    MlxArray beta = project(input, beta_projection_).sigmoid();
+    MlxArray decay_input = MlxArray::add(project(input, decay_projection_), decay_bias_);
+    MlxArray softplus = decay_input.astype(MLX_FLOAT32).exp().log1p();
+    MlxArray decay_rate = decay_log_.astype(MLX_FLOAT32).exp();
+    MlxArray decay = MlxArray::multiply(
+        decay_rate, softplus).negative().exp().astype(qkv.dtype());
+    const std::array<std::int32_t, 1> row_value{rows};
+    const std::array<int, 0> scalar_shape{};
+    MlxArray row_count = MlxArray::from_int32(row_value, scalar_shape);
+
+    const std::array<const MlxArray*, 7> inputs{
+        &query, &key, &value, &decay, &beta, &recurrent, &row_count};
+    const std::array<MlxMetalOutputSpec, 2> outputs{{
+        {.shape = {1, rows, value_heads, value_dimension}, .dtype = qkv.dtype()},
+        {.shape = {1, value_heads, value_dimension, key_dimension},
+         .dtype = recurrent.dtype()},
+    }};
+    const std::array<int, 3> grid{32, value_dimension, value_heads};
+    const std::array<int, 3> threadgroup{32, 4, 1};
+    const std::array<MlxMetalDtypeTemplate, 3> dtype_templates{{
+        {.name = "InT", .value = query.dtype()},
+        {.name = "StT", .value = recurrent.dtype()},
+        {.name = "OutT", .value = qkv.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 4> int_templates{{
+        {.name = "Dk", .value = key_dimension},
+        {.name = "Dv", .value = value_dimension},
+        {.name = "Hk", .value = key_heads},
+        {.name = "Hv", .value = value_heads},
+    }};
+    std::vector<MlxArray> recurrence = prefill_recurrence_kernel()->apply(
+        inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
+
+    state.convolution = convolution_input.slice(
+        std::vector<int>{0, rows, 0},
+        std::vector<int>{1, rows + 3, convolution_width},
+        strides);
+    state.recurrent = std::move(recurrence[1]);
+    state.initialized = true;
+
+    MlxArray normalized = recurrence[0].rms_norm(norm_weight_, epsilon_);
+    MlxArray z = project(input, z_projection_).reshape(
+        std::vector<int>{1, rows, value_heads, value_dimension});
+    MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
+    MlxArray gated = MlxArray::multiply(normalized, gate);
+    return project(
+        gated.reshape(std::vector<int>{1, rows, value_width}),
+        output_projection_);
 }
 
 } // namespace qwen38

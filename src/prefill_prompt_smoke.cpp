@@ -32,6 +32,7 @@ std::uint32_t top1(const qwen38::MlxArray& logits) {
 struct Result {
     std::uint32_t token_id;
     double milliseconds;
+    std::vector<double> layer_ms;
 };
 
 Result serial_prefill(
@@ -45,7 +46,7 @@ Result serial_prefill(
     const std::uint32_t predicted = top1(model.forward_decode(tokens.back(), state));
     const double milliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    return {predicted, milliseconds};
+    return {predicted, milliseconds, {}};
 }
 
 Result batched_prefill(
@@ -56,10 +57,12 @@ Result batched_prefill(
     qwen38::ModelDecodeState state = model.make_state();
     const std::size_t prefill_rows = tokens.size() - 1;
     const std::size_t batched_rows = prefill_rows - serial_tail;
+    std::vector<double> layer_ms;
     const auto started = std::chrono::steady_clock::now();
     for (std::size_t offset = 0; offset < batched_rows; offset += chunk_rows) {
         const std::size_t count = std::min(chunk_rows, batched_rows - offset);
-        static_cast<void>(model.prefill_chunk(tokens.subspan(offset, count), state));
+        static_cast<void>(model.prefill_chunk(
+            tokens.subspan(offset, count), state, &layer_ms));
     }
     for (std::size_t index = batched_rows; index < prefill_rows; ++index) {
         static_cast<void>(model.consume_decode_capture(tokens[index], state));
@@ -67,7 +70,7 @@ Result batched_prefill(
     const std::uint32_t predicted = top1(model.forward_decode(tokens.back(), state));
     const double milliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started).count();
-    return {predicted, milliseconds};
+    return {predicted, milliseconds, std::move(layer_ms)};
 }
 
 } // namespace
@@ -85,8 +88,8 @@ int main(int argc, char** argv) {
         }
         const std::filesystem::path model_path = argv[1];
         const std::size_t chunk_rows = std::stoul(argv[3]);
-        if (chunk_rows == 0 || chunk_rows > 64) {
-            throw std::runtime_error("CHUNK_ROWS must be between 1 and 64");
+        if (chunk_rows == 0 || chunk_rows > 256) {
+            throw std::runtime_error("CHUNK_ROWS must be between 1 and 256");
         }
         const std::size_t serial_tail = argc >= 5 ? std::stoul(argv[4]) : 0;
         const std::uint32_t expected = argc == 6
@@ -117,6 +120,15 @@ int main(int argc, char** argv) {
         qwen38::MlxArray::clear_cache();
         const Result batched = batched_prefill(model, tokens, chunk_rows, serial_tail);
 
+        double linear_layer_ms = 0.0;
+        double full_layer_ms = 0.0;
+        for (std::size_t layer = 0; layer < batched.layer_ms.size(); ++layer) {
+            (layer + 1) % 4 == 0
+                ? full_layer_ms += batched.layer_ms[layer]
+                : linear_layer_ms += batched.layer_ms[layer];
+        }
+        const auto slowest = std::ranges::max_element(batched.layer_ms);
+
         const std::array<std::uint32_t, 1> serial_id{serial.token_id};
         const std::array<std::uint32_t, 1> batched_id{batched.token_id};
         std::cout << "{\"prompt_tokens\":" << tokens.size()
@@ -125,6 +137,11 @@ int main(int argc, char** argv) {
                   << ",\"serial_ms\":" << serial.milliseconds
                   << ",\"batched_ms\":" << batched.milliseconds
                   << ",\"speedup\":" << serial.milliseconds / batched.milliseconds
+                  << ",\"profile\":{\"linear_layers_ms\":" << linear_layer_ms
+                  << ",\"full_layers_ms\":" << full_layer_ms
+                  << ",\"slowest_layer\":"
+                  << std::distance(batched.layer_ms.begin(), slowest)
+                  << ",\"slowest_layer_ms\":" << *slowest << "}"
                   << ",\"serial_token_id\":" << serial.token_id
                   << ",\"serial_text\":\"" << tokenizer.decode(serial_id) << "\""
                   << ",\"batched_token_id\":" << batched.token_id

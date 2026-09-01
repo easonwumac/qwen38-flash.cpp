@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -342,8 +343,8 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
 
 MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
     const std::vector<int> shape = input.shape();
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 64) {
-        throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..64");
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 256) {
+        throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..256");
     }
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
     if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
@@ -395,6 +396,88 @@ MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
             slice_sequence_row(input, static_cast<std::size_t>(row))));
     }
     return MlxArray::add(concatenate_sequence_rows(routed), forward_shared(input));
+}
+
+MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
+    const std::vector<int> shape = input.shape();
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 256) {
+        throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..256");
+    }
+    const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
+    if (shape[1] < 16 || grouped == nullptr || std::string_view(grouped) != "1") {
+        return forward_verify(input);
+    }
+
+    const int rows = shape[1];
+    const int hidden_size = shape[2];
+    const int top_k = checked_int(experts_per_token_, "experts_per_token");
+    const int slots = rows * top_k;
+    MlxArray gates = MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+    MlxArray partition = gates.argpartition_axis(-top_k, -1);
+    const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - top_k};
+    const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};
+    const std::vector<int> strides{1, 1, 1};
+    MlxArray selected = partition.slice(start, stop, strides);
+    MlxArray weights = MlxArray::take_along_axis(gates, selected, -1);
+    if (normalize_topk_probability_) {
+        weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
+    }
+    weights = weights.astype(input.dtype());
+
+    MlxArray flat_experts = selected.reshape(std::vector<int>{slots});
+    MlxArray order = flat_experts.argsort_axis(0);
+    MlxArray inverse_order = order.argsort_axis(0);
+    MlxArray sorted_experts = MlxArray::take_axis(flat_experts, order, 0);
+    const std::array<std::int32_t, 1> divisor_value{top_k};
+    const std::array<int, 0> scalar_shape{};
+    MlxArray divisor = MlxArray::from_int32(divisor_value, scalar_shape);
+    MlxArray source_rows = MlxArray::floor_divide(order, divisor);
+    MlxArray flat_input = input.reshape(std::vector<int>{rows, hidden_size});
+    MlxArray gathered_input = MlxArray::take_axis(flat_input, source_rows, 0).reshape(
+        std::vector<int>{slots, 1, hidden_size});
+    MlxArray no_indices;
+
+    MlxArray gate = MlxArray::gather_quantized_matmul(
+        gathered_input,
+        expert_gate_.weight,
+        expert_gate_.scales,
+        expert_gate_.biases,
+        no_indices,
+        sorted_experts,
+        group_size_,
+        bits_,
+        true).silu();
+    MlxArray up = MlxArray::gather_quantized_matmul(
+        gathered_input,
+        expert_up_.weight,
+        expert_up_.scales,
+        expert_up_.biases,
+        no_indices,
+        sorted_experts,
+        group_size_,
+        bits_,
+        true);
+    MlxArray expert_hidden = MlxArray::multiply(gate, up);
+    const std::vector<int> expert_shape = expert_hidden.shape();
+    if (expert_shape.size() != 3 || expert_shape[0] != slots || expert_shape[1] != 1) {
+        throw std::runtime_error("grouped MoE gate/up returned an invalid shape");
+    }
+    MlxArray down = MlxArray::gather_quantized_matmul(
+        expert_hidden,
+        expert_down_.weight,
+        expert_down_.scales,
+        expert_down_.biases,
+        no_indices,
+        sorted_experts,
+        group_size_,
+        bits_,
+        true).reshape(std::vector<int>{slots, hidden_size});
+    MlxArray unsorted = MlxArray::take_axis(down, inverse_order, 0).reshape(
+        std::vector<int>{1, rows, top_k, hidden_size});
+    MlxArray weighted = MlxArray::multiply(
+        unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
+    MlxArray routed = weighted.sum_axis(2);
+    return MlxArray::add(routed, forward_shared(input));
 }
 
 } // namespace qwen38
