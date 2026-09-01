@@ -3,6 +3,7 @@
 #include "qwen38/runtime.hpp"
 #include "qwen38/inference.hpp"
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +21,9 @@ struct HttpResponse {
     int status{200};
     std::string content_type{"application/json"};
     std::string body;
+    // When present, the HTTP layer sends Transfer-Encoding: chunked and passes
+    // each already-framed body fragment to the sink as it becomes available.
+    std::function<void(const std::function<bool(std::string_view)>&)> body_stream;
 };
 
 class Api final {

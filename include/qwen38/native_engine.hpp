@@ -41,6 +41,10 @@ public:
     [[nodiscard]] GenerationResult complete(
         std::string_view prompt,
         std::size_t max_tokens) override;
+    [[nodiscard]] GenerationResult complete_stream(
+        std::string_view prompt,
+        std::size_t max_tokens,
+        const TextDeltaCallback& on_delta) override;
     void clear_cache() override;
 
 private:
@@ -64,6 +68,11 @@ private:
     std::size_t mtp_depth_{0};
     std::uint32_t chat_end_token_{0};
     std::mutex inference_mutex_;
+
+    [[nodiscard]] GenerationResult complete_impl(
+        std::string_view prompt,
+        std::size_t max_tokens,
+        const TextDeltaCallback* on_delta);
 };
 
 } // namespace qwen38

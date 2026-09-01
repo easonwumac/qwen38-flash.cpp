@@ -11,10 +11,10 @@ a UI and is not a wrapper around `mlx-serve`.
 > [!IMPORTANT]
 > The current milestone performs real end-to-end greedy generation through all
 > 48 layers, runs transactional depth-2 MTP when a companion is present, and
-> serves OpenAI-style completion APIs. It is not yet the optimized release: the
-> controlled decode gates remain unmet, streaming and chunked prefill are
-> outstanding, and QSA contexts above the 2,048-token selection budget remain
-> unsupported.
+> serves OpenAI-style completion APIs with live SSE token streaming and bounded
+> chunked prefill. It is not yet the final optimized release: the controlled
+> decode targets remain unmet, and QSA contexts above the 2,048-token selection
+> budget remain unsupported.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -93,7 +93,15 @@ curl http://127.0.0.1:11438/metrics
 curl -X POST http://127.0.0.1:11438/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"Hello","max_tokens":1}'
+curl -N -X POST http://127.0.0.1:11438/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hello"}],"max_tokens":64,"stream":true}'
 ```
+
+Streaming uses HTTP/1.1 chunked `text/event-stream`. Confirmed target tokens are
+sent directly from the native decode/MTP path, followed by a finish chunk and
+`data: [DONE]`; this is not post-generation response slicing. Set
+`stream_options.include_usage` to `true` to include usage in the finish chunk.
 
 `--profile speed` applies the complete verified Apple-Silicon configuration:
 the fused Q4 MoE/device router, compiled linear layers, fused HC/GDN paths,

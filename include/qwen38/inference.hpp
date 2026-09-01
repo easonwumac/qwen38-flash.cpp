@@ -2,11 +2,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace qwen38 {
+
+using TextDeltaCallback = std::function<void(std::string_view)>;
 
 struct GenerationResult {
     std::string text;
@@ -38,6 +41,14 @@ public:
     [[nodiscard]] virtual GenerationResult complete(
         std::string_view prompt,
         std::size_t max_tokens) = 0;
+    [[nodiscard]] virtual GenerationResult complete_stream(
+        std::string_view prompt,
+        std::size_t max_tokens,
+        const TextDeltaCallback& on_delta) {
+        GenerationResult result = complete(prompt, max_tokens);
+        if (!result.text.empty()) on_delta(result.text);
+        return result;
+    }
     virtual void clear_cache() = 0;
 };
 

@@ -88,9 +88,38 @@ void run_api_tests() {
     QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
     QWEN38_CHECK(inference_api.handle(post("/admin/cache/clear", "{}")).status == 200);
     QWEN38_CHECK(engine.cleared);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 8);
-    QWEN38_CHECK(inference_api.handle(post(
-        "/v1/completions", R"({"prompt":"x","stream":true})")).status == 400);
+
+    const auto stream = inference_api.handle(post(
+        "/v1/completions",
+        R"({"prompt":"x","stream":true,"stream_options":{"include_usage":true}})"));
+    QWEN38_CHECK(stream.status == 200);
+    QWEN38_CHECK(stream.content_type == "text/event-stream; charset=utf-8");
+    QWEN38_CHECK(static_cast<bool>(stream.body_stream));
+    std::string stream_wire;
+    stream.body_stream([&](const std::string_view fragment) {
+        stream_wire.append(fragment);
+        return true;
+    });
+    QWEN38_CHECK(stream_wire.find("\"text\":\"answer\"") != std::string::npos);
+    QWEN38_CHECK(stream_wire.find("\"completion_tokens\":2") != std::string::npos);
+    QWEN38_CHECK(stream_wire.ends_with("data: [DONE]\n\n"));
+
+    engine.response_text = "brief reasoning</think>\n\nfinal answer";
+    const auto chat_stream = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"stream":true})"));
+    std::string chat_stream_wire;
+    chat_stream.body_stream([&](const std::string_view fragment) {
+        chat_stream_wire.append(fragment);
+        return true;
+    });
+    QWEN38_CHECK(chat_stream_wire.find("\"role\":\"assistant\"") != std::string::npos);
+    QWEN38_CHECK(chat_stream_wire.find(
+        "\"reasoning_content\":\"brief reasoning\"") != std::string::npos);
+    QWEN38_CHECK(chat_stream_wire.find("\"content\":\"final answer\"") !=
+        std::string::npos);
+    QWEN38_CHECK(chat_stream_wire.ends_with("data: [DONE]\n\n"));
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 12);
 
     QWEN38_CHECK(qwen38::json_escape("a\n\"b") == "a\\n\\\"b");
 }

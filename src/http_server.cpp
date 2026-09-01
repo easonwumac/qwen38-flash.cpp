@@ -116,11 +116,31 @@ bool send_all(const int fd, const std::string_view data) {
 void write_response(const int fd, const HttpResponse& response) {
     std::ostringstream header;
     header << "HTTP/1.1 " << response.status << ' ' << reason_phrase(response.status)
-           << "\r\nContent-Type: " << response.content_type
-           << "\r\nContent-Length: " << response.body.size()
+           << "\r\nContent-Type: " << response.content_type;
+    if (!response.body_stream) {
+        header << "\r\nContent-Length: " << response.body.size()
+               << "\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n";
+        const std::string wire = header.str() + response.body;
+        static_cast<void>(send_all(fd, wire));
+        return;
+    }
+
+    header << "\r\nTransfer-Encoding: chunked"
+           << "\r\nCache-Control: no-cache"
+           << "\r\nX-Accel-Buffering: no"
            << "\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n";
-    const std::string wire = header.str() + response.body;
-    static_cast<void>(send_all(fd, wire));
+    if (!send_all(fd, header.str())) return;
+    bool connected = true;
+    const auto sink = [&](const std::string_view fragment) {
+        if (!connected) return false;
+        std::ostringstream chunk_header;
+        chunk_header << std::hex << fragment.size() << "\r\n";
+        connected = send_all(fd, chunk_header.str()) && send_all(fd, fragment) &&
+            send_all(fd, "\r\n");
+        return connected;
+    };
+    response.body_stream(sink);
+    if (connected) static_cast<void>(send_all(fd, "0\r\n\r\n"));
 }
 
 } // namespace
@@ -192,6 +212,11 @@ void HttpServer::handle_client(const int client_fd) const {
     const timeval timeout{.tv_sec = 30, .tv_usec = 0};
     static_cast<void>(::setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)));
     static_cast<void>(::setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)));
+#ifdef SO_NOSIGPIPE
+    const int no_sigpipe = 1;
+    static_cast<void>(::setsockopt(
+        client_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)));
+#endif
 
     std::string wire;
     wire.reserve(8192);

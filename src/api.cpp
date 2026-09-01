@@ -33,10 +33,16 @@ std::size_t max_tokens(const Json& body) {
     return static_cast<std::size_t>(parsed);
 }
 
-void reject_streaming(const Json& body) {
-    if (const Json* stream = body.find("stream"); stream != nullptr && stream->as_boolean()) {
-        throw std::runtime_error("streaming responses are not implemented yet");
-    }
+bool streaming_enabled(const Json& body) {
+    const Json* stream = body.find("stream");
+    return stream != nullptr && stream->as_boolean();
+}
+
+bool stream_usage_enabled(const Json& body) {
+    const Json* options = body.find("stream_options");
+    if (options == nullptr) return false;
+    const Json* include = options->find("include_usage");
+    return include != nullptr && include->as_boolean();
 }
 
 ChatTemplateOptions chat_template_options(const Json& body) {
@@ -136,6 +142,54 @@ std::string completion_json(
     return out.str();
 }
 
+std::string stream_delta_json(
+    const RuntimeSnapshot& snapshot,
+    const bool chat,
+    const std::string_view field,
+    const std::string_view delta) {
+    std::ostringstream out;
+    out << "{\"id\":\"qwen38-native\",\"object\":\""
+        << (chat ? "chat.completion.chunk" : "text_completion")
+        << "\",\"model\":\"" << json_escape(snapshot.model_id)
+        << "\",\"choices\":[{\"index\":0,";
+    if (chat) {
+        out << "\"delta\":{\"" << field << "\":\""
+            << json_escape(delta) << "\"}";
+    } else {
+        out << "\"text\":\"" << json_escape(delta) << "\"";
+    }
+    out << ",\"finish_reason\":null}]}";
+    return out.str();
+}
+
+std::string stream_finish_json(
+    const RuntimeSnapshot& snapshot,
+    const GenerationResult& result,
+    const bool chat,
+    const bool include_usage) {
+    std::ostringstream out;
+    out << "{\"id\":\"qwen38-native\",\"object\":\""
+        << (chat ? "chat.completion.chunk" : "text_completion")
+        << "\",\"model\":\"" << json_escape(snapshot.model_id)
+        << "\",\"choices\":[{\"index\":0,";
+    if (chat) out << "\"delta\":{}";
+    else out << "\"text\":\"\"";
+    out << ",\"finish_reason\":\"" << json_escape(result.finish_reason) << "\"}]";
+    if (include_usage) {
+        out << ",\"usage\":{\"prompt_tokens\":" << result.prompt_tokens
+            << ",\"completion_tokens\":" << result.tokens.size()
+            << ",\"total_tokens\":" << result.prompt_tokens + result.tokens.size()
+            << ",\"prompt_tokens_details\":{\"cached_tokens\":"
+            << result.cached_prompt_tokens << "}}";
+    }
+    out << '}';
+    return out.str();
+}
+
+std::string sse_data(const std::string_view json) {
+    return "data: " + std::string(json) + "\n\n";
+}
+
 std::string status_json(const RuntimeSnapshot& snapshot) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(3)
@@ -195,7 +249,8 @@ HttpResponse Api::handle(const HttpRequest& request) const {
         }
         try {
             const Json body = Json::parse(request.body);
-            reject_streaming(body);
+            const bool stream = streaming_enabled(body);
+            const bool include_stream_usage = stream && stream_usage_enabled(body);
             const bool chat = request.target == "/v1/chat/completions";
             ChatTemplateOptions template_options;
             std::string prompt;
@@ -217,9 +272,90 @@ HttpResponse Api::handle(const HttpRequest& request) const {
             } else {
                 prompt = body.at("prompt").as_string();
             }
+            const std::size_t requested_tokens = max_tokens(body);
+            if (stream) {
+                return {
+                    .status = 200,
+                    .content_type = "text/event-stream; charset=utf-8",
+                    .body = {},
+                    .body_stream = [this, prompt = std::move(prompt), requested_tokens,
+                                       chat, template_options, include_stream_usage,
+                                       snapshot](const auto& sink) {
+                        bool connected = true;
+                        const auto emit_json = [&](const std::string_view json) {
+                            if (connected) connected = sink(sse_data(json));
+                        };
+                        if (chat) {
+                            emit_json(stream_delta_json(
+                                snapshot, true, "role", "assistant"));
+                        }
+                        std::string thinking_carry;
+                        bool in_reasoning = chat && template_options.enable_thinking;
+                        const auto emit_text = [&](const std::string_view field,
+                                                   const std::string_view text) {
+                            if (!text.empty()) {
+                                emit_json(stream_delta_json(snapshot, chat, field, text));
+                            }
+                        };
+                        const auto on_delta = [&](const std::string_view raw_delta) {
+                            if (!connected) return;
+                            if (!chat) {
+                                emit_text("text", raw_delta);
+                                return;
+                            }
+                            if (!in_reasoning) {
+                                emit_text("content", raw_delta);
+                                return;
+                            }
+                            constexpr std::string_view close = "</think>";
+                            thinking_carry.append(raw_delta);
+                            if (const std::size_t separator = thinking_carry.find(close);
+                                separator != std::string::npos) {
+                                emit_text("reasoning_content",
+                                    std::string_view(thinking_carry).substr(0, separator));
+                                std::string_view content(thinking_carry);
+                                content.remove_prefix(separator + close.size());
+                                while (!content.empty() && std::isspace(
+                                    static_cast<unsigned char>(content.front()))) {
+                                    content.remove_prefix(1);
+                                }
+                                emit_text("content", content);
+                                thinking_carry.clear();
+                                in_reasoning = false;
+                            } else if (thinking_carry.size() >= close.size()) {
+                                const std::size_t ready =
+                                    thinking_carry.size() - (close.size() - 1);
+                                emit_text("reasoning_content",
+                                    std::string_view(thinking_carry).substr(0, ready));
+                                thinking_carry.erase(0, ready);
+                            }
+                        };
+
+                        runtime_.request_started();
+                        try {
+                            GenerationResult result = engine_->complete_stream(
+                                prompt, requested_tokens, on_delta);
+                            if (!thinking_carry.empty()) {
+                                emit_text(in_reasoning ? "reasoning_content" : "content",
+                                    thinking_carry);
+                            }
+                            runtime_.request_finished(
+                                result.prompt_tokens, result.tokens.size());
+                            emit_json(stream_finish_json(
+                                snapshot, result, chat, include_stream_usage));
+                        } catch (const std::exception& error) {
+                            runtime_.request_finished(0, 0);
+                            emit_json("{\"error\":{\"code\":\"generation_error\","
+                                "\"message\":\"" + json_escape(error.what()) +
+                                "\",\"type\":\"server_error\"}}");
+                        }
+                        if (connected) static_cast<void>(sink("data: [DONE]\n\n"));
+                    },
+                };
+            }
             runtime_.request_started();
             try {
-                GenerationResult result = engine_->complete(prompt, max_tokens(body));
+                GenerationResult result = engine_->complete(prompt, requested_tokens);
                 runtime_.request_finished(result.prompt_tokens, result.tokens.size());
                 return {.body = completion_json(
                     snapshot, result, chat, template_options.enable_thinking)};

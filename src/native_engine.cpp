@@ -115,6 +115,32 @@ bool use_long_history_depth_four(const std::size_t token_count) {
     return batch_verify == nullptr || std::string_view(batch_verify) != "0";
 }
 
+std::size_t complete_utf8_prefix(const std::string_view text) {
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[offset]);
+        std::size_t width = 1;
+        if ((lead & 0x80U) == 0) {
+            width = 1;
+        } else if (lead >= 0xC2U && lead <= 0xDFU) {
+            width = 2;
+        } else if (lead >= 0xE0U && lead <= 0xEFU) {
+            width = 3;
+        } else if (lead >= 0xF0U && lead <= 0xF4U) {
+            width = 4;
+        }
+        if (offset + width > text.size()) break;
+        bool continuation = true;
+        for (std::size_t index = 1; index < width; ++index) {
+            const auto byte = static_cast<unsigned char>(text[offset + index]);
+            continuation = continuation && (byte & 0xC0U) == 0x80U;
+        }
+        if (!continuation) width = 1;
+        offset += width;
+    }
+    return offset;
+}
+
 } // namespace
 
 NativeEngine::NativeEngine(
@@ -154,6 +180,20 @@ NativeEngine::NativeEngine(
 GenerationResult NativeEngine::complete(
     const std::string_view prompt,
     const std::size_t max_tokens) {
+    return complete_impl(prompt, max_tokens, nullptr);
+}
+
+GenerationResult NativeEngine::complete_stream(
+    const std::string_view prompt,
+    const std::size_t max_tokens,
+    const TextDeltaCallback& on_delta) {
+    return complete_impl(prompt, max_tokens, &on_delta);
+}
+
+GenerationResult NativeEngine::complete_impl(
+    const std::string_view prompt,
+    const std::size_t max_tokens,
+    const TextDeltaCallback* on_delta) {
     if (max_tokens == 0 || max_tokens > 256) {
         throw std::runtime_error("max_tokens must be between 1 and 256");
     }
@@ -217,6 +257,20 @@ GenerationResult NativeEngine::complete(
     result.prompt_tokens = prompt_tokens.size();
     result.cached_prompt_tokens = prefill_offset;
     result.prompt_ms = prompt_ms;
+    std::size_t streamed_tokens = 0;
+    std::string pending_stream_bytes;
+    const auto emit_new_tokens = [&] {
+        if (on_delta == nullptr || streamed_tokens == result.tokens.size()) return;
+        pending_stream_bytes += tokenizer_.decode(std::span<const std::uint32_t>(
+            result.tokens.data() + streamed_tokens,
+            result.tokens.size() - streamed_tokens));
+        streamed_tokens = result.tokens.size();
+        const std::size_t complete = complete_utf8_prefix(pending_stream_bytes);
+        if (complete != 0) {
+            (*on_delta)(std::string_view(pending_stream_bytes).substr(0, complete));
+            pending_stream_bytes.erase(0, complete);
+        }
+    };
 
     if (options_.prefix_cache_max_tokens != 0 && prefill_rows != 0 &&
         prefill_rows <= options_.prefix_cache_max_tokens &&
@@ -304,6 +358,7 @@ GenerationResult NativeEngine::complete(
                 break;
             }
             result.tokens.push_back(token);
+            emit_new_tokens();
             if (history_draft_enabled) history_draft.append(token);
             continue;
         }
@@ -365,6 +420,7 @@ GenerationResult NativeEngine::complete(
                 break;
             }
             result.tokens.push_back(token);
+            emit_new_tokens();
             if (history_draft_enabled) history_draft.append(token);
         }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
@@ -427,6 +483,9 @@ GenerationResult NativeEngine::complete(
                 ? std::optional<std::uint32_t>(current)
                 : std::nullopt,
         });
+    }
+    if (on_delta != nullptr && !pending_stream_bytes.empty()) {
+        (*on_delta)(pending_stream_bytes);
     }
     result.text = tokenizer_.decode(result.tokens);
     return result;
