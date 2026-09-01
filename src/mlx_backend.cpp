@@ -69,6 +69,21 @@ MlxArray MlxArray::from_float32(
         values.data(), shape.data(), static_cast<int>(shape.size()), MLX_FLOAT32));
 }
 
+MlxArray MlxArray::from_int32(
+    const std::span<const std::int32_t> values,
+    const std::span<const int> shape) {
+    std::size_t expected = 1;
+    for (const int dimension : shape) {
+        if (dimension < 0) throw std::runtime_error("negative MLX array dimension");
+        expected *= static_cast<std::size_t>(dimension);
+    }
+    if (expected != values.size()) {
+        throw std::runtime_error("MLX array shape does not match input data");
+    }
+    return MlxArray(mlx_array_new_data(
+        values.data(), shape.data(), static_cast<int>(shape.size()), MLX_INT32));
+}
+
 MlxArray MlxArray::add(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
     const Stream stream;
@@ -115,6 +130,43 @@ MlxArray MlxArray::quantized_matmul(
               "affine",
               stream.get()),
         "quantized_matmul");
+    return result;
+}
+
+MlxArray MlxArray::take_axis(
+    const MlxArray& input,
+    const MlxArray& indices,
+    const int axis) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_take_axis(&result.value_, input.value_, indices.value_, axis, stream.get()), "take_axis");
+    return result;
+}
+
+MlxArray MlxArray::dequantize(
+    const MlxArray& weight,
+    const MlxArray& scales,
+    const MlxArray& biases,
+    const int group_size,
+    const int bits,
+    const mlx_dtype output_dtype) {
+    if (group_size <= 0 || bits <= 0) {
+        throw std::runtime_error("invalid quantization parameters");
+    }
+    MlxArray result;
+    const Stream stream;
+    check(mlx_dequantize(
+              &result.value_,
+              weight.value_,
+              scales.value_,
+              biases.value_,
+              mlx_optional_int{.value = group_size, .has_value = true},
+              mlx_optional_int{.value = bits, .has_value = true},
+              "affine",
+              mlx_array{},
+              mlx_optional_dtype{.value = output_dtype, .has_value = true},
+              stream.get()),
+        "dequantize");
     return result;
 }
 

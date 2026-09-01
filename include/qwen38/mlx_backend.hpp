@@ -3,6 +3,7 @@
 #include <mlx/c/mlx.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -24,6 +25,9 @@ public:
     [[nodiscard]] static MlxArray from_float32(
         std::span<const float> values,
         std::span<const int> shape);
+    [[nodiscard]] static MlxArray from_int32(
+        std::span<const std::int32_t> values,
+        std::span<const int> shape);
     [[nodiscard]] static MlxArray add(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] MlxArray astype(mlx_dtype dtype) const;
@@ -35,6 +39,17 @@ public:
         int group_size,
         int bits,
         bool transpose = true);
+    [[nodiscard]] static MlxArray take_axis(
+        const MlxArray& input,
+        const MlxArray& indices,
+        int axis);
+    [[nodiscard]] static MlxArray dequantize(
+        const MlxArray& weight,
+        const MlxArray& scales,
+        const MlxArray& biases,
+        int group_size,
+        int bits,
+        mlx_dtype output_dtype = MLX_BFLOAT16);
 
     void eval() const;
     [[nodiscard]] std::vector<float> to_float32() const;

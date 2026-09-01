@@ -98,7 +98,11 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-qmm-smoke src/qmm_smoke.cpp)
     target_link_libraries(qwen38-qmm-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-qmm-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
-    install(TARGETS qwen38-mlx-smoke qwen38-qmm-smoke RUNTIME DESTINATION bin)
+    add_executable(qwen38-embedding-smoke src/embedding_smoke.cpp)
+    target_link_libraries(qwen38-embedding-smoke PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-embedding-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    install(TARGETS qwen38-mlx-smoke qwen38-qmm-smoke qwen38-embedding-smoke
+        RUNTIME DESTINATION bin)
 endif()
 
 if(QWEN38_BUILD_TESTS)

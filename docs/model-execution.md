@@ -15,6 +15,15 @@ Five independent warm-page runs produced the same argmax (609) and checksum
 process peaked near 432 MB footprint while touching the roughly 357 MB head
 shard. These are component diagnostics, not decode throughput.
 
+## Native token embedding
+
+The second real operation gathers packed Q4 rows for the fixed tokenizer parity
+IDs `[9419, 11, 1814, 0]`, gathers the matching BF16 scales/biases, and
+dequantizes to BF16 `[4, 2560]`. The result is finite and deterministic with
+checksum 1.89569 and L2 norm 0.500975. A representative process measured 23.20 ms
+for the first lazy load and 0.248 ms median for five subsequent in-process
+lookups. This separates one-time weight materialization from steady request cost.
+
 ## Loader boundary discovered
 
 Passing raw safetensors BF16 pages to the staged MLX C managed-buffer constructor
