@@ -18,6 +18,7 @@ reference evidence, not measurements of this C++ runtime.
 | P60 corrected Q8 MTP | 44.36 decode tok/s versus 32.13 serial; about 60% acceptance | A broader workload can still benefit, but verifier cost and acceptance dominate | Different run and workload from P73 |
 | P268 serial Q4 sweep | 34.359 all-control median; candidate 34.392 | Shape-specific QMV tuning alone does not move end-to-end throughput | One selected projection geometry |
 | Current C++ runtime | about 31.0--31.3 warm decode tok/s; about 35.6 GiB peak | Correct full-model C++ baseline with bounded resident expert tier | No MTP, prefix cache, or complete long-context QSA yet |
+| C++ layer-major verifier reference | 81.03 ms for three rows versus 95.32 ms serial; 1.176x; exact token and rollback-continuation parity | Layer-major scheduling plus one multi-array evaluation per layer improves verifier cost | Depth 2, empty origin, one interleaved A/B/B/A run; still far above the retained P73 round cost |
 
 P73's 59.866 tok/s is explained by `(1 + 1.57) / 43.95 ms`, approximately
 58.5 tok/s. It is not evidence of a universal 59 tok/s target path. The serial
@@ -74,6 +75,7 @@ directions. New code should build on them.
 | Decode async ladder used in P73 | The Qwen4 layer loop never engaged it | No performance claim and no blind rerun |
 | KV-only MTP prefix snapshots | QSA raw/pooled state and offsets become stale | Correctness-invalid |
 | Serial verification of each draft | Re-reads the target for every proposal | Architecturally rejected; verification must stay batched |
+| Per-row evaluation inside a layer-major verifier | 125.12 ms versus 94.62 ms serial, or 0.756x | Rejected; S synchronization barriers per layer erase locality gains |
 | Naive concatenated proposal tree | GDN, PLE, QSA, KV, and MTP-head state are branch-dependent | Not a small optimization; only revisit as a true branch-local runtime |
 | Full target execution on ANE | Unsupported operators, conversion overhead, and memory movement dominate | Not on the critical path; ANE may be reconsidered only for a measured isolated subgraph |
 | More aggressive model quantization without a quality gate | It changes the requested quality target and does not remove dispatch/state costs | Not a substitute for runtime optimization |

@@ -147,6 +147,12 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-mtp-fixture-smoke src/mtp_fixture_smoke.cpp)
     target_link_libraries(qwen38-mtp-fixture-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-mtp-fixture-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-mtp-verifier-smoke src/mtp_verifier_smoke.cpp)
+    target_link_libraries(qwen38-mtp-verifier-smoke PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-mtp-verifier-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-mtp-verifier-bench src/mtp_verifier_bench.cpp)
+    target_link_libraries(qwen38-mtp-verifier-bench PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-mtp-verifier-bench PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     install(TARGETS qwen38-mlx-smoke qwen38-qmm-smoke qwen38-embedding-smoke
         qwen38-hyper-connection-smoke qwen38-sparse-moe-smoke qwen38-gated-delta-net-smoke
         qwen38-self-attention-smoke
@@ -156,6 +162,8 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         qwen38-model-bench
         qwen38-mtp-head-smoke
         qwen38-mtp-fixture-smoke
+        qwen38-mtp-verifier-smoke
+        qwen38-mtp-verifier-bench
         RUNTIME DESTINATION bin)
 
     if(TARGET qwen38_tokenizer)

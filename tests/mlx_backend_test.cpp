@@ -22,6 +22,8 @@ int main() {
         std::cerr << "MLX add mismatch\n";
         return 1;
     }
+    const std::array<const qwen38::MlxArray*, 2> eval_arrays{&left, &right};
+    qwen38::MlxArray::eval_all(eval_arrays);
     if (product != std::vector<float>({19.0F, 22.0F, 43.0F, 50.0F})) {
         std::cerr << "MLX matmul mismatch\n";
         return 1;

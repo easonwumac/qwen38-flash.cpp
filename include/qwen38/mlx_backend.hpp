@@ -109,6 +109,7 @@ public:
         mlx_dtype output_dtype = MLX_BFLOAT16);
 
     void eval() const;
+    static void eval_all(std::span<const MlxArray* const> arrays);
     [[nodiscard]] std::vector<float> to_float32() const;
     [[nodiscard]] std::uint32_t item_uint32() const;
     [[nodiscard]] float item_float32() const;

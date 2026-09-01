@@ -112,6 +112,63 @@ TargetDecodeStep QwenModel::forward_decode_capture(
     };
 }
 
+std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
+    const std::span<const std::uint32_t> tokens,
+    const ModelDecodeState& origin) const {
+    if (tokens.empty() || tokens.size() > 5) {
+        throw std::runtime_error("target verify row count must be between 1 and 5");
+    }
+    if (origin.layers.size() != layers_.size()) {
+        throw std::runtime_error("model state layer count mismatch");
+    }
+    if (origin.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
+        throw std::runtime_error("target verify token count overflow");
+    }
+
+    std::vector<MlxArray> streams;
+    streams.reserve(tokens.size());
+    std::vector<ModelDecodeState> checkpoints;
+    checkpoints.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        streams.push_back(HyperConnection::initialize_stream(embed(tokens[row]), stream_count_));
+        checkpoints.emplace_back(layers_.size());
+        checkpoints.back().token_count = origin.token_count + row + 1;
+    }
+
+    for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
+        DecoderLayerState working = snapshot_decoder_layer_state(origin.layers[layer]);
+        for (std::size_t row = 0; row < tokens.size(); ++row) {
+            streams[row] = layers_[layer]->forward_decode(streams[row], tokens[row], working);
+            checkpoints[row].layers[layer] = snapshot_decoder_layer_state(working);
+        }
+        // One graph barrier per layer retains bounded memory without the S
+        // extra synchronization points of evaluating each row separately.
+        std::vector<const MlxArray*> layer_outputs;
+        layer_outputs.reserve(streams.size());
+        for (const MlxArray& stream : streams) layer_outputs.push_back(&stream);
+        MlxArray::eval_all(layer_outputs);
+    }
+
+    std::vector<TargetVerifyStep> result;
+    result.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        HyperConnectionRead final = final_mixer_.read(streams[row]);
+        MlxArray logits = MlxArray::quantized_matmul(
+            final.mixed,
+            language_head_.weight,
+            language_head_.scales,
+            language_head_.biases,
+            group_size_,
+            bits_);
+        result.push_back({
+            .logits = std::move(logits),
+            .pre_mixer_stream = std::move(streams[row]),
+            .state_after = std::move(checkpoints[row]),
+        });
+    }
+    return result;
+}
+
 MlxArray QwenModel::trace_decode(
     const std::uint32_t token,
     ModelDecodeState& state,

@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace qwen38 {
@@ -32,6 +33,12 @@ struct TargetDecodeStep {
     MlxArray pre_mixer_stream;
 };
 
+struct TargetVerifyStep {
+    MlxArray logits;
+    MlxArray pre_mixer_stream;
+    ModelDecodeState state_after;
+};
+
 class QwenModel final {
 public:
     explicit QwenModel(MlxTensorStore& tensors);
@@ -42,6 +49,9 @@ public:
     [[nodiscard]] TargetDecodeStep forward_decode_capture(
         std::uint32_t token,
         ModelDecodeState& state) const;
+    [[nodiscard]] std::vector<TargetVerifyStep> forward_verify_layer_major_reference(
+        std::span<const std::uint32_t> tokens,
+        const ModelDecodeState& origin) const;
     void consume_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,

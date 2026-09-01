@@ -541,6 +541,20 @@ void MlxArray::eval() const {
     check(mlx_array_eval(value_), "array_eval");
 }
 
+void MlxArray::eval_all(const std::span<const MlxArray* const> arrays) {
+    if (arrays.empty()) return;
+    std::vector<mlx_array> values;
+    values.reserve(arrays.size());
+    for (const MlxArray* array : arrays) {
+        if (array == nullptr) throw std::runtime_error("cannot evaluate a null MLX array");
+        values.push_back(array->value_);
+    }
+    mlx_vector_array outputs = mlx_vector_array_new_data(values.data(), values.size());
+    const int status = mlx_eval(outputs);
+    static_cast<void>(mlx_vector_array_free(outputs));
+    check(status, "eval_all");
+}
+
 std::vector<float> MlxArray::to_float32() const {
     if (dtype() != MLX_FLOAT32) {
         throw std::runtime_error("MLX array is not float32");
