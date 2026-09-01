@@ -67,8 +67,8 @@ NativeEngine::NativeEngine(
       tokenizer_(Tokenizer::load(model_directory)),
       model_(tensors_),
       mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)) {
-    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 256) {
-        throw std::runtime_error("prefill chunk rows must be between 1 and 256");
+    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 512) {
+        throw std::runtime_error("prefill chunk rows must be between 1 and 512");
     }
     const char* metal_prefill = std::getenv("QWEN38_GDN_METAL_PREFILL");
     if (options_.prefill_chunk_rows > 64 &&
@@ -105,6 +105,10 @@ GenerationResult NativeEngine::complete(
     std::optional<MlxArray> previous_target_stream;
     std::size_t prefill_offset = 0;
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
+    const std::size_t request_prefill_chunk =
+        options_.prefill_chunk_rows > 256 && prefill_rows > 512
+        ? 128
+        : options_.prefill_chunk_rows;
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,
             std::span<const std::uint32_t>(prompt_tokens.data(), prefill_rows))) {
@@ -119,9 +123,9 @@ GenerationResult NativeEngine::complete(
     }
     const auto prompt_started = std::chrono::steady_clock::now();
     for (std::size_t offset = prefill_offset; offset < prefill_rows;
-         offset += options_.prefill_chunk_rows) {
+         offset += request_prefill_chunk) {
         const std::size_t count = std::min(
-            options_.prefill_chunk_rows, prefill_rows - offset);
+            request_prefill_chunk, prefill_rows - offset);
         std::vector<MlxArray> streams = model_.prefill_chunk(
             std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state);
         for (std::size_t row = 0; row < count; ++row) {

@@ -293,8 +293,8 @@ MlxArray SelfAttention::forward_verify(
     std::vector<SelfAttentionState>& checkpoints) const {
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1 ||
-        input_shape[1] > 256) {
-        throw std::runtime_error("attention batch requires shape [1,S,hidden], S=1..256");
+        input_shape[1] > 512) {
+        throw std::runtime_error("attention batch requires shape [1,S,hidden], S=1..512");
     }
     const std::size_t rows = static_cast<std::size_t>(input_shape[1]);
     const int heads = dimension(attention_heads_, "attention heads");
@@ -372,8 +372,8 @@ MlxArray SelfAttention::forward_prefill(
     SelfAttentionState& state) const {
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1 ||
-        input_shape[1] > 256) {
-        throw std::runtime_error("attention prefill requires shape [1,S,hidden], S=1..256");
+        input_shape[1] > 512) {
+        throw std::runtime_error("attention prefill requires shape [1,S,hidden], S=1..512");
     }
     const char* enabled = std::getenv("QWEN38_SDPA_PREFILL");
     if (enabled == nullptr || std::string_view(enabled) != "1" ||

@@ -30,7 +30,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
-        << " [--prefill-chunk 1..256] [--prefix-cache-tokens N]"
+        << " [--prefill-chunk 1..512] [--prefix-cache-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
         << "qwen38-flash.cpp native inference server.\n";
@@ -59,7 +59,7 @@ std::size_t parse_prefill_chunk(const std::string& value) {
     std::size_t parsed = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
-        parsed == 0 || parsed > 256) {
+        parsed == 0 || parsed > 512) {
         throw std::runtime_error("invalid prefill chunk: " + value);
     }
     return parsed;

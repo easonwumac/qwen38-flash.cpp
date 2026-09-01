@@ -197,7 +197,7 @@ MlxArray DecoderLayer::forward_prefill(
     const std::span<const std::uint32_t> tokens,
     DecoderLayerState& state) const {
     const std::vector<int> shape = stream_batch.shape();
-    if (tokens.empty() || tokens.size() > 256 || shape.size() != 3 || shape[0] != 1 ||
+    if (tokens.empty() || tokens.size() > 512 || shape.size() != 3 || shape[0] != 1 ||
         shape[1] != static_cast<int>(tokens.size())) {
         throw std::runtime_error("decoder prefill requires a matching [1,S,streams] batch");
     }

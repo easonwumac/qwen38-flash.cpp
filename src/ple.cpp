@@ -160,8 +160,8 @@ MlxArray Ple::forward_verify(
     std::vector<PleState>& checkpoints) const {
     const std::vector<int> stream_shape = stream.shape();
     if (stream_shape.size() != 3 || stream_shape[0] != 1 || tokens.empty() ||
-        tokens.size() > 256 || stream_shape[1] != static_cast<int>(tokens.size())) {
-        throw std::runtime_error("PLE batch requires matching [1,S,width] rows, S=1..256");
+        tokens.size() > 512 || stream_shape[1] != static_cast<int>(tokens.size())) {
+        throw std::runtime_error("PLE batch requires matching [1,S,width] rows, S=1..512");
     }
     const int rows = stream_shape[1];
     const int streams = dimension(stream_count_, "stream count");

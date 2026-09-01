@@ -109,9 +109,11 @@ consecutive zero-accept rounds.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
-Values through 256 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
+Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
 oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
-startup instead of failing partway through a request.
+startup instead of failing partway through a request. A configured chunk 512
+is used only when the complete prompt has at most 512 tokens; longer prompts
+automatically use chunk 128 to retain the validated 64 GiB memory bound.
 
 `QWEN38_SDPA_PREFILL=1` replaces the full-attention token loop with MLX causal
 SDPA at prompt widths of 16 or more. It retains the correct causal offset when
@@ -120,9 +122,9 @@ prompt profile combines it with `QWEN38_GDN_METAL_PREFILL=1` and
 `QWEN38_GROUPED_PREFILL=1`. `QWEN38_PREFILL_BARRIER_STRIDE=8` evaluates this
 lazy graph every eight layers instead of every layer; values from 1 through 48
 are accepted. Keep `--prefill-chunk 64` and leave these unset for
-the retained numerical mode. On the 64 GiB validation machine, chunk 256 is
-guarded through 512 prompt tokens; use chunk 128 for longer experiments until
-the remaining per-chunk temporary graph pressure is reduced.
+the retained numerical mode. On the 64 GiB validation machine, a single
+512-row chunk reached about 671 prompt tok/s at 35.5 GiB peak; longer prompts
+take the automatic chunk-128 safety path.
 
 The server retains one complete target/MTP prefix snapshot up to
 `--prefix-cache-tokens` (default 8192). This deliberately caches every recurrent,

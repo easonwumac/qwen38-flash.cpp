@@ -88,8 +88,8 @@ int main(int argc, char** argv) {
         }
         const std::filesystem::path model_path = argv[1];
         const std::size_t chunk_rows = std::stoul(argv[3]);
-        if (chunk_rows == 0 || chunk_rows > 256) {
-            throw std::runtime_error("CHUNK_ROWS must be between 1 and 256");
+        if (chunk_rows == 0 || chunk_rows > 512) {
+            throw std::runtime_error("CHUNK_ROWS must be between 1 and 512");
         }
         const std::size_t serial_tail = argc >= 5 ? std::stoul(argv[4]) : 0;
         const std::uint32_t expected = argc == 6
