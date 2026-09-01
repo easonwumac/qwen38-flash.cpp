@@ -41,6 +41,11 @@ int compact_qmeta_requested_bits() {
         "QWEN38_COMPACT_QMETA must be 0, lossless13, lossless16, or lossy9");
 }
 
+bool qmeta_prefill_cache_enabled() {
+    const char* value = std::getenv("QWEN38_QMETA_PREFILL_CACHE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 std::shared_ptr<MlxMetalKernel> qmeta_gate_up_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -398,6 +403,20 @@ SparseMoe::DecodedQmeta SparseMoe::decode_qmeta(
         .scales = std::move(decoded[0]),
         .biases = std::move(decoded[1]),
     };
+}
+
+bool SparseMoe::clear_prefill_qmeta_cache() const {
+    bool cleared = false;
+    const auto clear_projection = [&cleared](const QuantizedProjection& projection) {
+        if (!projection.qmeta_cached) return;
+        projection.cached_qmeta = {};
+        projection.qmeta_cached = false;
+        cleared = true;
+    };
+    clear_projection(expert_gate_);
+    clear_projection(expert_up_);
+    clear_projection(expert_down_);
+    return cleared;
 }
 
 MlxArray SparseMoe::forward_compact_routed(
@@ -881,15 +900,32 @@ MlxArray SparseMoe::forward_prefill_impl(
     const MlxArray* down_scales = &expert_down_.scales;
     const MlxArray* down_biases = &expert_down_.biases;
     if (compact_qmeta_) {
-        decoded_gate = decode_qmeta(expert_gate_);
-        decoded_up = decode_qmeta(expert_up_);
-        decoded_down = decode_qmeta(expert_down_);
-        gate_scales = &decoded_gate.scales;
-        gate_biases = &decoded_gate.biases;
-        up_scales = &decoded_up.scales;
-        up_biases = &decoded_up.biases;
-        down_scales = &decoded_down.scales;
-        down_biases = &decoded_down.biases;
+        if (qmeta_prefill_cache_enabled()) {
+            const auto ensure_cached = [](const QuantizedProjection& projection) {
+                if (projection.qmeta_cached) return;
+                projection.cached_qmeta = decode_qmeta(projection);
+                projection.qmeta_cached = true;
+            };
+            ensure_cached(expert_gate_);
+            ensure_cached(expert_up_);
+            ensure_cached(expert_down_);
+            gate_scales = &expert_gate_.cached_qmeta.scales;
+            gate_biases = &expert_gate_.cached_qmeta.biases;
+            up_scales = &expert_up_.cached_qmeta.scales;
+            up_biases = &expert_up_.cached_qmeta.biases;
+            down_scales = &expert_down_.cached_qmeta.scales;
+            down_biases = &expert_down_.cached_qmeta.biases;
+        } else {
+            decoded_gate = decode_qmeta(expert_gate_);
+            decoded_up = decode_qmeta(expert_up_);
+            decoded_down = decode_qmeta(expert_down_);
+            gate_scales = &decoded_gate.scales;
+            gate_biases = &decoded_gate.biases;
+            up_scales = &decoded_up.scales;
+            up_biases = &decoded_up.biases;
+            down_scales = &decoded_down.scales;
+            down_biases = &decoded_down.biases;
+        }
     }
 
     const auto gate_up_started = Clock::now();

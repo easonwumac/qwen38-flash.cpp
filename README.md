@@ -286,6 +286,12 @@ promotion. A repeated 2,424-token prompt reached 335.4 PP tok/s warm versus
 397.1 for control, a 15.5% prefill cost because wide prefill reconstructs
 layer-local affine banks before the grouped QMM. Keep the normal `speed`
 profile when prompt throughput matters more than roughly 5.8 GiB of RSS.
+For multi-chunk prompts, `QWEN38_QMETA_PREFILL_CACHE=1` retains each decoded
+bank only for the duration of prefill and releases all 48 layers before decode.
+It raised the same warm 2,424-token prompt to 367.4 PP tok/s (+9.5% over the
+uncached compact path), then preserved the 89/103 128-token MTP trajectory at
+64.02 tok/s. This cache remains opt-in because its transient long-context peak
+has not yet been validated near the 64 GiB capacity boundary.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.

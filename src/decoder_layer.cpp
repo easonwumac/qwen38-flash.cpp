@@ -127,6 +127,10 @@ DecoderLayer::~DecoderLayer() {
     if (compiled_.ctx != nullptr) static_cast<void>(mlx_closure_free(compiled_));
 }
 
+bool DecoderLayer::clear_prefill_qmeta_cache() const {
+    return mlp_.clear_prefill_qmeta_cache();
+}
+
 MlxArray DecoderLayer::forward_decode(
     const MlxArray& input_stream,
     const std::uint32_t token,

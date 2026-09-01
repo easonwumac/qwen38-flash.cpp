@@ -56,6 +56,7 @@ public:
     [[nodiscard]] MlxArray forward_prefill_profiled(
         const MlxArray& input,
         MoePrefillTimings& timings) const;
+    [[nodiscard]] bool clear_prefill_qmeta_cache() const;
 
 private:
     struct CompactQmeta {
@@ -68,17 +69,19 @@ private:
         [[nodiscard]] bool present() const noexcept { return bits != 0; }
     };
 
+    struct DecodedQmeta {
+        MlxArray scales;
+        MlxArray biases;
+    };
+
     struct QuantizedProjection {
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
         CompactQmeta qmeta;
+        mutable DecodedQmeta cached_qmeta;
+        mutable bool qmeta_cached{false};
         int bits{0};
-    };
-
-    struct DecodedQmeta {
-        MlxArray scales;
-        MlxArray biases;
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(

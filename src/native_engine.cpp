@@ -243,6 +243,7 @@ GenerationResult NativeEngine::complete_impl(
     const std::size_t prefill_rows = prompt_tokens.size() - 1;
     const std::size_t request_prefill_chunk = qwen38::select_prefill_chunk_rows(
         options_.prefill_chunk_rows, prefill_rows);
+    model_.clear_prefill_qmeta_cache();
     const auto prompt_started = std::chrono::steady_clock::now();
     if (prefix_cache_ != nullptr &&
         is_prefix(prefix_cache_->tokens,
@@ -282,6 +283,7 @@ GenerationResult NativeEngine::complete_impl(
             previous_target_stream = std::move(streams[row]);
         }
     }
+    model_.clear_prefill_qmeta_cache();
     const double prompt_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - prompt_started).count();
 

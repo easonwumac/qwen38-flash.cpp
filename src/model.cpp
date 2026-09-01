@@ -184,6 +184,14 @@ MlxArray QwenModel::consume_decode_capture(
     return std::move(hidden.pre_mixer_stream);
 }
 
+void QwenModel::clear_prefill_qmeta_cache() const {
+    bool cleared = false;
+    for (const auto& layer : layers_) {
+        cleared = layer->clear_prefill_qmeta_cache() || cleared;
+    }
+    if (cleared) MlxArray::clear_cache();
+}
+
 std::vector<MlxArray> QwenModel::prefill_chunk(
     const std::span<const std::uint32_t> tokens,
     ModelDecodeState& state,
