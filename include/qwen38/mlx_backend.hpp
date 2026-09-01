@@ -5,9 +5,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
+
+#include "qwen38/model_manifest.hpp"
 
 namespace qwen38 {
 
@@ -29,7 +35,14 @@ public:
         std::span<const std::int32_t> values,
         std::span<const int> shape);
     [[nodiscard]] static MlxArray add(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] static MlxArray multiply(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
+    [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
+    [[nodiscard]] MlxArray tile(std::span<const int> repetitions) const;
+    [[nodiscard]] MlxArray sigmoid() const;
+    [[nodiscard]] MlxArray silu() const;
+    [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;
+    [[nodiscard]] MlxArray rms_norm(const MlxArray& weight, float epsilon) const;
     [[nodiscard]] MlxArray astype(mlx_dtype dtype) const;
     [[nodiscard]] static MlxArray quantized_matmul(
         const MlxArray& input,
@@ -78,6 +91,20 @@ public:
 private:
     mlx_map_string_to_array tensors_{};
     mlx_map_string_to_string metadata_{};
+};
+
+class MlxTensorStore final {
+public:
+    explicit MlxTensorStore(ModelManifest manifest) : manifest_(std::move(manifest)) {}
+
+    [[nodiscard]] MlxArray tensor(std::string_view name);
+    [[nodiscard]] std::size_t open_shard_count() const;
+    [[nodiscard]] const ModelManifest& manifest() const noexcept { return manifest_; }
+
+private:
+    ModelManifest manifest_;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, std::unique_ptr<MlxSafetensors>> shards_;
 };
 
 [[nodiscard]] std::string mlx_backend_description();

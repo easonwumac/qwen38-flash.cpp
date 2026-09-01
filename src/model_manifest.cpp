@@ -60,6 +60,27 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     result.config_.vocabulary_size = size_value(text.at("vocab_size"), "vocab_size");
     result.config_.max_context_tokens = size_value(text.at("max_position_embeddings"), "max_position_embeddings");
     result.config_.mtp_layer_count = size_value(text.at("mtp_num_hidden_layers"), "mtp_num_hidden_layers");
+    result.config_.attention_head_count = size_value(
+        text.at("num_attention_heads"), "num_attention_heads");
+    result.config_.key_value_head_count = size_value(
+        text.at("num_key_value_heads"), "num_key_value_heads");
+    result.config_.head_dimension = size_value(text.at("head_dim"), "head_dim");
+    result.config_.hyper_connection_count = size_value(text.at("hc_count"), "hc_count");
+    result.config_.hyper_connection_low_rank = size_value(text.at("hc_lowrank"), "hc_lowrank");
+    result.config_.rms_norm_epsilon = text.at("rms_norm_eps").as_number();
+    if (!(result.config_.rms_norm_epsilon > 0.0)) {
+        throw std::runtime_error("rms_norm_eps must be positive");
+    }
+    for (const Json& layer_type : text.at("layer_types").as_array()) {
+        const std::string type = layer_type.as_string();
+        if (type != "linear_attention" && type != "full_attention") {
+            throw std::runtime_error("unsupported layer type: " + type);
+        }
+        result.config_.layer_types.push_back(type);
+    }
+    if (result.config_.layer_types.size() != result.config_.layer_count) {
+        throw std::runtime_error("layer_types count does not match num_hidden_layers");
+    }
 
     const Json* quantization = root.find("quantization");
     if (quantization == nullptr) quantization = root.find("quantization_config");

@@ -37,6 +37,32 @@ storage policy, and future direct-Metal paging. A future direct backend must
 explicitly define safetensors-to-kernel BF16 bit semantics and pass numerical
 fixtures before replacing the safe loader.
 
+## Qwen3.8 Hyper-Connection parity
+
+The native graph now implements the architecture's four residual streams:
+
+1. repeat each token embedding four times along the feature dimension;
+2. grouped RMS-normalize each 2,560-wide stream and apply the checkpoint's
+   offset norm (`1 + weight`);
+3. produce the block input through the quantized 10,240 → 320 → 10,240
+   SiLU/sigmoid mixer and mean across streams;
+4. produce four write gates with `2 * sigmoid(project(normalized) / 4)`;
+5. broadcast the block output through those gates and add it to the streams.
+
+On fixed real token IDs `[9419, 11, 1814, 0]`, the C++ path and the independent
+MLX-Python oracle agree after float32 materialization:
+
+| Value | Checksum |
+|---|---:|
+| layer-0 mixed input | 383.095612 |
+| layer-0 injection gates | 0.867310 |
+| synthetic block write-back | 81.441620 |
+| final mixer output | 1037.270386 |
+
+The synthetic write-back deliberately feeds the mixed input as a stand-in block
+output. It verifies Hyper-Connection semantics in isolation; the attention and
+MoE block implementations are the next model-graph milestone.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

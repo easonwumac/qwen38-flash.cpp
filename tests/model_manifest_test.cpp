@@ -44,7 +44,22 @@ void run_model_manifest_tests() {
         "model_type":"qwen4_exp_text","hidden_size":2560,
         "num_hidden_layers":48,"num_experts":288,"num_experts_per_tok":10,
         "vocab_size":248320,"max_position_embeddings":262144,
-        "mtp_num_hidden_layers":1
+        "mtp_num_hidden_layers":1,"num_attention_heads":24,
+        "num_key_value_heads":2,"head_dim":256,"hc_count":4,
+        "hc_lowrank":320,"rms_norm_eps":0.000001,
+        "layer_types":["linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention","linear_attention","linear_attention","linear_attention",
+          "full_attention"]
       }
     })");
     write_file(directory / "model.safetensors.index.json", R"({
@@ -59,6 +74,9 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().expert_count == 288);
     QWEN38_CHECK(manifest.config().max_context_tokens == 262144);
     QWEN38_CHECK(manifest.config().quantization_bits == 4);
+    QWEN38_CHECK(manifest.config().hyper_connection_count == 4);
+    QWEN38_CHECK(manifest.config().hyper_connection_low_rank == 320);
+    QWEN38_CHECK(manifest.config().layer_types.at(3) == "full_attention");
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
 
     qwen38::TensorStore store(std::move(manifest));

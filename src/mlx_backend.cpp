@@ -91,10 +91,63 @@ MlxArray MlxArray::add(const MlxArray& left, const MlxArray& right) {
     return result;
 }
 
+MlxArray MlxArray::multiply(const MlxArray& left, const MlxArray& right) {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_multiply(&result.value_, left.value_, right.value_, stream.get()), "multiply");
+    return result;
+}
+
 MlxArray MlxArray::matmul(const MlxArray& left, const MlxArray& right) {
     MlxArray result;
     const Stream stream;
     check(mlx_matmul(&result.value_, left.value_, right.value_, stream.get()), "matmul");
+    return result;
+}
+
+MlxArray MlxArray::reshape(const std::span<const int> shape) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_reshape(&result.value_, value_, shape.data(), shape.size(), stream.get()), "reshape");
+    return result;
+}
+
+MlxArray MlxArray::tile(const std::span<const int> repetitions) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_tile(
+              &result.value_, value_, repetitions.data(), repetitions.size(), stream.get()),
+        "tile");
+    return result;
+}
+
+MlxArray MlxArray::sigmoid() const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_sigmoid(&result.value_, value_, stream.get()), "sigmoid");
+    return result;
+}
+
+MlxArray MlxArray::silu() const {
+    MlxArray gate = sigmoid();
+    return multiply(*this, gate);
+}
+
+MlxArray MlxArray::mean_axis(const int axis, const bool keep_dimensions) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_mean_axis(
+              &result.value_, value_, axis, keep_dimensions, stream.get()),
+        "mean_axis");
+    return result;
+}
+
+MlxArray MlxArray::rms_norm(const MlxArray& weight, const float epsilon) const {
+    MlxArray result;
+    const Stream stream;
+    check(mlx_fast_rms_norm(
+              &result.value_, value_, weight.value_, epsilon, stream.get()),
+        "fast_rms_norm");
     return result;
 }
 
@@ -229,6 +282,25 @@ MlxArray MlxSafetensors::tensor(const std::string_view name) const {
     if (status == 2) throw std::out_of_range("tensor not found in MLX shard: " + key);
     check(status, "map_string_to_array_get");
     return result;
+}
+
+MlxArray MlxTensorStore::tensor(const std::string_view name) {
+    std::scoped_lock lock(mutex_);
+    const auto mapping = manifest_.weight_map().find(std::string(name));
+    if (mapping == manifest_.weight_map().end()) {
+        throw std::out_of_range("tensor is not present in model index: " + std::string(name));
+    }
+    auto shard = shards_.find(mapping->second);
+    if (shard == shards_.end()) {
+        auto file = std::make_unique<MlxSafetensors>(manifest_.directory() / mapping->second);
+        shard = shards_.emplace(mapping->second, std::move(file)).first;
+    }
+    return shard->second->tensor(name);
+}
+
+std::size_t MlxTensorStore::open_shard_count() const {
+    std::scoped_lock lock(mutex_);
+    return shards_.size();
 }
 
 std::string mlx_backend_description() {

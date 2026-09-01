@@ -9,16 +9,21 @@ KV/prefix caches, speculative verification, serving, and observability. It is no
 a UI and is not a wrapper around `mlx-serve`.
 
 > [!IMPORTANT]
-> The current milestone includes the tested C++20 server foundation plus a strict
-> Qwen3.8 manifest parser and lazy, zero-copy safetensors shard mapping. Health,
-> readiness, status, model-list, metrics, and placeholder inference routes work.
-> Graph execution and inference are not implemented yet, so this version is not a
-> usable LLM runtime and makes no performance claim.
+> The current milestone includes the tested C++20 server foundation, strict
+> Qwen3.8 manifest parsing, native tokenization/chat templating, lazy checkpoint
+> loading, and verified Apple-GPU execution of token embedding, Q4 projections,
+> and Qwen3.8's four-stream Hyper-Connection mixers. Full transformer execution
+> and generation are not implemented yet, so this version is not a usable LLM
+> runtime and makes no end-to-end performance claim.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
 lazy safetensors primitives and evaluates its 248,320 logits on the Apple GPU.
 This proves weight-to-Metal plumbing, not a complete transformer forward.
+
+`qwen38-hyper-connection-smoke MODEL_DIRECTORY` additionally executes the real
+layer-0 read/injection gates, residual write-back, and final mixer. Its outputs
+match the independent `devtools/hyper_connection_oracle.py` MLX-Python oracle.
 
 ## Build
 

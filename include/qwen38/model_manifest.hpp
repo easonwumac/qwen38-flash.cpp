@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace qwen38 {
 
@@ -26,6 +27,13 @@ struct ModelConfig {
     std::size_t quantization_bits{0};
     std::size_t quantization_group_size{0};
     std::size_t mtp_layer_count{0};
+    std::size_t attention_head_count{0};
+    std::size_t key_value_head_count{0};
+    std::size_t head_dimension{0};
+    std::size_t hyper_connection_count{0};
+    std::size_t hyper_connection_low_rank{0};
+    double rms_norm_epsilon{0.0};
+    std::vector<std::string> layer_types;
 };
 
 class ModelManifest final {
