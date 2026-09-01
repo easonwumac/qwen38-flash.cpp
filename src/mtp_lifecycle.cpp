@@ -1,5 +1,6 @@
 #include "qwen38/mtp_lifecycle.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 
@@ -73,7 +74,8 @@ MtpCommitPlan plan_mtp_commit(
 
 MtpGreedyDecision decide_mtp_greedy(
     const std::span<const std::uint32_t> drafts,
-    const std::span<const std::uint32_t> target_argmax_rows) {
+    const std::span<const std::uint32_t> target_argmax_rows,
+    const std::span<const std::uint32_t> stop_tokens) {
     if (drafts.empty()) throw std::runtime_error("MTP verification requires at least one draft");
     if (target_argmax_rows.size() != drafts.size() + 1) {
         throw std::runtime_error("MTP target verification must include the bonus row");
@@ -81,6 +83,10 @@ MtpGreedyDecision decide_mtp_greedy(
     std::size_t accepted = 0;
     while (accepted < drafts.size() &&
            drafts[accepted] == target_argmax_rows[accepted]) {
+        if (std::find(stop_tokens.begin(), stop_tokens.end(), drafts[accepted]) !=
+            stop_tokens.end()) {
+            break;
+        }
         ++accepted;
     }
     return {

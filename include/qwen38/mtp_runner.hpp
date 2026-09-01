@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace qwen38 {
@@ -31,7 +32,8 @@ struct MtpRoundStep {
     std::size_t query_position,
     std::size_t draft_depth,
     ModelDecodeState& target_state,
-    MtpDecodeState& head_state);
+    MtpDecodeState& head_state,
+    std::span<const std::uint32_t> stop_tokens = {});
 
 // Verify externally proposed tokens while preserving the same exact target and
 // MTP-head commit lifecycle as the learned drafter path.
@@ -43,6 +45,7 @@ struct MtpRoundStep {
     std::size_t query_position,
     std::vector<std::uint32_t> drafts,
     ModelDecodeState& target_state,
-    MtpDecodeState& head_state);
+    MtpDecodeState& head_state,
+    std::span<const std::uint32_t> stop_tokens = {});
 
 } // namespace qwen38

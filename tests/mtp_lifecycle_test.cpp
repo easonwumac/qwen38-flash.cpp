@@ -62,4 +62,11 @@ void run_mtp_lifecycle_tests() {
     const auto full = qwen38::decide_mtp_greedy(
         drafts, std::vector<std::uint32_t>{10, 20, 30, 40});
     QWEN38_CHECK(full.accepted == 3 && full.correction_row == 3 && full.next_token == 40);
+    const auto stopped = qwen38::decide_mtp_greedy(
+        drafts,
+        std::vector<std::uint32_t>{10, 20, 30, 40},
+        std::vector<std::uint32_t>{20, 99});
+    QWEN38_CHECK(
+        stopped.accepted == 1 && stopped.correction_row == 1 &&
+        stopped.next_token == 20);
 }

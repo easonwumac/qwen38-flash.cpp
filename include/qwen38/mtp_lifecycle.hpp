@@ -55,6 +55,7 @@ struct MtpGreedyDecision {
 
 [[nodiscard]] MtpGreedyDecision decide_mtp_greedy(
     std::span<const std::uint32_t> drafts,
-    std::span<const std::uint32_t> target_argmax_rows);
+    std::span<const std::uint32_t> target_argmax_rows,
+    std::span<const std::uint32_t> stop_tokens = {});
 
 } // namespace qwen38

@@ -5,6 +5,7 @@
 #include "qwen38/mtp_runner.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -268,6 +269,8 @@ GenerationResult NativeEngine::complete(
         return token == tensors_.manifest().config().end_of_sequence_token ||
             token == chat_end_token_;
     };
+    const std::array<std::uint32_t, 2> stop_tokens{
+        tensors_.manifest().config().end_of_sequence_token, chat_end_token_};
     const auto generation_started = std::chrono::steady_clock::now();
     while (result.tokens.size() < max_tokens) {
         const std::size_t remaining = max_tokens - result.tokens.size();
@@ -320,10 +323,11 @@ GenerationResult NativeEngine::complete(
         MtpRoundStep step = used_history_draft
             ? run_greedy_external_draft_round_reference(
                   model_, *mtp_head_, current, *previous_target_stream,
-                  state.token_count, std::move(history_proposal), state, mtp_state)
+                  state.token_count, std::move(history_proposal), state, mtp_state,
+                  stop_tokens)
             : run_greedy_mtp_round_reference(
                   model_, *mtp_head_, current, *previous_target_stream, state.token_count,
-                  depth_policy.depth(), state, mtp_state);
+                  depth_policy.depth(), state, mtp_state, stop_tokens);
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;

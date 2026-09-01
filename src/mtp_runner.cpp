@@ -28,7 +28,8 @@ MtpRoundStep finish_greedy_mtp_round(
     const double draft_ms,
     MtpDecodeState head_origin,
     ModelDecodeState& target_state,
-    MtpDecodeState& head_state) {
+    MtpDecodeState& head_state,
+    const std::span<const std::uint32_t> stop_tokens) {
     if (drafts.size() < 2 || drafts.size() > 4) {
         throw std::runtime_error("MTP proposal depth must be between 2 and 4");
     }
@@ -50,7 +51,8 @@ MtpRoundStep finish_greedy_mtp_round(
     for (const MtpTargetVerifyRow& row : verification.rows) {
         target_rows.push_back(row.greedy.token);
     }
-    const MtpGreedyDecision decision = decide_mtp_greedy(drafts, target_rows);
+    const MtpGreedyDecision decision = decide_mtp_greedy(
+        drafts, target_rows, stop_tokens);
     MlxArray next_target_stream =
         verification.rows[decision.correction_row].pre_mixer_stream.share();
 
@@ -121,7 +123,8 @@ MtpRoundStep run_greedy_mtp_round_reference(
     const std::size_t query_position,
     const std::size_t draft_depth,
     ModelDecodeState& target_state,
-    MtpDecodeState& head_state) {
+    MtpDecodeState& head_state,
+    const std::span<const std::uint32_t> stop_tokens) {
     if (draft_depth < 2 || draft_depth > 4) {
         throw std::runtime_error("MTP draft depth must be between 2 and 4");
     }
@@ -144,7 +147,8 @@ MtpRoundStep run_greedy_mtp_round_reference(
         std::chrono::steady_clock::now() - draft_started).count();
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), draft_ms, std::move(head_origin), target_state, head_state);
+        std::move(drafts), draft_ms, std::move(head_origin), target_state, head_state,
+        stop_tokens);
 }
 
 MtpRoundStep run_greedy_external_draft_round_reference(
@@ -155,11 +159,13 @@ MtpRoundStep run_greedy_external_draft_round_reference(
     const std::size_t query_position,
     std::vector<std::uint32_t> drafts,
     ModelDecodeState& target_state,
-    MtpDecodeState& head_state) {
+    MtpDecodeState& head_state,
+    const std::span<const std::uint32_t> stop_tokens) {
     MtpDecodeState head_origin = head.snapshot_state(head_state);
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), 0.0, std::move(head_origin), target_state, head_state);
+        std::move(drafts), 0.0, std::move(head_origin), target_state, head_state,
+        stop_tokens);
 }
 
 } // namespace qwen38
