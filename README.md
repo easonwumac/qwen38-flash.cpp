@@ -12,9 +12,10 @@ a UI and is not a wrapper around `mlx-serve`.
 > The current milestone includes the tested C++20 server foundation, strict
 > Qwen3.8 manifest parsing, native tokenization/chat templating, lazy checkpoint
 > loading, and verified Apple-GPU execution of token embedding, Q4 projections,
-> Qwen3.8's four-stream Hyper-Connection mixers, and one-token sparse MoE. Full
-> transformer execution and generation are not implemented yet, so this version
-> is not a usable LLM runtime and makes no end-to-end performance claim.
+> Qwen3.8's four-stream Hyper-Connection mixers, one-token sparse MoE, and the
+> zero-state first-token Gated DeltaNet path. Full transformer execution and
+> generation are not implemented yet, so this version is not a usable LLM
+> runtime and makes no end-to-end performance claim.
 
 The execution path now includes a real-checkpoint Q4 affine projection smoke:
 `qwen38-qmm-smoke MODEL_DIRECTORY` loads the retained `lm_head` through MLX's
@@ -26,6 +27,9 @@ layer-0 read/injection gates, residual write-back, and final mixer. Its outputs
 match the independent `devtools/hyper_connection_oracle.py` MLX-Python oracle.
 `qwen38-sparse-moe-smoke MODEL_DIRECTORY` verifies router top-k, ten selected
 Q4 experts, and the gated shared expert against a second independent oracle.
+`qwen38-gated-delta-net-smoke MODEL_DIRECTORY` verifies the first-token depthwise
+convolution, Q/K normalization, zero-state delta recurrence, gated RMSNorm, and
+Q4 output projection against a third oracle.
 
 ## Build
 

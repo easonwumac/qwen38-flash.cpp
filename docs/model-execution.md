@@ -80,6 +80,22 @@ was tested but did not preserve per-expert numerical semantics for these gathere
 kernel is required to remove 48 host synchronization points and reduce dispatch
 overhead in the optimized decode graph.
 
+## First-token Gated DeltaNet
+
+The layer-0 linear-attention path now covers the exact zero-state first token:
+four Q4 input projections, the current tap of the width-4 depthwise causal
+convolution, SiLU, Q/K normalization and grouped-query head expansion, beta
+gating, zero-state delta recurrence, sigmoid-gated RMSNorm, and Q4 output
+projection. C++ and the independent MLX-Python oracle both produce checksum
+`-2.5134339333` for the retained fixture. Six component runs measured 22.21 ms
+cold and 0.63 ms warm median.
+
+The fixture exposed a BF16-sensitive semantic requirement: the recurrence must
+evaluate `(value * beta) * similarity`. Reassociating it to
+`value * (beta * similarity)` changes rounding and the final output. This order
+is now explicit. Stateful convolution/recurrent caches and multi-token chunked
+prefill remain required before this block can serve generation.
+
 ## Performance implication
 
 A full-vocabulary head at about 21.5 ms already consumes most of a 45 tok/s

@@ -40,6 +40,11 @@ public:
     [[nodiscard]] MlxArray reshape(std::span<const int> shape) const;
     [[nodiscard]] MlxArray transpose() const;
     [[nodiscard]] MlxArray tile(std::span<const int> repetitions) const;
+    [[nodiscard]] MlxArray repeat_axis(int repeats, int axis) const;
+    [[nodiscard]] MlxArray slice(
+        std::span<const int> start,
+        std::span<const int> stop,
+        std::span<const int> strides) const;
     [[nodiscard]] MlxArray sigmoid() const;
     [[nodiscard]] MlxArray silu() const;
     [[nodiscard]] MlxArray mean_axis(int axis, bool keep_dimensions = false) const;

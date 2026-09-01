@@ -43,6 +43,14 @@ int main() {
         std::cerr << "MLX sum mismatch\n";
         return 1;
     }
+    const std::array<int, 2> slice_start{1, 0};
+    const std::array<int, 2> slice_stop{3, 2};
+    const std::array<int, 2> slice_strides{1, 1};
+    if (left.repeat_axis(2, 0).slice(slice_start, slice_stop, slice_strides).to_float32() !=
+        std::vector<float>({1, 2, 3, 4})) {
+        std::cerr << "MLX repeat/slice mismatch\n";
+        return 1;
+    }
     const auto sigmoid = left.sigmoid().to_float32();
     if (std::abs(sigmoid.front() - 0.7310586F) > 1.0e-5F) {
         std::cerr << "MLX sigmoid mismatch\n";

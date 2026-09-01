@@ -128,6 +128,37 @@ MlxArray MlxArray::tile(const std::span<const int> repetitions) const {
     return result;
 }
 
+MlxArray MlxArray::repeat_axis(const int repeats, const int axis) const {
+    if (repeats <= 0) throw std::runtime_error("repeat count must be positive");
+    MlxArray result;
+    const Stream stream;
+    check(mlx_repeat_axis(&result.value_, value_, repeats, axis, stream.get()), "repeat_axis");
+    return result;
+}
+
+MlxArray MlxArray::slice(
+    const std::span<const int> start,
+    const std::span<const int> stop,
+    const std::span<const int> strides) const {
+    if (start.size() != stop.size() || start.size() != strides.size()) {
+        throw std::runtime_error("slice vectors must have equal lengths");
+    }
+    MlxArray result;
+    const Stream stream;
+    check(mlx_slice(
+              &result.value_,
+              value_,
+              start.data(),
+              start.size(),
+              stop.data(),
+              stop.size(),
+              strides.data(),
+              strides.size(),
+              stream.get()),
+        "slice");
+    return result;
+}
+
 MlxArray MlxArray::sigmoid() const {
     MlxArray result;
     const Stream stream;

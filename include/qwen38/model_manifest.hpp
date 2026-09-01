@@ -35,6 +35,12 @@ struct ModelConfig {
     std::size_t moe_intermediate_size{0};
     std::size_t shared_expert_intermediate_size{0};
     bool normalize_topk_probability{true};
+    std::size_t linear_convolution_kernel_size{0};
+    std::size_t linear_key_head_dimension{0};
+    std::size_t linear_value_head_dimension{0};
+    std::size_t linear_key_head_count{0};
+    std::size_t linear_value_head_count{0};
+    std::string output_gate_type;
     double rms_norm_epsilon{0.0};
     std::vector<std::string> layer_types;
 };

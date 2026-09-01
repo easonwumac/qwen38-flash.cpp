@@ -74,6 +74,21 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     if (const Json* normalize = text.find("norm_topk_prob")) {
         result.config_.normalize_topk_probability = normalize->as_boolean();
     }
+    result.config_.linear_convolution_kernel_size = size_value(
+        text.at("linear_conv_kernel_dim"), "linear_conv_kernel_dim");
+    result.config_.linear_key_head_dimension = size_value(
+        text.at("linear_key_head_dim"), "linear_key_head_dim");
+    result.config_.linear_value_head_dimension = size_value(
+        text.at("linear_value_head_dim"), "linear_value_head_dim");
+    result.config_.linear_key_head_count = size_value(
+        text.at("linear_num_key_heads"), "linear_num_key_heads");
+    result.config_.linear_value_head_count = size_value(
+        text.at("linear_num_value_heads"), "linear_num_value_heads");
+    result.config_.output_gate_type = text.at("output_gate_type").as_string();
+    if (result.config_.output_gate_type != "sigmoid" &&
+        result.config_.output_gate_type != "silu") {
+        throw std::runtime_error("unsupported output_gate_type");
+    }
     result.config_.rms_norm_epsilon = text.at("rms_norm_eps").as_number();
     if (!(result.config_.rms_norm_epsilon > 0.0)) {
         throw std::runtime_error("rms_norm_eps must be positive");
