@@ -60,6 +60,11 @@ bool qmeta_prefill_defer_reduce_enabled() {
     return value == nullptr || std::string_view(value) == "1";
 }
 
+bool qmeta_prefill_defer_temporary_enabled() {
+    const char* value = std::getenv("QWEN38_QMETA_PREFILL_DEFER_TEMPORARY");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
 std::shared_ptr<MlxMetalKernel> qmeta_gate_up_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -1030,16 +1035,24 @@ MlxArray SparseMoe::forward_prefill_impl(
     MlxArray routed = weighted.sum_axis(2);
     const bool defer_cached_qmeta_reduce =
         cache_qmeta && qmeta_prefill_defer_reduce_enabled();
+    const bool defer_temporary_qmeta_reduce =
+        compact_qmeta_ && !cache_qmeta && qmeta_prefill_defer_temporary_enabled();
     if (defer_cached_qmeta_reduce) {
         static std::once_flag announced;
         std::call_once(announced, [] {
             std::cerr << "[qmeta] cached prefill reduction uses grouped layer barriers\n";
         });
     }
-    if (compact_qmeta_ && !defer_cached_qmeta_reduce) {
-        // Without request-scoped banks, materialize before the temporary
-        // decoded metadata leaves scope. Cached banks instead use the model's
-        // normal layer-group boundary.
+    if (defer_temporary_qmeta_reduce) {
+        static std::once_flag announced;
+        std::call_once(announced, [] {
+            std::cerr << "[qmeta] temporary prefill metadata uses grouped layer barriers\n";
+        });
+    }
+    if (compact_qmeta_ && !defer_cached_qmeta_reduce && !defer_temporary_qmeta_reduce) {
+        // Diagnostic rollback: drain each layer immediately. Production
+        // memory mode lets the lazy graph retain temporary decoded inputs only
+        // until the model's bounded layer-group barrier.
         routed.eval();
     }
     if (timings != nullptr) {

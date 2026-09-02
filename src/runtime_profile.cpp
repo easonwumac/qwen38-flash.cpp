@@ -62,6 +62,7 @@ void apply_runtime_profile(const std::string_view profile) {
     if (config.memory_efficient) {
         set_environment_default("QWEN38_COMPACT_QMETA", "lossless13");
         set_environment_default("QWEN38_QMETA_PREFILL_CACHE", "0");
+        set_environment_default("QWEN38_QMETA_PREFILL_DEFER_TEMPORARY", "1");
         set_environment_default("QWEN38_QSA_PACKED_PREFILL", "1");
     }
 }

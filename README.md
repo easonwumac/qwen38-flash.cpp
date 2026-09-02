@@ -171,7 +171,11 @@ qmeta prefill caching for every request.
 Qwen3.8 Flash Next build. It uses the lossless13 compact metadata sidecar,
 leaves expert pages pageable, disables decoded-qmeta and RAM prefix caches,
 keeps MTP off unless explicitly requested, enables packed QSA above 65,536
-tokens, and retains the validated 256 MiB MLX allocator cap. The lossless13 sidecar is
+tokens, and retains the validated 256 MiB MLX allocator cap. Temporary decoded
+metadata stays in the lazy graph only through the normal eight-layer prefill
+barrier, avoiding a synchronization at every layer without retaining all 48
+layers for the request. Set `QWEN38_QMETA_PREFILL_DEFER_TEMPORARY=0` for the
+old per-layer synchronization path. The lossless13 sidecar is
 required; startup fails clearly instead of silently falling back to the larger
 metadata representation. Use the memory guard for every long-context run.
 
