@@ -526,8 +526,8 @@ When verification rejects part of a draft, a state-only Metal recurrence
 reconstructs exactly the selected checkpoint from the original state and the
 already-computed key/value/decay/beta rows. A five-row layer oracle measured
 zero maximum absolute error for verifier output, convolution state, and every
-reconstructed recurrent state. This remains opt-in until a default-stride,
-mixed-prompt A/B can run with adequate system memory headroom.
+reconstructed recurrent state. The optimized profiles enable it. Set the flag
+to `0` for the former all-checkpoint path.
 
 Accepted MTP rows are committed back into the drafter with one S=2..4 batched
 state pass instead of serially replaying each row. This changes proposal-state
