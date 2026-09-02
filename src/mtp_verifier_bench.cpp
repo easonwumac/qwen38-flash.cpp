@@ -43,6 +43,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "full-model verifier benchmarks must run through devtools/memory_guard.py");
         }
+        static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
         const bool seeded_origin = std::getenv("QWEN38_VERIFY_SEEDED_ORIGIN") != nullptr;

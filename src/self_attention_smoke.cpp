@@ -125,7 +125,11 @@ int qsa_smoke(
     const std::array<int, 3> verify_repetitions{1, static_cast<int>(ratio), 1};
     auto verify_input = input.tile(verify_repetitions);
     std::vector<qwen38::SelfAttentionState> checkpoints;
+    const auto verify_started = std::chrono::steady_clock::now();
     auto batched = layer.forward_verify(verify_input, batched_origin, checkpoints);
+    const auto batch_values = batched.astype(MLX_FLOAT32).to_float32();
+    const double verify_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - verify_started).count();
 
     std::vector<qwen38::MlxArray> serial_rows;
     serial_rows.reserve(ratio);
@@ -136,9 +140,16 @@ int qsa_smoke(
     for (std::size_t row = 1; row < serial_rows.size(); ++row) {
         serial_output = qwen38::MlxArray::concatenate(serial_output, serial_rows[row], 1);
     }
-    const auto batch_values = batched.astype(MLX_FLOAT32).to_float32();
     const auto serial_values = serial_output.astype(MLX_FLOAT32).to_float32();
     const double output_cosine = cosine(batch_values, serial_values);
+    double output_max_abs = 0.0;
+    std::size_t output_differences = 0;
+    for (std::size_t index = 0; index < batch_values.size(); ++index) {
+        output_max_abs = std::max(
+            output_max_abs,
+            std::abs(static_cast<double>(batch_values[index]) - serial_values[index]));
+        output_differences += batch_values[index] != serial_values[index] ? 1 : 0;
+    }
     const std::size_t engaged_tokens = budget + ratio;
     const std::size_t expected_blocks = engaged_tokens / ratio;
     if (checkpoints.size() != ratio || serial.token_count != engaged_tokens ||
@@ -222,6 +233,9 @@ int qsa_smoke(
               << ",\"raw_rows\":" << checkpoints.back().qsa_raw_keys.shape()[1]
               << ",\"pooled_blocks\":" << checkpoints.back().qsa_pooled_count
               << ",\"batch_serial_cosine\":" << output_cosine
+              << ",\"batch_serial_max_abs\":" << output_max_abs
+              << ",\"batch_serial_differences\":" << output_differences
+              << ",\"verify_ms\":" << verify_ms
               << ",\"packed_prefill_cosine\":" << packed_prefill_cosine
               << ",\"scale_context\":" << scale_context
               << ",\"scale_rows\":" << scale_rows
