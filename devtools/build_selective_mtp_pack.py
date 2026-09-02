@@ -80,6 +80,11 @@ def main() -> None:
         bases.extend(GROUPS[group])
     if not bases:
         parser.error("at least one --q8-projections or --q8-groups value is required")
+    if args.q8_projections and set(args.q8_projections) != set(PROJECTIONS):
+        print(
+            "warning: selecting only part of routed gate/up/down creates mixed "
+            "bit widths; the current runtime will use its slower generic MoE path"
+        )
 
     replaced: list[str] = []
     for base in bases:
