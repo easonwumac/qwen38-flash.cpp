@@ -228,6 +228,10 @@ The retained high-acceptance MTP path has a standalone regression client and a
 memory-guarded launch recipe in [docs/mtp-benchmark.md](docs/mtp-benchmark.md).
 It checks per-length warm throughput, proposal acceptance, completion length,
 and whether MTP actually engaged; it does not use prefix-cache hits.
+Selective Q4/Q8 drafter ablations and the retained 68.19 tok/s research
+candidate are documented in
+[docs/mtp-hybrid-ablation.md](docs/mtp-hybrid-ablation.md). The improvement is
+not yet a stable 75 tok/s or production-quality claim.
 
 Extended cache hits preserve the continuous decode state instead of rebuilding
 the old assistant response through wide prefill. This is token-exact when those
