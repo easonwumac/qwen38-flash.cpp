@@ -77,6 +77,19 @@ std::shared_ptr<MlxMetalKernel> verify_recurrence_bf16_sum_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> rollback_recurrence_bf16_sum_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"k", "v", "g", "beta", "state_in"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_gdn_rollback_recurrence_bf16_sum",
+            inputs,
+            "state_out",
+            gdn_metal::rollback_recurrence_bf16_sum,
+            gdn_metal::header);
+    }();
+    return kernel;
+}
+
 std::shared_ptr<MlxMetalKernel> prework_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -169,9 +182,51 @@ MlxArray GatedDeltaNet::forward_first(const MlxArray& input) const {
     return forward_decode(input, state);
 }
 
+void GatedDeltaNet::materialize_rollback(GatedDeltaNetState& state) const {
+    if (state.rollback_rows == 0) return;
+    if (!state.initialized || state.rollback_rows > 64) {
+        throw std::runtime_error("invalid deferred GatedDeltaNet rollback state");
+    }
+    const int value_heads = dimension(value_head_count_, "value_head_count");
+    const int key_dimension = dimension(key_head_dimension_, "key_head_dimension");
+    const int value_dimension = dimension(value_head_dimension_, "value_head_dimension");
+    const std::array<const MlxArray*, 5> inputs{
+        &state.rollback_key,
+        &state.rollback_value,
+        &state.rollback_decay,
+        &state.rollback_beta,
+        &state.recurrent,
+    };
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {1, value_heads, value_dimension, key_dimension},
+         .dtype = state.recurrent.dtype()},
+    }};
+    const std::array<int, 3> grid{32, value_dimension, value_heads};
+    const std::array<int, 3> threadgroup{32, 4, 1};
+    const std::array<MlxMetalDtypeTemplate, 2> dtype_templates{{
+        {.name = "InT", .value = state.rollback_key.dtype()},
+        {.name = "StT", .value = state.recurrent.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 4> int_templates{{
+        {.name = "DK", .value = key_dimension},
+        {.name = "DV", .value = value_dimension},
+        {.name = "HV", .value = value_heads},
+        {.name = "ROWS", .value = static_cast<int>(state.rollback_rows)},
+    }};
+    std::vector<MlxArray> rollback = rollback_recurrence_bf16_sum_kernel()->apply(
+        inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
+    state.recurrent = std::move(rollback[0]);
+    state.rollback_key = {};
+    state.rollback_value = {};
+    state.rollback_decay = {};
+    state.rollback_beta = {};
+    state.rollback_rows = 0;
+}
+
 MlxArray GatedDeltaNet::forward_decode(
     const MlxArray& input,
     GatedDeltaNetState& state) const {
+    materialize_rollback(state);
     const auto input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] != 1) {
         throw std::runtime_error("first-token GatedDeltaNet requires shape [1,1,hidden]");
@@ -356,6 +411,9 @@ MlxArray GatedDeltaNet::forward_verify(
     const MlxArray& input,
     const GatedDeltaNetState& origin,
     std::vector<GatedDeltaNetState>& checkpoints) const {
+    if (origin.rollback_rows != 0) {
+        throw std::runtime_error("GatedDeltaNet verifier received deferred rollback state");
+    }
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1 ||
         input_shape[1] > 64) {
@@ -423,12 +481,16 @@ MlxArray GatedDeltaNet::forward_verify(
 
     const char* metal_verify = std::getenv("QWEN38_GDN_METAL_VERIFY_BF16_SUM");
     if (metal_verify != nullptr && std::string_view(metal_verify) == "1") {
+        const char* compact_rollback_env = std::getenv("QWEN38_COMPACT_GDN_ROLLBACK");
+        const bool compact_rollback = compact_rollback_env != nullptr &&
+            std::string_view(compact_rollback_env) == "1";
         const std::array<const MlxArray*, 6> inputs{
             &query, &key, &value, &decay, &beta, &recurrent};
         const std::array<MlxMetalOutputSpec, 2> outputs{{
             {.shape = {1, input_shape[1], value_heads, value_dimension},
              .dtype = qkv.dtype()},
-            {.shape = {input_shape[1], 1, value_heads, value_dimension, key_dimension},
+            {.shape = {compact_rollback ? 1 : input_shape[1], 1, value_heads,
+                       value_dimension, key_dimension},
              .dtype = recurrent.dtype()},
         }};
         const std::array<int, 3> grid{32, value_dimension, value_heads};
@@ -438,11 +500,12 @@ MlxArray GatedDeltaNet::forward_verify(
             {.name = "StT", .value = recurrent.dtype()},
             {.name = "OutT", .value = qkv.dtype()},
         }};
-        const std::array<MlxMetalIntTemplate, 4> int_templates{{
+        const std::array<MlxMetalIntTemplate, 5> int_templates{{
             {.name = "DK", .value = key_dimension},
             {.name = "DV", .value = value_dimension},
             {.name = "HV", .value = value_heads},
             {.name = "ROWS", .value = input_shape[1]},
+            {.name = "STORE_ROWS", .value = compact_rollback ? 0 : 1},
         }};
         std::vector<MlxArray> recurrence = verify_recurrence_bf16_sum_kernel()->apply(
             inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
@@ -455,12 +518,22 @@ MlxArray GatedDeltaNet::forward_verify(
                 std::vector<int>{0, begin, 0},
                 std::vector<int>{1, begin + 3, convolution_width},
                 strides);
-            checkpoints[row].recurrent = recurrence[1].slice(
-                std::vector<int>{static_cast<int>(row), 0, 0, 0, 0},
-                std::vector<int>{static_cast<int>(row + 1), 1, value_heads,
-                                 value_dimension, key_dimension},
-                state_strides).reshape(
-                    std::vector<int>{1, value_heads, value_dimension, key_dimension});
+            if (compact_rollback && row + 1 != rows) {
+                checkpoints[row].recurrent = recurrent.share();
+                checkpoints[row].rollback_key = key.share();
+                checkpoints[row].rollback_value = value.share();
+                checkpoints[row].rollback_decay = decay.share();
+                checkpoints[row].rollback_beta = beta.share();
+                checkpoints[row].rollback_rows = row + 1;
+            } else {
+                const int state_row = compact_rollback ? 0 : static_cast<int>(row);
+                checkpoints[row].recurrent = recurrence[1].slice(
+                    std::vector<int>{state_row, 0, 0, 0, 0},
+                    std::vector<int>{state_row + 1, 1, value_heads,
+                                     value_dimension, key_dimension},
+                    state_strides).reshape(
+                        std::vector<int>{1, value_heads, value_dimension, key_dimension});
+            }
             checkpoints[row].initialized = true;
         }
         MlxArray normalized = recurrence[0].rms_norm(norm_weight_, epsilon_);
@@ -516,6 +589,7 @@ MlxArray GatedDeltaNet::forward_verify(
 MlxArray GatedDeltaNet::forward_prefill(
     const MlxArray& input,
     GatedDeltaNetState& state) const {
+    materialize_rollback(state);
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 2 ||
         input_shape[1] > 1024) {

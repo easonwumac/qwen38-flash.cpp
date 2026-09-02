@@ -198,6 +198,15 @@ void QwenModel::clear_prefill_qmeta_cache() const {
     if (cleared) MlxArray::clear_cache();
 }
 
+void QwenModel::materialize_speculative_state(ModelDecodeState& state) const {
+    if (state.layers.size() != layers_.size()) {
+        throw std::runtime_error("model state layer count mismatch");
+    }
+    for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
+        layers_[layer]->materialize_speculative_state(state.layers[layer]);
+    }
+}
+
 std::vector<MlxArray> QwenModel::prefill_chunk(
     const std::span<const std::uint32_t> tokens,
     ModelDecodeState& state,

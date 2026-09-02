@@ -12,6 +12,11 @@ namespace qwen38 {
 struct GatedDeltaNetState {
     MlxArray convolution;
     MlxArray recurrent;
+    MlxArray rollback_key;
+    MlxArray rollback_value;
+    MlxArray rollback_decay;
+    MlxArray rollback_beta;
+    std::size_t rollback_rows{0};
     bool initialized{false};
 };
 
@@ -35,6 +40,7 @@ public:
     [[nodiscard]] MlxArray forward_prefill(
         const MlxArray& input,
         GatedDeltaNetState& state) const;
+    void materialize_rollback(GatedDeltaNetState& state) const;
 
 private:
     struct QuantizedProjection {

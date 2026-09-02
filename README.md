@@ -520,6 +520,15 @@ greedy tokens and rollback continuation, at the same 34.3 GiB peak RSS. A warm
 256-token depth-2 HTTP completion improved 40.90 to 42.18 tok/s and produced an
 identical output hash. It remains opt-in pending a wider prompt corpus.
 
+`QWEN38_COMPACT_GDN_ROLLBACK=1` makes that verifier emit only its final
+recurrent state instead of one full recurrent checkpoint per proposal row.
+When verification rejects part of a draft, a state-only Metal recurrence
+reconstructs exactly the selected checkpoint from the original state and the
+already-computed key/value/decay/beta rows. A five-row layer oracle measured
+zero maximum absolute error for verifier output, convolution state, and every
+reconstructed recurrent state. This remains opt-in until a default-stride,
+mixed-prompt A/B can run with adequate system memory headroom.
+
 Accepted MTP rows are committed back into the drafter with one S=2..4 batched
 state pass instead of serially replaying each row. This changes proposal-state
 scheduling only; target verification remains authoritative. Set

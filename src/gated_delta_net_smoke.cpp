@@ -72,6 +72,51 @@ int main(int argc, char** argv) {
             tensors,
             "language_model.model.layers.0.linear_attn",
             tensors.manifest().config());
+        if (std::getenv("QWEN38_GDN_ROLLBACK_COMPARE") != nullptr) {
+            setenv("QWEN38_GDN_METAL_VERIFY_BF16_SUM", "1", 1);
+            qwen38::GatedDeltaNetState origin;
+            static_cast<void>(layer.forward_decode(first_input, origin)
+                .astype(MLX_FLOAT32).to_float32());
+            std::vector<qwen38::MlxArray> rows;
+            for (const std::int32_t token : {11, 17, 23, 29, 31}) {
+                rows.push_back(make_input(tensors, token));
+            }
+            qwen38::MlxArray batch = rows.front().share();
+            for (std::size_t row = 1; row < rows.size(); ++row) {
+                batch = qwen38::MlxArray::concatenate(batch, rows[row], 1);
+            }
+
+            unsetenv("QWEN38_COMPACT_GDN_ROLLBACK");
+            std::vector<qwen38::GatedDeltaNetState> reference;
+            const auto reference_output = layer.forward_verify(batch, origin, reference)
+                .astype(MLX_FLOAT32).to_float32();
+            setenv("QWEN38_COMPACT_GDN_ROLLBACK", "1", 1);
+            std::vector<qwen38::GatedDeltaNetState> candidate;
+            const auto candidate_output = layer.forward_verify(batch, origin, candidate)
+                .astype(MLX_FLOAT32).to_float32();
+            if (reference.size() != candidate.size()) {
+                throw std::runtime_error("rollback checkpoint count mismatch");
+            }
+            float recurrent_error = 0.0F;
+            float convolution_error = 0.0F;
+            for (std::size_t row = 0; row < candidate.size(); ++row) {
+                layer.materialize_rollback(candidate[row]);
+                recurrent_error = std::max(recurrent_error, maximum_absolute_error(
+                    reference[row].recurrent.astype(MLX_FLOAT32).to_float32(),
+                    candidate[row].recurrent.astype(MLX_FLOAT32).to_float32()));
+                convolution_error = std::max(convolution_error, maximum_absolute_error(
+                    reference[row].convolution.astype(MLX_FLOAT32).to_float32(),
+                    candidate[row].convolution.astype(MLX_FLOAT32).to_float32()));
+                if (candidate[row].rollback_rows != 0) {
+                    throw std::runtime_error("rollback metadata was not cleared");
+                }
+            }
+            std::cout << "{\"output_max_abs\":"
+                      << maximum_absolute_error(reference_output, candidate_output)
+                      << ",\"convolution_max_abs\":" << convolution_error
+                      << ",\"recurrent_max_abs\":" << recurrent_error << "}\n";
+            return EXIT_SUCCESS;
+        }
         if (std::getenv("QWEN38_GDN_COMPARE") != nullptr) {
             unsetenv("QWEN38_GDN_PREWORK");
             unsetenv("QWEN38_GDN_NORM_GATE");

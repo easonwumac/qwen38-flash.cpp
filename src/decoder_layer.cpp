@@ -40,6 +40,17 @@ DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
         snapshot.linear_attention.convolution =
             state.linear_attention.convolution.share();
         snapshot.linear_attention.recurrent = state.linear_attention.recurrent.share();
+        snapshot.linear_attention.rollback_rows = state.linear_attention.rollback_rows;
+        if (state.linear_attention.rollback_rows != 0) {
+            snapshot.linear_attention.rollback_key =
+                state.linear_attention.rollback_key.share();
+            snapshot.linear_attention.rollback_value =
+                state.linear_attention.rollback_value.share();
+            snapshot.linear_attention.rollback_decay =
+                state.linear_attention.rollback_decay.share();
+            snapshot.linear_attention.rollback_beta =
+                state.linear_attention.rollback_beta.share();
+        }
     }
     snapshot.full_attention.token_count = state.full_attention.token_count;
     snapshot.full_attention.position_base = state.full_attention.position_base;
@@ -135,11 +146,18 @@ bool DecoderLayer::clear_prefill_qmeta_cache() const {
     return mlp_.clear_prefill_qmeta_cache();
 }
 
+void DecoderLayer::materialize_speculative_state(DecoderLayerState& state) const {
+    if (linear_attention_ != nullptr) {
+        linear_attention_->materialize_rollback(state.linear_attention);
+    }
+}
+
 MlxArray DecoderLayer::forward_decode(
     const MlxArray& input_stream,
     const std::uint32_t token,
     DecoderLayerState& state,
     DecoderLayerTrace* trace) const {
+    materialize_speculative_state(state);
     const char* compile = std::getenv("QWEN38_COMPILE_LAYER");
     if (linear_attention_ != nullptr && ple_ == nullptr && state.linear_attention.initialized &&
         trace == nullptr && compile != nullptr && std::string_view(compile) == "1") {

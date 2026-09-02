@@ -197,6 +197,7 @@ MtpRoundStep finish_greedy_mtp_round(
     }
     commit_mtp_target_verification(
         std::move(verification), decision.accepted, target_state);
+    target.materialize_speculative_state(target_state);
     const std::size_t next_query_position = query_position + decision.accepted + 1;
     if (target_state.token_count != next_query_position) {
         throw std::runtime_error("MTP committed target length mismatch");
