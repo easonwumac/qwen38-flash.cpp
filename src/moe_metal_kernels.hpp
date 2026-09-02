@@ -269,23 +269,35 @@ inline constexpr std::string_view qmeta_gate_up = R"metal(
     float gate_acc = 0.0f;
     float up_acc = 0.0f;
     for (int group = (int)lane; group < NG; group += 32) {
-        const int gate_bit = group * QGBITS;
-        const size_t gate_pos = row * GATE_ROW_BYTES + (gate_bit >> 3);
-        const uint gate_shift = gate_bit & 7;
-        uint gate_window = uint(gate_tags[gate_pos]) |
-            (uint(gate_tags[gate_pos + 1]) << 8);
-        if (gate_shift + QGBITS > 16) gate_window |= uint(gate_tags[gate_pos + 2]) << 16;
-        const uint gate_pair = gate_dictionary[
-            (gate_window >> gate_shift) & ((1u << QGBITS) - 1u)];
+        uint gate_tag;
+        if (QGBITS == 16 && ALIGNED16 != 0) {
+            gate_tag = uint(((const device ushort*)gate_tags)[row * NG + group]);
+        } else {
+            const int gate_bit = group * QGBITS;
+            const size_t gate_pos = row * GATE_ROW_BYTES + (gate_bit >> 3);
+            const uint gate_shift = gate_bit & 7;
+            uint gate_window = uint(gate_tags[gate_pos]) |
+                (uint(gate_tags[gate_pos + 1]) << 8);
+            if (gate_shift + QGBITS > 16) {
+                gate_window |= uint(gate_tags[gate_pos + 2]) << 16;
+            }
+            gate_tag = (gate_window >> gate_shift) & ((1u << QGBITS) - 1u);
+        }
+        const uint gate_pair = gate_dictionary[gate_tag];
         const float gate_scale = float(as_type<T>(ushort(gate_pair & 65535u)));
         const float gate_bias = float(as_type<T>(ushort(gate_pair >> 16)));
-        const int up_bit = group * QUBITS;
-        const size_t up_pos = row * UP_ROW_BYTES + (up_bit >> 3);
-        const uint up_shift = up_bit & 7;
-        uint up_window = uint(up_tags[up_pos]) | (uint(up_tags[up_pos + 1]) << 8);
-        if (up_shift + QUBITS > 16) up_window |= uint(up_tags[up_pos + 2]) << 16;
-        const uint up_pair = up_dictionary[
-            (up_window >> up_shift) & ((1u << QUBITS) - 1u)];
+        uint up_tag;
+        if (QUBITS == 16 && ALIGNED16 != 0) {
+            up_tag = uint(((const device ushort*)up_tags)[row * NG + group]);
+        } else {
+            const int up_bit = group * QUBITS;
+            const size_t up_pos = row * UP_ROW_BYTES + (up_bit >> 3);
+            const uint up_shift = up_bit & 7;
+            uint up_window = uint(up_tags[up_pos]) | (uint(up_tags[up_pos + 1]) << 8);
+            if (up_shift + QUBITS > 16) up_window |= uint(up_tags[up_pos + 2]) << 16;
+            up_tag = (up_window >> up_shift) & ((1u << QUBITS) - 1u);
+        }
+        const uint up_pair = up_dictionary[up_tag];
         const float up_scale = float(as_type<T>(ushort(up_pair & 65535u)));
         const float up_bias = float(as_type<T>(ushort(up_pair >> 16)));
         const device T* input_group = input_row + group * GS;
@@ -358,13 +370,20 @@ inline constexpr std::string_view qmeta_down_reduce = R"metal(
             if (k0 + lane * VALUES < K) {
                 for (int row_offset = 0; row_offset < ROWS_PER_SIMD; ++row_offset) {
                     const size_t row = base + row_offset;
-                    const int bit = group * QBITS;
-                    const size_t tag_pos = row * ROW_BYTES + (bit >> 3);
-                    const uint shift = bit & 7;
-                    uint window = uint(tags[tag_pos]) | (uint(tags[tag_pos + 1]) << 8);
-                    if (shift + QBITS > 16) window |= uint(tags[tag_pos + 2]) << 16;
-                    const uint pair = dictionary[
-                        (window >> shift) & ((1u << QBITS) - 1u)];
+                    uint tag;
+                    if (QBITS == 16 && ALIGNED16 != 0) {
+                        tag = uint(((const device ushort*)tags)[row * GROUPS + group]);
+                    } else {
+                        const int bit = group * QBITS;
+                        const size_t tag_pos = row * ROW_BYTES + (bit >> 3);
+                        const uint shift = bit & 7;
+                        uint window = uint(tags[tag_pos]) | (uint(tags[tag_pos + 1]) << 8);
+                        if (shift + QBITS > 16) {
+                            window |= uint(tags[tag_pos + 2]) << 16;
+                        }
+                        tag = (window >> shift) & ((1u << QBITS) - 1u);
+                    }
+                    const uint pair = dictionary[tag];
                     const float scale = float(as_type<T>(ushort(pair & 65535u)));
                     const float bias = float(as_type<T>(ushort(pair >> 16)));
                     const device uint16_t* words =

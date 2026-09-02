@@ -65,6 +65,11 @@ bool qmeta_prefill_defer_temporary_enabled() {
     return value != nullptr && std::string_view(value) == "1";
 }
 
+bool qmeta_aligned16_enabled() {
+    const char* value = std::getenv("QWEN38_QMETA_ALIGNED16");
+    return value == nullptr || std::string_view(value) != "0";
+}
+
 std::shared_ptr<MlxMetalKernel> qmeta_gate_up_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -474,9 +479,10 @@ MlxArray SparseMoe::forward_compact_routed(
     const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
         {.name = "T", .value = input.dtype()},
     }};
-    const std::array<MlxMetalIntTemplate, 2> gate_int_templates{{
+    const std::array<MlxMetalIntTemplate, 3> gate_int_templates{{
         {.name = "QGBITS", .value = expert_gate_.qmeta.bits},
         {.name = "QUBITS", .value = expert_up_.qmeta.bits},
+        {.name = "ALIGNED16", .value = qmeta_aligned16_enabled() ? 1 : 0},
     }};
     std::vector<MlxArray> gate_result = qmeta_gate_up_kernel()->apply(
         gate_inputs,
@@ -495,8 +501,9 @@ MlxArray SparseMoe::forward_compact_routed(
     }};
     const std::array<int, 3> down_grid{rows * 320 * 64, 1, 1};
     const std::array<int, 3> down_threadgroup{64, 1, 1};
-    const std::array<MlxMetalIntTemplate, 1> down_int_templates{{
+    const std::array<MlxMetalIntTemplate, 2> down_int_templates{{
         {.name = "QBITS", .value = expert_down_.qmeta.bits},
+        {.name = "ALIGNED16", .value = qmeta_aligned16_enabled() ? 1 : 0},
     }};
     std::vector<MlxArray> down_result = qmeta_down_kernel()->apply(
         down_inputs,

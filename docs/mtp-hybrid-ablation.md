@@ -27,6 +27,7 @@ paths; promoted comparisons use repeated warm samples.
 | **Attention + FC Q8** | **30 rounds, 98/120** | **67.66 median** | **253.2** | Retained candidate |
 | Attention + FC, barrier 48 | 30 rounds, 98/120 | 68.10 median | 248.4 | Better diagnostic setting |
 | Attention + FC, barrier 48, resident `12:29` | 30 rounds, 98/120 | **68.19 median** | 248.5 | Best repeated result |
+| Attention + FC + lossless16 qmeta, barrier 48, resident `12:29` | 30 rounds, 98/120 | **68.60 pooled median** | 249.9 | New bit-exact research candidate; lower footprint |
 | Attention + FC, barrier 48, resident `12:30` | 30 rounds, 98/120 | 67.83 median | 252.6 | Rejected |
 | Attention + FC + routed gate Q8 | 30 rounds, 98/120 | 64.92 | 346.4 | Rejected: mixed-bit generic MoE |
 
@@ -51,6 +52,24 @@ roughly flat-to-lower. Code and JSON hashes matched full Q8; explanation and
 creative changed valid target-authoritative greedy trajectories. A broader
 quality corpus is required before making this the production default.
 
+The target's existing lossless16 qmeta sidecar is compatible with the hybrid
+drafter and does not change decoded BF16 scale/bias values. In an adjacent
+A/B/A comparison, four lossless16 samples measured 68.231--68.677 tok/s with a
+68.599 pooled median, versus 68.236/68.244 tok/s for full metadata. The MTP
+path remained exactly 30 rounds and 98/120; peak physical footprint fell from
+about 40.1 to 38.1 GiB. Lossless13 was slower at a 67.215 median. This is a
+small (~0.5%) verifier-bandwidth improvement, not the missing step to 75 tok/s.
+The lossless16 kernel now reads its aligned tags directly as `ushort` values;
+`QWEN38_QMETA_ALIGNED16=0` retains the generic bit-window rollback. The layer-0
+S=5 probe improved from 2.710 to 2.355 ms with an identical bit hash. In the
+same-binary HTTP comparison, verifier time improved from a 1,576.1 ms median
+to 1,569.9 ms; total 128-token throughput was noise-equivalent at 68.87 versus
+68.84 tok/s because drafter time moved in the opposite direction. At 256
+tokens verifier time improved from the pre-change 3,210.7 ms median to 3,198.7
+ms, while total throughput likewise remained noise-equivalent. The aligned
+reader is retained as an exact verifier component improvement, not claimed as
+an additional end-to-end speedup.
+
 Do not selectively promote only one of routed gate/up/down with the current
 runtime. Fused MTP MoE requires all three projections to have the same bit
 width; a gate-only Q8 probe kept the useful proposal path but raised draft time
@@ -58,8 +77,8 @@ by 39% through the generic fallback. The builder now warns when asked to create
 such a pack. A mixed-bit fused kernel would be prerequisite to revisiting this
 axis.
 
-The cost breakdown explains the remaining gap. The best 128-token sample still
-used about 1,590 ms in target verification, 248 ms in drafting, and 30 ms in
+The cost breakdown explains the remaining gap. The lossless16 128-token candidate
+used about 1,577 ms in target verification, 250 ms in drafting, and 30 ms in
 commit. Reaching 75 tok/s requires total generation below 1,707 ms, so another
-roughly 170 ms must come primarily from verifier-wide execution or from a
+roughly 150--160 ms must come primarily from verifier-wide execution or from a
 general acceptance improvement that removes about three target rounds.
