@@ -3,6 +3,7 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -20,6 +21,11 @@ struct MtpRoundStep {
     double draft_ms{0.0};
     double verify_ms{0.0};
     double commit_ms{0.0};
+    // Diagnostic-only top-2 oracle counters. A rejected proposal is eligible
+    // only at the first mismatching position; recovered means the target's
+    // greedy token was the learned drafter's second choice there.
+    std::array<std::size_t, 4> top2_rejected_by_position{};
+    std::array<std::size_t, 4> top2_recovered_by_position{};
 };
 
 // current_token has already been emitted but is not yet present in target_state.

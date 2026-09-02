@@ -46,6 +46,12 @@ round, proposal, acceptance, and fallback counts. The four-element
 one through four; unused positions remain zero. They include learned and history
 draft rounds, so disable history drafting when using them to tune the learned
 depth policy.
+With the diagnostic `QWEN38_MTP_TOP2_ORACLE=1`, the corresponding
+`top2_rejected_by_position` and `top2_recovered_by_position` arrays report
+whether the final-position second choice could have repaired the first rejected
+draft. Use `all` instead of `1` to inspect every position. The oracle performs
+extra vocabulary-wide selection and is intentionally unsuitable for throughput
+measurements.
 `mtp.profitability_cache_keep` marks a replay that retained cumulatively
 profitable MTP despite a late fallback; `mtp.profitability_cache_skip` marks a
 cached losing probe that was skipped.

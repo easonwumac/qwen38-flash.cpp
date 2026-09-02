@@ -53,6 +53,8 @@ def main():
             "demotions": mtp["demotions"],
             "accepted_by_position": mtp["accepted_by_position"],
             "proposed_by_position": mtp["proposed_by_position"],
+            "top2_rejected_by_position": mtp.get("top2_rejected_by_position"),
+            "top2_recovered_by_position": mtp.get("top2_recovered_by_position"),
         }
     print(json.dumps(results, indent=2, sort_keys=True))
 

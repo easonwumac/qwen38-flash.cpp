@@ -4,6 +4,7 @@
 #include "qwen38/mtp_verifier.hpp"
 
 #include <chrono>
+#include <array>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -32,7 +33,22 @@ std::uint32_t argmax_token(const MlxArray& logits, const MtpDecodeState& state) 
     return token.item_uint32();
 }
 
-std::vector<std::uint32_t> draft_lazy_chain(
+struct DraftChain {
+    std::vector<std::uint32_t> primary;
+    std::vector<std::uint32_t> secondary;
+};
+
+bool top2_oracle_enabled() {
+    const char* value = std::getenv("QWEN38_MTP_TOP2_ORACLE");
+    return value != nullptr && std::string_view(value) == "1";
+}
+
+bool top2_oracle_all_positions() {
+    const char* value = std::getenv("QWEN38_MTP_TOP2_ORACLE");
+    return value != nullptr && std::string_view(value) == "all";
+}
+
+DraftChain draft_lazy_chain(
     const QwenMtpHead& head,
     const MlxArray& previous_target_stream,
     const std::uint32_t current_token,
@@ -43,24 +59,57 @@ std::vector<std::uint32_t> draft_lazy_chain(
     const std::vector<int> scalar_shape{1};
     MlxArray token = MlxArray::from_int32(first_value, scalar_shape);
     MlxArray stream = previous_target_stream.share();
+    const bool collect_top2 = top2_oracle_enabled();
+    const bool collect_all_top2 = top2_oracle_all_positions();
     std::vector<MlxArray> draft_arrays;
+    std::vector<MlxArray> top2_arrays;
+    std::vector<std::size_t> top2_positions;
     draft_arrays.reserve(draft_depth);
+    if (collect_top2) top2_arrays.reserve(draft_depth);
     for (std::size_t index = 0; index < draft_depth; ++index) {
         MtpDecodeStep step = head.forward_decode_lazy_token(
             stream, token, query_position + index, head_state);
         draft_arrays.push_back(step.logits.argmax_all().reshape(scalar_shape));
+        if (collect_top2 && (collect_all_top2 || index + 1 == draft_depth)) {
+            const std::vector<int> logits_shape = step.logits.shape();
+            if (logits_shape.empty() || logits_shape.back() < 2) {
+                throw std::runtime_error("MTP top-2 oracle requires a vocabulary axis");
+            }
+            std::vector<int> start(logits_shape.size(), 0);
+            std::vector<int> stop = logits_shape;
+            std::vector<int> strides(logits_shape.size(), 1);
+            start.back() = logits_shape.back() - 2;
+            top2_arrays.push_back(
+                step.logits.argpartition_axis(-2, -1)
+                    .slice(start, stop, strides)
+                    .reshape(std::vector<int>{2})
+                    .astype(MLX_FLOAT32));
+            top2_positions.push_back(index);
+        }
         token = draft_arrays.back().share();
         stream = std::move(step.pre_mixer_stream);
     }
     std::vector<const MlxArray*> outputs;
     outputs.reserve(draft_arrays.size() + 2);
     for (const MlxArray& draft : draft_arrays) outputs.push_back(&draft);
+    for (const MlxArray& top2 : top2_arrays) outputs.push_back(&top2);
     append_head_qsa_state(outputs, head_state);
     MlxArray::eval_all(outputs);
-    std::vector<std::uint32_t> drafts;
-    drafts.reserve(draft_arrays.size());
-    for (const MlxArray& draft : draft_arrays) drafts.push_back(draft.item_uint32());
-    return drafts;
+    DraftChain chain;
+    chain.primary.reserve(draft_arrays.size());
+    chain.secondary.assign(draft_arrays.size(), std::numeric_limits<std::uint32_t>::max());
+    for (const MlxArray& draft : draft_arrays) chain.primary.push_back(draft.item_uint32());
+    for (std::size_t index = 0; index < top2_arrays.size(); ++index) {
+        const std::vector<float> candidates = top2_arrays[index].to_float32();
+        if (candidates.size() != 2) {
+            throw std::runtime_error("MTP top-2 oracle returned an invalid candidate set");
+        }
+        const std::uint32_t first = static_cast<std::uint32_t>(candidates[0]);
+        const std::uint32_t second = static_cast<std::uint32_t>(candidates[1]);
+        const std::size_t position = top2_positions[index];
+        chain.secondary[position] = first == chain.primary[position] ? second : first;
+    }
+    return chain;
 }
 
 MtpRoundStep finish_greedy_mtp_round(
@@ -70,6 +119,7 @@ MtpRoundStep finish_greedy_mtp_round(
     const MlxArray& previous_target_stream,
     const std::size_t query_position,
     std::vector<std::uint32_t> drafts,
+    std::vector<std::uint32_t> secondary_drafts,
     const double draft_ms,
     MtpDecodeState head_origin,
     ModelDecodeState& target_state,
@@ -98,6 +148,18 @@ MtpRoundStep finish_greedy_mtp_round(
     }
     const MtpGreedyDecision decision = decide_mtp_greedy(
         drafts, target_rows, stop_tokens);
+    std::array<std::size_t, 4> top2_rejected{};
+    std::array<std::size_t, 4> top2_recovered{};
+    if (decision.accepted < drafts.size() &&
+        secondary_drafts.size() == drafts.size() &&
+        secondary_drafts[decision.accepted] !=
+            std::numeric_limits<std::uint32_t>::max()) {
+        const std::size_t rejected_position = decision.accepted;
+        top2_rejected[rejected_position] = 1;
+        if (secondary_drafts[rejected_position] == target_rows[rejected_position]) {
+            top2_recovered[rejected_position] = 1;
+        }
+    }
     MlxArray next_target_stream =
         verification.rows[decision.correction_row].pre_mixer_stream.share();
 
@@ -155,6 +217,8 @@ MtpRoundStep finish_greedy_mtp_round(
         .draft_ms = draft_ms,
         .verify_ms = verify_ms,
         .commit_ms = commit_ms,
+        .top2_rejected_by_position = top2_rejected,
+        .top2_recovered_by_position = top2_recovered,
     };
 }
 
@@ -176,13 +240,16 @@ MtpRoundStep run_greedy_mtp_round_reference(
     MtpDecodeState head_origin = head.snapshot_state(head_state);
     const auto draft_started = std::chrono::steady_clock::now();
     std::vector<std::uint32_t> drafts;
+    std::vector<std::uint32_t> secondary_drafts;
     const char* lazy_chain = std::getenv("QWEN38_LAZY_MTP_DRAFT_CHAIN");
     const bool lazy_chain_enabled =
         lazy_chain == nullptr || std::string_view(lazy_chain) != "0";
     if (lazy_chain_enabled) {
-        drafts = draft_lazy_chain(
+        DraftChain chain = draft_lazy_chain(
             head, previous_target_stream, current_token, query_position,
             draft_depth, head_state);
+        drafts = std::move(chain.primary);
+        secondary_drafts = std::move(chain.secondary);
     } else {
         drafts.reserve(draft_depth);
         MtpDecodeStep draft = head.forward_decode(
@@ -201,7 +268,8 @@ MtpRoundStep run_greedy_mtp_round_reference(
         std::chrono::steady_clock::now() - draft_started).count();
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), draft_ms, std::move(head_origin), target_state, head_state,
+        std::move(drafts), std::move(secondary_drafts), draft_ms,
+        std::move(head_origin), target_state, head_state,
         stop_tokens);
 }
 
@@ -218,7 +286,7 @@ MtpRoundStep run_greedy_external_draft_round_reference(
     MtpDecodeState head_origin = head.snapshot_state(head_state);
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), 0.0, std::move(head_origin), target_state, head_state,
+        std::move(drafts), {}, 0.0, std::move(head_origin), target_state, head_state,
         stop_tokens);
 }
 

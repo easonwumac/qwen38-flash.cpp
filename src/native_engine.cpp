@@ -585,6 +585,10 @@ GenerationResult NativeEngine::complete_impl(
         for (std::size_t position = 0; position < step.draft_tokens.size(); ++position) {
             ++result.mtp_proposed_by_position[position];
             if (position < step.accepted) ++result.mtp_accepted_by_position[position];
+            result.mtp_top2_rejected_by_position[position] +=
+                step.top2_rejected_by_position[position];
+            result.mtp_top2_recovered_by_position[position] +=
+                step.top2_recovered_by_position[position];
         }
         result.mtp_draft_ms += step.draft_ms;
         result.mtp_verify_ms += step.verify_ms;

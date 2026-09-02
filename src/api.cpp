@@ -225,6 +225,16 @@ std::string completion_json(
         << result.mtp_accepted_by_position[1] << ','
         << result.mtp_accepted_by_position[2] << ','
         << result.mtp_accepted_by_position[3] << ']'
+        << ",\"top2_rejected_by_position\":["
+        << result.mtp_top2_rejected_by_position[0] << ','
+        << result.mtp_top2_rejected_by_position[1] << ','
+        << result.mtp_top2_rejected_by_position[2] << ','
+        << result.mtp_top2_rejected_by_position[3] << ']'
+        << ",\"top2_recovered_by_position\":["
+        << result.mtp_top2_recovered_by_position[0] << ','
+        << result.mtp_top2_recovered_by_position[1] << ','
+        << result.mtp_top2_recovered_by_position[2] << ','
+        << result.mtp_top2_recovered_by_position[3] << ']'
         << ",\"fallbacks\":" << result.mtp_fallbacks
         << ",\"depth\":" << result.mtp_final_depth
         << ",\"promotions\":" << result.mtp_promotions
