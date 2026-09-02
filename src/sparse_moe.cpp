@@ -697,6 +697,14 @@ MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
+    const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+    const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
+    if (!compact_qmeta_ && (!fused_gate_up_ || !fused_down_) &&
+        device_router != nullptr &&
+        std::string_view(device_router) == "1" && grouped != nullptr &&
+        std::string_view(grouped) == "1") {
+        return forward_verify(input);
+    }
     return MlxArray::add(forward_experts_decode(input), forward_shared(input));
 }
 
@@ -723,6 +731,13 @@ MlxArray SparseMoe::forward_verify_impl(
         throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..1024");
     }
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+    const char* verify_grouped = std::getenv("QWEN38_GROUPED_PREFILL");
+    if (timings == nullptr && !compact_qmeta_ &&
+        (!fused_gate_up_ || !fused_down_) &&
+        device_router != nullptr && std::string_view(device_router) == "1" &&
+        verify_grouped != nullptr && std::string_view(verify_grouped) == "1") {
+        return forward_prefill_impl(input, nullptr);
+    }
     if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
         std::string_view(device_router) == "1") {
         const int rows = shape[1];

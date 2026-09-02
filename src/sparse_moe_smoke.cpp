@@ -116,7 +116,15 @@ int main(int argc, char** argv) {
         std::vector<qwen38::MoePrefillTimings> component_timings;
         std::vector<qwen38::MoeVerifyTimings> verify_timings;
         std::vector<float> values;
-        const int iterations = profile_components || profile_verify ? 21 : 6;
+        int iterations = profile_components || profile_verify ? 21 : 6;
+        if (const char* raw_iterations = std::getenv("QWEN38_MOE_SMOKE_ITERATIONS")) {
+            const unsigned long parsed = std::stoul(raw_iterations);
+            if (parsed < 2 || parsed > 1000) {
+                throw std::runtime_error(
+                    "QWEN38_MOE_SMOKE_ITERATIONS must be between 2 and 1000");
+            }
+            iterations = static_cast<int>(parsed);
+        }
         for (int iteration = 0; iteration < iterations; ++iteration) {
             const auto started = std::chrono::steady_clock::now();
             qwen38::MoePrefillTimings components;

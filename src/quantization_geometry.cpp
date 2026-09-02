@@ -27,8 +27,9 @@ int infer_affine_quantization_bits(
         throw std::runtime_error("non-integral " + label + " quantization bits");
     }
     const std::size_t bits = packed * 32 / width;
-    if (bits != 4 && bits != 8) {
-        throw std::runtime_error(label + " projections must use affine Q4 or Q8");
+    if (bits != 2 && bits != 3 && bits != 4 && bits != 5 && bits != 6 && bits != 8) {
+        throw std::runtime_error(
+            label + " projections must use affine Q2, Q3, Q4, Q5, Q6, or Q8");
     }
     return static_cast<int>(bits);
 }
