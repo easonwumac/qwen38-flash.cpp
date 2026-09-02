@@ -251,6 +251,10 @@ std::string completion_json(
         << ",\"accepted\":" << result.history_draft_accepted
         << ",\"activations\":" << result.history_draft_activations
         << ",\"deactivations\":" << result.history_draft_deactivations << "}"
+        << ",\"context_copy\":{\"rounds\":" << result.context_copy_rounds
+        << ",\"proposed\":" << result.context_copy_proposed
+        << ",\"accepted\":" << result.context_copy_accepted
+        << ",\"suspensions\":" << result.context_copy_suspensions << "}"
         << "}}";
     return out.str();
 }

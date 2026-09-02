@@ -127,4 +127,142 @@ std::vector<std::uint32_t> HistoryDraftCache::propose(
     return {};
 }
 
+ContextCopyCache::ContextCopyCache(
+    const std::span<const std::uint32_t> prompt,
+    const std::size_t minimum_order,
+    const std::size_t maximum_order)
+    : minimum_order_(minimum_order),
+      maximum_order_(maximum_order),
+      prompt_(prompt.begin(), prompt.end()) {
+    if (minimum_order_ == 0 || minimum_order_ > maximum_order_) {
+        throw std::runtime_error("invalid context-copy order range");
+    }
+    continuations_.reserve(prompt_.size());
+    for (std::size_t end = minimum_order_; end < prompt_.size(); ++end) {
+        const auto suffix = std::span<const std::uint32_t>(prompt_).subspan(
+            end - minimum_order_, minimum_order_);
+        continuations_[key(suffix)].push_back(end);
+    }
+}
+
+std::uint64_t ContextCopyCache::key(
+    const std::span<const std::uint32_t> tokens) noexcept {
+    std::uint64_t hash = fnv_offset ^ static_cast<std::uint64_t>(tokens.size());
+    for (const std::uint32_t token : tokens) {
+        hash ^= static_cast<std::uint64_t>(token);
+        hash *= fnv_prime;
+    }
+    return hash;
+}
+
+ContextCopyProposal ContextCopyCache::propose(
+    const std::span<const std::uint32_t> history,
+    const std::size_t maximum_tokens) const {
+    if (maximum_tokens == 0 || history.size() < minimum_order_) return {};
+    const auto suffix = history.last(minimum_order_);
+    const auto found = continuations_.find(key(suffix));
+    if (found == continuations_.end()) return {};
+
+    std::size_t best_position = prompt_.size();
+    std::size_t best_extension = 0;
+    const std::size_t extension_cap = maximum_order_ - minimum_order_;
+    const std::size_t candidate_begin = found->second.size() > 32
+        ? found->second.size() - 32
+        : 0;
+    for (std::size_t candidate_index = found->second.size();
+         candidate_index-- > candidate_begin;) {
+        const std::size_t position = found->second[candidate_index];
+        if (position >= prompt_.size()) continue;
+        if (!std::equal(
+                prompt_.begin() + static_cast<std::ptrdiff_t>(position - minimum_order_),
+                prompt_.begin() + static_cast<std::ptrdiff_t>(position),
+                suffix.begin())) {
+            continue; // hash collision
+        }
+        std::size_t extension = 0;
+        while (extension < extension_cap &&
+               position > minimum_order_ + extension &&
+               history.size() > minimum_order_ + extension &&
+               prompt_[position - minimum_order_ - extension - 1] ==
+                   history[history.size() - minimum_order_ - extension - 1]) {
+            ++extension;
+        }
+        if (best_position == prompt_.size() || extension > best_extension) {
+            best_position = position;
+            best_extension = extension;
+            if (extension == extension_cap) break;
+        }
+    }
+    if (best_position == prompt_.size()) return {};
+    const std::size_t count = std::min(maximum_tokens, prompt_.size() - best_position);
+    return {
+        .tokens = std::vector<std::uint32_t>(
+            prompt_.begin() + static_cast<std::ptrdiff_t>(best_position),
+            prompt_.begin() + static_cast<std::ptrdiff_t>(best_position + count)),
+        .match_extension = best_extension,
+    };
+}
+
+ContextCopyProposal ContextCopyCache::propose_completion(
+    const std::span<const std::uint32_t> completion,
+    const std::size_t maximum_tokens) const {
+    const std::size_t history_size = prompt_.size() + completion.size();
+    if (maximum_tokens == 0 || history_size < minimum_order_) return {};
+    const auto history_token = [&](const std::size_t index) -> std::uint32_t {
+        return index < prompt_.size()
+            ? prompt_[index]
+            : completion[index - prompt_.size()];
+    };
+
+    std::uint64_t suffix_key = fnv_offset ^ static_cast<std::uint64_t>(minimum_order_);
+    for (std::size_t index = history_size - minimum_order_; index < history_size; ++index) {
+        suffix_key ^= static_cast<std::uint64_t>(history_token(index));
+        suffix_key *= fnv_prime;
+    }
+    const auto found = continuations_.find(suffix_key);
+    if (found == continuations_.end()) return {};
+
+    std::size_t best_position = prompt_.size();
+    std::size_t best_extension = 0;
+    const std::size_t extension_cap = maximum_order_ - minimum_order_;
+    const std::size_t candidate_begin = found->second.size() > 32
+        ? found->second.size() - 32
+        : 0;
+    for (std::size_t candidate_index = found->second.size();
+         candidate_index-- > candidate_begin;) {
+        const std::size_t position = found->second[candidate_index];
+        if (position >= prompt_.size()) continue;
+        bool exact = true;
+        for (std::size_t offset = 0; offset < minimum_order_; ++offset) {
+            if (prompt_[position - minimum_order_ + offset] !=
+                history_token(history_size - minimum_order_ + offset)) {
+                exact = false;
+                break;
+            }
+        }
+        if (!exact) continue;
+        std::size_t extension = 0;
+        while (extension < extension_cap &&
+               position > minimum_order_ + extension &&
+               history_size > minimum_order_ + extension &&
+               prompt_[position - minimum_order_ - extension - 1] ==
+                   history_token(history_size - minimum_order_ - extension - 1)) {
+            ++extension;
+        }
+        if (best_position == prompt_.size() || extension > best_extension) {
+            best_position = position;
+            best_extension = extension;
+            if (extension == extension_cap) break;
+        }
+    }
+    if (best_position == prompt_.size()) return {};
+    const std::size_t count = std::min(maximum_tokens, prompt_.size() - best_position);
+    return {
+        .tokens = std::vector<std::uint32_t>(
+            prompt_.begin() + static_cast<std::ptrdiff_t>(best_position),
+            prompt_.begin() + static_cast<std::ptrdiff_t>(best_position + count)),
+        .match_extension = best_extension,
+    };
+}
+
 } // namespace qwen38

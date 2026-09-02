@@ -48,4 +48,21 @@ void run_history_draft_tests() {
     const std::array<std::uint32_t, 5> unique{10, 11, 12, 13, 14};
     miss.append(unique);
     QWEN38_CHECK(miss.propose(4).empty());
+
+    const std::array<std::uint32_t, 18> prompt{
+        10, 11, 12, 13, 14, 15, 16, 17, 18,
+        30, 31, 12, 13, 14, 15, 16, 17, 40};
+    qwen38::ContextCopyCache prompt_copy(prompt, 3, 6);
+    const std::array<std::uint32_t, 7> exact_tail{90, 11, 12, 13, 14, 15, 16};
+    const auto copied = prompt_copy.propose(exact_tail, 8);
+    QWEN38_CHECK(copied.tokens == std::vector<std::uint32_t>({17, 18, 30, 31, 12, 13, 14, 15}));
+    QWEN38_CHECK(copied.match_extension == 3);
+
+    const std::array<std::uint32_t, 4> collision_miss{99, 98, 97, 96};
+    QWEN38_CHECK(prompt_copy.propose(collision_miss, 8).tokens.empty());
+
+    const std::array<std::uint32_t, 6> completion{11, 12, 13, 14, 15, 16};
+    const auto completion_copy = prompt_copy.propose_completion(completion, 8);
+    QWEN38_CHECK(completion_copy.tokens == copied.tokens);
+    QWEN38_CHECK(completion_copy.match_extension == copied.match_extension);
 }

@@ -496,6 +496,31 @@ GenerationResult NativeEngine::complete_impl(
     const bool history_draft_enabled = history_draft_policy.enabled();
     HistoryDraftCache history_draft;
     if (history_draft_enabled) history_draft.append(prompt_tokens);
+    const char* context_copy_environment = std::getenv("QWEN38_CONTEXT_COPY");
+    const bool context_copy_enabled = context_copy_environment != nullptr &&
+        std::string_view(context_copy_environment) == "1" && mtp_head_ != nullptr;
+    std::size_t context_copy_max_tokens = 16;
+    if (const char* value = std::getenv("QWEN38_CONTEXT_COPY_MAX_TOKENS")) {
+        try {
+            std::size_t parsed = 0;
+            const unsigned long long requested = std::stoull(value, &parsed);
+            if (value[parsed] != '\0' || requested < 4 || requested > 24) {
+                throw std::runtime_error("out of range");
+            }
+            context_copy_max_tokens = std::clamp<std::size_t>(
+                requested, 4, 24);
+        } catch (const std::exception&) {
+            throw std::runtime_error(
+                "QWEN38_CONTEXT_COPY_MAX_TOKENS must be an integer from 4 to 24");
+        }
+    }
+    std::optional<ContextCopyCache> context_copy;
+    if (context_copy_enabled) context_copy.emplace(prompt_tokens);
+    std::size_t context_copy_seen = 0;
+    std::size_t context_copy_perfect_rounds = 0;
+    std::size_t context_copy_suspend_until = 0;
+    std::size_t context_copy_backoff = 64;
+    double context_copy_acceptance_ema = 0.5;
     MtpProfitabilityGuard profitability_guard;
     bool mtp_profitable = mtp_head_ != nullptr &&
         cached_mtp_profitability.value_or(true);
@@ -559,8 +584,25 @@ GenerationResult NativeEngine::complete_impl(
             continue;
         }
 
+        std::vector<std::uint32_t> context_copy_proposal;
+        if (context_copy.has_value() &&
+            result.tokens.size() >= context_copy_suspend_until) {
+            const std::size_t cap = context_copy_perfect_rounds >= 2 &&
+                    context_copy_acceptance_ema >= 0.75
+                ? context_copy_max_tokens
+                : 4;
+            ContextCopyProposal proposal = context_copy->propose_completion(
+                result.tokens, std::min<std::size_t>(cap, remaining));
+            static constexpr std::array<std::size_t, 5> block_ladder{8, 12, 16, 24, 24};
+            const std::size_t block = std::min(
+                cap, block_ladder[std::min(
+                    proposal.match_extension, block_ladder.size() - 1)]);
+            if (proposal.tokens.size() > block) proposal.tokens.resize(block);
+            context_copy_proposal = std::move(proposal.tokens);
+        }
+        const bool used_context_copy = context_copy_proposal.size() >= 2;
         std::vector<std::uint32_t> history_proposal;
-        if (history_draft_policy.should_try()) {
+        if (!used_context_copy && history_draft_policy.should_try()) {
             const bool try_depth_four = use_long_history_depth_four(state.token_count);
             const std::size_t history_depth = try_depth_four ? 4 : depth_policy.depth();
             history_proposal = history_draft.propose(
@@ -571,7 +613,12 @@ GenerationResult NativeEngine::complete_impl(
             }
         }
         const bool used_history_draft = history_proposal.size() >= 2;
-        MtpRoundStep step = used_history_draft
+        MtpRoundStep step = used_context_copy
+            ? run_greedy_external_draft_round_reference(
+                  model_, *mtp_head_, current, *previous_target_stream,
+                  state.token_count, std::move(context_copy_proposal), state, mtp_state,
+                  stop_tokens)
+            : used_history_draft
             ? run_greedy_external_draft_round_reference(
                   model_, *mtp_head_, current, *previous_target_stream,
                   state.token_count, std::move(history_proposal), state, mtp_state,
@@ -582,7 +629,9 @@ GenerationResult NativeEngine::complete_impl(
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
-        for (std::size_t position = 0; position < step.draft_tokens.size(); ++position) {
+        for (std::size_t position = 0;
+             position < std::min(step.draft_tokens.size(), result.mtp_proposed_by_position.size());
+             ++position) {
             ++result.mtp_proposed_by_position[position];
             if (position < step.accepted) ++result.mtp_accepted_by_position[position];
             result.mtp_top2_rejected_by_position[position] +=
@@ -601,9 +650,33 @@ GenerationResult NativeEngine::complete_impl(
                       << " draft_ms=" << step.draft_ms
                       << " verify_ms=" << step.verify_ms
                       << " commit_ms=" << step.commit_ms
-                      << " history=" << (used_history_draft ? 1 : 0) << '\n';
+                      << " history=" << (used_history_draft ? 1 : 0)
+                      << " context_copy=" << (used_context_copy ? 1 : 0) << '\n';
         }
-        if (used_history_draft) {
+        if (used_context_copy) {
+            ++result.context_copy_rounds;
+            result.context_copy_proposed += step.draft_tokens.size();
+            result.context_copy_accepted += step.accepted;
+            const double ratio = static_cast<double>(step.accepted) /
+                static_cast<double>(step.draft_tokens.size());
+            context_copy_acceptance_ema =
+                0.7 * context_copy_acceptance_ema + 0.3 * ratio;
+            ++context_copy_seen;
+            if (step.accepted == step.draft_tokens.size()) {
+                ++context_copy_perfect_rounds;
+            } else {
+                context_copy_perfect_rounds = 0;
+            }
+            if (ratio >= 0.5) context_copy_backoff = 64;
+            if (context_copy_seen >= 3 && context_copy_acceptance_ema < 0.35) {
+                context_copy_suspend_until = result.tokens.size() + context_copy_backoff;
+                context_copy_backoff = std::min<std::size_t>(context_copy_backoff * 2, 4096);
+                context_copy_acceptance_ema = 0.5;
+                context_copy_seen = 0;
+                context_copy_perfect_rounds = 0;
+                ++result.context_copy_suspensions;
+            }
+        } else if (used_history_draft) {
             ++result.history_draft_rounds;
             result.history_draft_proposed += step.draft_tokens.size();
             result.history_draft_accepted += step.accepted;
@@ -632,6 +705,13 @@ GenerationResult NativeEngine::complete_impl(
             if (!emit_new_tokens()) cancel_after_committed_round = true;
             if (history_draft_enabled) history_draft.append(token);
         }
+        // Long copy windows create substantially larger transient verifier
+        // allocations than the learned four-token path. Return those buffers
+        // after the committed state has been selected so repeated requests do
+        // not ratchet the MLX allocator footprint upward.
+        if (used_context_copy && step.draft_tokens.size() > 4) {
+            MlxArray::clear_cache();
+        }
         if (options_.clear_cache_each_mtp_round) MlxArray::clear_cache();
         if (result.finish_reason == "stop") break;
         if (cancel_after_committed_round) {
@@ -641,7 +721,8 @@ GenerationResult NativeEngine::complete_impl(
         const char* economic_fallback = std::getenv("QWEN38_ECONOMIC_MTP_FALLBACK");
         const bool economic_fallback_enabled = economic_fallback == nullptr ||
             std::string_view(economic_fallback) != "0";
-        const bool should_fallback = !used_history_draft && (economic_fallback_enabled
+        const bool should_fallback = !used_history_draft && !used_context_copy &&
+            (economic_fallback_enabled
             ? profitability_guard.should_fallback(options_.zero_accept_fallback_rounds)
             : profitability_guard.zero_accept_streak() >=
                   options_.zero_accept_fallback_rounds);

@@ -215,6 +215,16 @@ disable history or `QWEN38_HISTORY_DRAFT=1` to force the legacy eager policy.
 The cache stores token IDs and suffix indices only, so its memory is tiny
 relative to model and KV residency even at long context.
 
+`QWEN38_CONTEXT_COPY=1` enables an independent prompt-only speculative lane for
+grounded re-emission and edit workloads. It first verifies two four-token
+probes; only consecutive fully accepted probes open longer blocks, capped at 16
+tokens by default. `QWEN38_CONTEXT_COPY_MAX_TOKENS=4..24` changes that cap. A
+low-acceptance EMA suspends later probes with exponential backoff, and long
+rounds release unused MLX allocator blocks after commit. The target verifier is
+still authoritative. Response telemetry reports context-copy rounds, proposed
+tokens, accepted tokens, and suspensions separately. This option does not speed
+up novel text when no prompt continuation matches.
+
 `QWEN38_MTP_ADAPTIVE_DEPTH4=1` is an experimental short-prompt policy. It
 starts at depth 4. It drops to the normal depth-3 monitor immediately when fewer
 than two of the first four fourth-position proposals are accepted; survivors

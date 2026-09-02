@@ -70,4 +70,38 @@ private:
     std::unordered_map<std::uint64_t, std::size_t> latest_;
 };
 
+struct ContextCopyProposal {
+    std::vector<std::uint32_t> tokens;
+    std::size_t match_extension{0};
+};
+
+// Prompt-only lookup for long, exact speculative blocks. Unlike
+// HistoryDraftCache, generated continuations are never indexed: this avoids
+// repeatedly betting on incidental self-repetition while still allowing the
+// generated suffix to re-anchor into the original prompt.
+class ContextCopyCache final {
+public:
+    explicit ContextCopyCache(
+        std::span<const std::uint32_t> prompt,
+        std::size_t minimum_order = 6,
+        std::size_t maximum_order = 10);
+
+    [[nodiscard]] ContextCopyProposal propose(
+        std::span<const std::uint32_t> history,
+        std::size_t maximum_tokens) const;
+    [[nodiscard]] ContextCopyProposal propose_completion(
+        std::span<const std::uint32_t> completion,
+        std::size_t maximum_tokens) const;
+
+private:
+    [[nodiscard]] static std::uint64_t key(
+        std::span<const std::uint32_t> tokens) noexcept;
+
+    std::size_t minimum_order_;
+    std::size_t maximum_order_;
+    std::vector<std::uint32_t> prompt_;
+    // Values are continuation positions immediately after an ng_min suffix.
+    std::unordered_map<std::uint64_t, std::vector<std::size_t>> continuations_;
+};
+
 } // namespace qwen38

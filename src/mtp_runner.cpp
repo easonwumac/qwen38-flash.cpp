@@ -125,8 +125,8 @@ MtpRoundStep finish_greedy_mtp_round(
     ModelDecodeState& target_state,
     MtpDecodeState& head_state,
     const std::span<const std::uint32_t> stop_tokens) {
-    if (drafts.size() < 2 || drafts.size() > 4) {
-        throw std::runtime_error("MTP proposal depth must be between 2 and 4");
+    if (drafts.size() < 2 || drafts.size() > 24) {
+        throw std::runtime_error("speculative proposal depth must be between 2 and 24");
     }
 
     if (query_position != target_state.token_count) {
@@ -155,8 +155,11 @@ MtpRoundStep finish_greedy_mtp_round(
         secondary_drafts[decision.accepted] !=
             std::numeric_limits<std::uint32_t>::max()) {
         const std::size_t rejected_position = decision.accepted;
-        top2_rejected[rejected_position] = 1;
-        if (secondary_drafts[rejected_position] == target_rows[rejected_position]) {
+        if (rejected_position < top2_rejected.size()) {
+            top2_rejected[rejected_position] = 1;
+        }
+        if (rejected_position < top2_recovered.size() &&
+            secondary_drafts[rejected_position] == target_rows[rejected_position]) {
             top2_recovered[rejected_position] = 1;
         }
     }

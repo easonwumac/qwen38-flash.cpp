@@ -264,8 +264,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     const ModelDecodeState& origin,
     std::vector<double>* layer_ms,
     double* head_ms) const {
-    if (tokens.empty() || tokens.size() > 5) {
-        throw std::runtime_error("target verify row count must be between 1 and 5");
+    if (tokens.empty() || tokens.size() > 25) {
+        throw std::runtime_error("target verify row count must be between 1 and 25");
     }
     if (origin.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");

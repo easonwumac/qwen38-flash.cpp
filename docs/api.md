@@ -52,6 +52,10 @@ whether the final-position second choice could have repaired the first rejected
 draft. Use `all` instead of `1` to inspect every position. The oracle performs
 extra vocabulary-wide selection and is intentionally unsuitable for throughput
 measurements.
+When `QWEN38_CONTEXT_COPY=1`, `performance.context_copy` reports its separate
+round, proposal, acceptance, and suspension counters. Long copy blocks still
+contribute to aggregate `mtp.proposed`/`mtp.accepted`; the four positional arrays
+intentionally describe only positions one through four.
 `mtp.profitability_cache_keep` marks a replay that retained cumulatively
 profitable MTP despite a late fallback; `mtp.profitability_cache_skip` marks a
 cached losing probe that was skipped.

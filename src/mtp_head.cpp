@@ -257,9 +257,9 @@ void QwenMtpHead::consume_committed_batch(
     const std::span<const std::uint32_t> tokens,
     const std::size_t query_position,
     MtpDecodeState& state) const {
-    if (tokens.size() < 2 || tokens.size() > 5 ||
+    if (tokens.size() < 2 || tokens.size() > 25 ||
         target_pre_mixer_streams.size() != tokens.size()) {
-        throw std::runtime_error("MTP committed batch requires 2 to 5 matching rows");
+        throw std::runtime_error("MTP committed batch requires 2 to 25 matching rows");
     }
     if (!state.position_base.has_value()) state.position_base = query_position;
     if (query_position != *state.position_base + state.row_count) {

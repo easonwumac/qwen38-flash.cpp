@@ -9,11 +9,11 @@ namespace qwen38 {
 namespace {
 
 constexpr std::size_t minimum_draft_count = 2;
-constexpr std::size_t maximum_draft_count = 4;
+constexpr std::size_t maximum_draft_count = 24;
 
 void validate_draft_count(const std::size_t count) {
     if (count < minimum_draft_count || count > maximum_draft_count) {
-        throw std::runtime_error("MTP verifier requires draft depth between 2 and 4");
+        throw std::runtime_error("speculative verifier requires 2 to 24 draft tokens");
     }
 }
 

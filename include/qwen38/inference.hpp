@@ -42,6 +42,10 @@ struct GenerationResult {
     std::size_t history_draft_accepted{0};
     std::size_t history_draft_activations{0};
     std::size_t history_draft_deactivations{0};
+    std::size_t context_copy_rounds{0};
+    std::size_t context_copy_proposed{0};
+    std::size_t context_copy_accepted{0};
+    std::size_t context_copy_suspensions{0};
 };
 
 class InferenceEngine {

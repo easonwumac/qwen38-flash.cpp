@@ -4,6 +4,10 @@ Copyright 2026 qwen38-flash.cpp contributors
 Portions of the fused selected-MoE Metal kernel design are adapted from MTPLX
 (Copyright 2026 MTPLX), licensed under the Apache License, Version 2.0.
 
+The prompt-only context-copy scheduling design was informed by MTPLX's
+Apache-2.0 context-copy and RAMP work. Its index and runtime lifecycle are an
+independent C++ implementation in this project.
+
 The Q4 down-projection unpacking pattern is adapted from MLX
 (Copyright Apple Inc.), licensed under the MIT License.
 
