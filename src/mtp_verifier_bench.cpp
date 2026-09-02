@@ -7,6 +7,7 @@
 #include <exception>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -45,9 +46,19 @@ int main(int argc, char** argv) {
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
         const bool seeded_origin = std::getenv("QWEN38_VERIFY_SEEDED_ORIGIN") != nullptr;
-        const std::vector<std::uint32_t> drafts = seeded_origin
-            ? std::vector<std::uint32_t>{271, 40}
-            : std::vector<std::uint32_t>{11, 271};
+        std::size_t depth = 2;
+        if (const char* raw_depth = std::getenv("QWEN38_VERIFY_DEPTH")) {
+            std::size_t parsed = 0;
+            depth = std::stoul(raw_depth, &parsed);
+            if (raw_depth[parsed] != '\0' || depth < 2 || depth > 4) {
+                throw std::runtime_error("QWEN38_VERIFY_DEPTH must be 2, 3, or 4");
+            }
+        }
+        const std::vector<std::uint32_t> token_fixture = seeded_origin
+            ? std::vector<std::uint32_t>{271, 40, 11, 9419}
+            : std::vector<std::uint32_t>{11, 271, 40, 9419};
+        const std::vector<std::uint32_t> drafts(
+            token_fixture.begin(), token_fixture.begin() + static_cast<std::ptrdiff_t>(depth));
         qwen38::ModelDecodeState origin = model.make_state();
         const std::uint32_t current = seeded_origin ? 11 : 9419;
         if (seeded_origin) model.consume_decode(9419, origin);
@@ -87,9 +98,8 @@ int main(int argc, char** argv) {
         // 15/31/47 makes the per-layer profile misleading. Profile a separate
         // stride-1 pass after all authoritative latency samples instead.
         static_cast<void>(setenv("QWEN38_VERIFY_BARRIER_STRIDE", "1", 1));
-        const std::vector<std::uint32_t> profile_tokens = seeded_origin
-            ? std::vector<std::uint32_t>{11, 271, 40}
-            : std::vector<std::uint32_t>{9419, 11, 271};
+        std::vector<std::uint32_t> profile_tokens{current};
+        profile_tokens.insert(profile_tokens.end(), drafts.begin(), drafts.end());
         static_cast<void>(model.forward_verify_layer_major_reference(
             profile_tokens, origin, &layer_ms, &head_ms));
         double linear_ms = 0.0;
@@ -98,7 +108,8 @@ int main(int argc, char** argv) {
             (layer + 1) % 4 == 0 ? full_ms += layer_ms[layer] : linear_ms += layer_ms[layer];
         }
         const auto slowest = std::max_element(layer_ms.begin(), layer_ms.end());
-        std::cout << "{\"depth\":2,\"rows\":3,\"serial_ms\":" << serial_ms
+        std::cout << "{\"depth\":" << depth << ",\"rows\":" << depth + 1
+                  << ",\"serial_ms\":" << serial_ms
                   << ",\"separate_head_ms\":" << control_ms
                   << ",\"batched_head_ms\":" << candidate_ms
                   << ",\"head_speedup\":" << control_ms / candidate_ms
