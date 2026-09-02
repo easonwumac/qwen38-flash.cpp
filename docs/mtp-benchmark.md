@@ -77,3 +77,19 @@ The report also aggregates four-element `proposed_by_position`,
 an inexpensive first/second-position drafter from a genuinely profitable third
 or fourth position. Run with `QWEN38_HISTORY_DRAFT=0` when using the vectors to
 tune learned-MTP depth; otherwise they intentionally include history rounds too.
+
+## Experimental depth 4
+
+The current optimized runtime makes a fourth draft position profitable on the
+high-predictability fixture, although not yet broadly enough to change `auto`.
+With fixed depth 4, two guarded warm samples reached 65.770/65.614 tok/s at 128
+tokens (65.692 median) and 66.684/66.395 at 256 tokens (66.539 median). The
+paths were exactly 97/124 in 31 rounds and 197/240 in 60 rounds. Fourth-position
+acceptance was 61.3% and 66.7%, respectively. Compared with the retained auto
+depth-3 medians, this is about +2.0% at 128 tokens and effectively flat at 256.
+
+These results use the same Q4 target/Q8-L47 sidecar, M5 Pro 64 GiB, temperature
+zero, disabled history/prefix caches, and 40 GiB RSS/10 GiB availability guard.
+Peak physical footprint was 40.7 GiB. Fixed depth 4 remains an experiment:
+general prompts with lower fourth-position acceptance can lose throughput, so
+the next promotion gate is a mixed-domain adaptive-depth cohort.
