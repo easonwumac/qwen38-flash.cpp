@@ -108,7 +108,13 @@ int main(int argc, char** argv) {
                   << ",\"head_ms\":" << head_ms
                   << ",\"slowest_layer\":"
                   << std::distance(layer_ms.begin(), slowest)
-                  << ",\"slowest_layer_ms\":" << *slowest << "}"
+                  << ",\"slowest_layer_ms\":" << *slowest
+                  << ",\"layers_ms\":[";
+        for (std::size_t layer = 0; layer < layer_ms.size(); ++layer) {
+            if (layer != 0) std::cout << ',';
+            std::cout << layer_ms[layer];
+        }
+        std::cout << "]}"
                   << ",\"parity\":true}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

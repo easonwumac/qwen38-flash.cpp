@@ -29,6 +29,7 @@ paths; promoted comparisons use repeated warm samples.
 | Attention + FC, barrier 48, resident `12:29` | 30 rounds, 98/120 | **68.19 median** | 248.5 | Best repeated result |
 | Attention + FC + lossless16 qmeta, barrier 48, resident `12:29` | 30 rounds, 98/120 | **68.60 pooled median** | 249.9 | New bit-exact research candidate; lower footprint |
 | Attention + FC + compact exact GDN rollback, barrier 16 | **30 rounds, 98/120** | **69.88 median** | 239.8 | New optimized-profile default; verifier 1559.4 ms |
+| Previous row + lossless16 qmeta + resident `12:29` | **30 rounds, 98/120** | **70.78 median** | 239.8 | Fastest retained decode recipe; 37.7 GiB footprint |
 | Attention + FC, barrier 48, resident `12:30` | 30 rounds, 98/120 | 67.83 median | 252.6 | Rejected |
 | Attention + FC + routed gate Q8 | 30 rounds, 98/120 | 64.92 | 346.4 | Rejected: mixed-bit generic MoE |
 

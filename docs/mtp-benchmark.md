@@ -121,3 +121,32 @@ creative completion. The `<2/4` early exit therefore preserved the exact
 eight to four. A repeated thermally continuous fixture measured 65.222/65.902
 tok/s medians; these lower timings are not treated as a regression because the
 proposal paths were identical and the machine was not thermally reset.
+
+## Compact rollback and qmeta result
+
+The exact compact GDN rollback plus the existing lossless16 routed-expert
+metadata is the current fastest fixed-depth-4 configuration. With resident
+experts `12:29`, three consecutive warm 128-token samples reached
+70.782/70.768/70.784 tok/s (70.782 median), with the unchanged 30-round,
+98/120 path. Median verifier, drafter, and commit times were 1,538.3, 239.8,
+and 12.6 ms. Two 256-token samples retained the exact 60-round, 195/240 path
+and reached 68.66/68.87 tok/s. Peak physical footprint was 37.7 GiB and minimum
+available memory was 11.4 GiB under the 42/10 GiB guard.
+
+Reproduce the configuration with:
+
+```bash
+QWEN38_COMPACT_QMETA=lossless16 \
+QWEN38_RESIDENT_EXPERT_RANGE=12:29 \
+./devtools/memory_guard.py \
+  --min-start-gib 40 --min-available-gib 10 \
+  --max-rss-gib 40 --max-footprint-gib 42 -- \
+  ./build-all/qwen38-server --model /path/to/model \
+  --profile speed --prefix-cache-tokens 0 --mtp-depth 4
+```
+
+The model directory must include the matching lossless16 qmeta sidecar. This
+is not enabled for every speed-profile model because ordinary checkpoints may
+not contain that sidecar, and compact metadata can reduce wide uncached prefill
+throughput. It is the retained decode-first recipe, not yet a universal profile
+default. The remaining 75 tok/s gap is about 5.6% on the 128-token fixture.
