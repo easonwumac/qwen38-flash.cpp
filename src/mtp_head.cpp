@@ -131,7 +131,13 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
           dimension(tensors.manifest().config().quantization_bits, "target bits"))),
       fc_embedding_(load_projection(
           tensors, "language_model.mtp.fc_embedding", mtp_bits_)),
-      fc_hidden_(load_projection(tensors, "language_model.mtp.fc_hidden", mtp_bits_)),
+      fc_hidden_(load_projection(
+          tensors,
+          "language_model.mtp.fc_hidden",
+          infer_projection_bits(
+              tensors,
+              "language_model.mtp.fc_hidden",
+              tensors.manifest().config().quantization_group_size))),
       embedding_norm_(offset_norm(
           tensors.tensor("language_model.mtp.pre_fc_norm_embedding.weight"), hidden_size_)),
       hidden_norm_(offset_norm(

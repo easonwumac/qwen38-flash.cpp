@@ -259,6 +259,13 @@ M5 Pro 64 GiB, Q4-trunk/Q8-head, temperature-zero, thinking-off, no-prefix-cache
 high-predictability result—not a universal MTP floor. Peak guarded RSS was
 36.1 GiB.
 
+The two pre-layer FC projections also infer their bit widths independently.
+This permits diagnostic sidecars with Q4 `fc_embedding` and Q8 `fc_hidden` (or
+the reverse) without applying one projection's quantization geometry to the
+other. It is compatibility support, not a recommendation: both one-FC-Q8
+leave-one-out candidates required more verifier rounds than the retained
+attention+FC pack.
+
 Draft tokens are chained as one lazy MLX graph and synchronized together after
 the final proposal. This removes one host synchronization per draft without
 changing the proposal tokens or authoritative target verification. On the

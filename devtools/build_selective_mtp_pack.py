@@ -33,11 +33,32 @@ GROUPS = {
         "language_model.mtp.layers.0.mlp_hyper_connection.input_mix_weight_down",
         "language_model.mtp.layers.0.mlp_hyper_connection.input_mix_weight_up",
     ),
+    "mtp_hc_down": (
+        "language_model.mtp.hyper_connection_mixer.input_mix_weight_down",
+    ),
+    "mtp_hc_up": (
+        "language_model.mtp.hyper_connection_mixer.input_mix_weight_up",
+    ),
+    "attention_hc_down": (
+        "language_model.mtp.layers.0.attn_hyper_connection.input_mix_weight_down",
+    ),
+    "attention_hc_up": (
+        "language_model.mtp.layers.0.attn_hyper_connection.input_mix_weight_up",
+    ),
+    "mlp_hc_down": (
+        "language_model.mtp.layers.0.mlp_hyper_connection.input_mix_weight_down",
+    ),
+    "mlp_hc_up": (
+        "language_model.mtp.layers.0.mlp_hyper_connection.input_mix_weight_up",
+    ),
     "shared_expert": (
         "language_model.mtp.layers.0.mlp.shared_expert.gate_proj",
         "language_model.mtp.layers.0.mlp.shared_expert.up_proj",
         "language_model.mtp.layers.0.mlp.shared_expert.down_proj",
     ),
+    "shared_gate": ("language_model.mtp.layers.0.mlp.shared_expert.gate_proj",),
+    "shared_up": ("language_model.mtp.layers.0.mlp.shared_expert.up_proj",),
+    "shared_down": ("language_model.mtp.layers.0.mlp.shared_expert.down_proj",),
 }
 
 
