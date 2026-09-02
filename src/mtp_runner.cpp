@@ -5,14 +5,24 @@
 
 #include <chrono>
 #include <array>
+#include <atomic>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 
 namespace qwen38 {
 namespace {
+
+std::atomic<std::uint64_t> next_calibration_request{
+    static_cast<std::uint64_t>(
+        std::chrono::system_clock::now().time_since_epoch().count())};
+thread_local std::uint64_t calibration_request{0};
 
 void append_head_qsa_state(
     std::vector<const MlxArray*>& outputs,
@@ -36,7 +46,81 @@ std::uint32_t argmax_token(const MlxArray& logits, const MtpDecodeState& state) 
 struct DraftChain {
     std::vector<std::uint32_t> primary;
     std::vector<std::uint32_t> secondary;
+    std::vector<MlxArray> final_mixed;
 };
+
+const char* calibration_path() {
+    const char* value = std::getenv("QWEN38_MTP_CALIBRATION_FILE");
+    return value != nullptr && value[0] != '\0' ? value : nullptr;
+}
+
+template <typename Value>
+void write_binary(std::ofstream& output, const Value& value) {
+    output.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+void append_calibration_rows(
+    const char* path,
+    const std::span<const MlxArray> hidden_rows,
+    const std::span<const MlxArray* const> target_hidden_rows,
+    const std::span<const std::uint32_t> drafts,
+    const std::span<const std::uint32_t> targets,
+    const std::size_t query_position) {
+    if (path == nullptr || hidden_rows.size() != drafts.size() ||
+        target_hidden_rows.size() != drafts.size() ||
+        targets.size() < drafts.size()) {
+        return;
+    }
+    static std::mutex mutex;
+    std::lock_guard lock(mutex);
+    const std::filesystem::path output_path(path);
+    const bool write_header = !std::filesystem::exists(output_path) ||
+        std::filesystem::file_size(output_path) == 0;
+    std::ofstream output(output_path, std::ios::binary | std::ios::app);
+    if (!output) {
+        throw std::runtime_error("cannot open MTP calibration file: " + output_path.string());
+    }
+    constexpr std::array<char, 8> magic{'Q', '3', '8', 'M', 'T', 'P', 'A', '3'};
+    constexpr std::uint32_t version = 3;
+    constexpr std::uint32_t hidden_size = 2560;
+    if (write_header) {
+        output.write(magic.data(), static_cast<std::streamsize>(magic.size()));
+        write_binary(output, version);
+        write_binary(output, hidden_size);
+    }
+    for (std::size_t index = 0; index < hidden_rows.size(); ++index) {
+        if (target_hidden_rows[index] == nullptr ||
+            target_hidden_rows[index]->shape().empty()) {
+            throw std::runtime_error(
+                "MTP calibration v3 requires the layer-major target verifier");
+        }
+        const std::vector<float> hidden =
+            hidden_rows[index].astype(MLX_FLOAT32).to_float32();
+        const std::vector<float> target_hidden =
+            target_hidden_rows[index]->astype(MLX_FLOAT32).to_float32();
+        if (hidden.size() != hidden_size || target_hidden.size() != hidden_size) {
+            throw std::runtime_error("MTP calibration hidden width mismatch");
+        }
+        const std::uint32_t depth = static_cast<std::uint32_t>(index + 1);
+        const std::uint32_t matched = drafts[index] == targets[index] ? 1U : 0U;
+        const std::uint64_t position = static_cast<std::uint64_t>(query_position);
+        write_binary(output, depth);
+        write_binary(output, drafts[index]);
+        write_binary(output, targets[index]);
+        write_binary(output, matched);
+        write_binary(output, position);
+        write_binary(output, calibration_request);
+        output.write(
+            reinterpret_cast<const char*>(hidden.data()),
+            static_cast<std::streamsize>(hidden.size() * sizeof(float)));
+        output.write(
+            reinterpret_cast<const char*>(target_hidden.data()),
+            static_cast<std::streamsize>(target_hidden.size() * sizeof(float)));
+    }
+    if (!output) {
+        throw std::runtime_error("failed to write MTP calibration rows");
+    }
+}
 
 bool top2_oracle_enabled() {
     const char* value = std::getenv("QWEN38_MTP_TOP2_ORACLE");
@@ -61,14 +145,21 @@ DraftChain draft_lazy_chain(
     MlxArray stream = previous_target_stream.share();
     const bool collect_top2 = top2_oracle_enabled();
     const bool collect_all_top2 = top2_oracle_all_positions();
+    const bool collect_calibration = calibration_path() != nullptr;
+    DraftChain chain;
     std::vector<MlxArray> draft_arrays;
     std::vector<MlxArray> top2_arrays;
     std::vector<std::size_t> top2_positions;
     draft_arrays.reserve(draft_depth);
     if (collect_top2) top2_arrays.reserve(draft_depth);
+    if (collect_calibration) chain.final_mixed.reserve(draft_depth);
     for (std::size_t index = 0; index < draft_depth; ++index) {
+        MlxArray final_mixed;
         MtpDecodeStep step = head.forward_decode_lazy_token(
-            stream, token, query_position + index, head_state);
+            stream, token, query_position + index, head_state,
+            index + 1,
+            collect_calibration ? &final_mixed : nullptr);
+        if (collect_calibration) chain.final_mixed.push_back(std::move(final_mixed));
         draft_arrays.push_back(step.logits.argmax_all().reshape(scalar_shape));
         if (collect_top2 && (collect_all_top2 || index + 1 == draft_depth)) {
             const std::vector<int> logits_shape = step.logits.shape();
@@ -95,7 +186,6 @@ DraftChain draft_lazy_chain(
     for (const MlxArray& top2 : top2_arrays) outputs.push_back(&top2);
     append_head_qsa_state(outputs, head_state);
     MlxArray::eval_all(outputs);
-    DraftChain chain;
     chain.primary.reserve(draft_arrays.size());
     chain.secondary.assign(draft_arrays.size(), std::numeric_limits<std::uint32_t>::max());
     for (const MlxArray& draft : draft_arrays) chain.primary.push_back(draft.item_uint32());
@@ -120,6 +210,7 @@ MtpRoundStep finish_greedy_mtp_round(
     const std::size_t query_position,
     std::vector<std::uint32_t> drafts,
     std::vector<std::uint32_t> secondary_drafts,
+    std::vector<MlxArray> draft_hidden_rows,
     const double draft_ms,
     MtpDecodeState head_origin,
     ModelDecodeState& target_state,
@@ -142,10 +233,18 @@ MtpRoundStep finish_greedy_mtp_round(
     const double verify_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - verify_started).count();
     std::vector<std::uint32_t> target_rows;
+    std::vector<const MlxArray*> target_hidden_rows;
     target_rows.reserve(verification.rows.size());
+    target_hidden_rows.reserve(drafts.size());
     for (const MtpTargetVerifyRow& row : verification.rows) {
         target_rows.push_back(row.greedy.token);
     }
+    for (std::size_t index = 0; index < drafts.size(); ++index) {
+        target_hidden_rows.push_back(&verification.rows[index].final_mixed);
+    }
+    append_calibration_rows(
+        calibration_path(), draft_hidden_rows, target_hidden_rows,
+        drafts, target_rows, query_position);
     const MtpGreedyDecision decision = decide_mtp_greedy(
         drafts, target_rows, stop_tokens);
     std::array<std::size_t, 4> top2_rejected{};
@@ -228,6 +327,13 @@ MtpRoundStep finish_greedy_mtp_round(
 
 } // namespace
 
+void begin_mtp_calibration_request() {
+    if (calibration_path() != nullptr) {
+        MlxArray::clear_cache();
+        calibration_request = next_calibration_request.fetch_add(1) + 1;
+    }
+}
+
 MtpRoundStep run_greedy_mtp_round_reference(
     const QwenModel& target,
     const QwenMtpHead& head,
@@ -245,6 +351,7 @@ MtpRoundStep run_greedy_mtp_round_reference(
     const auto draft_started = std::chrono::steady_clock::now();
     std::vector<std::uint32_t> drafts;
     std::vector<std::uint32_t> secondary_drafts;
+    std::vector<MlxArray> draft_hidden_rows;
     const char* lazy_chain = std::getenv("QWEN38_LAZY_MTP_DRAFT_CHAIN");
     const bool lazy_chain_enabled =
         lazy_chain == nullptr || std::string_view(lazy_chain) != "0";
@@ -254,6 +361,7 @@ MtpRoundStep run_greedy_mtp_round_reference(
             draft_depth, head_state);
         drafts = std::move(chain.primary);
         secondary_drafts = std::move(chain.secondary);
+        draft_hidden_rows = std::move(chain.final_mixed);
     } else {
         drafts.reserve(draft_depth);
         MtpDecodeStep draft = head.forward_decode(
@@ -272,7 +380,7 @@ MtpRoundStep run_greedy_mtp_round_reference(
         std::chrono::steady_clock::now() - draft_started).count();
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), std::move(secondary_drafts), draft_ms,
+        std::move(drafts), std::move(secondary_drafts), std::move(draft_hidden_rows), draft_ms,
         std::move(head_origin), target_state, head_state,
         stop_tokens);
 }
@@ -290,7 +398,7 @@ MtpRoundStep run_greedy_external_draft_round_reference(
     MtpDecodeState head_origin = head.snapshot_state(head_state);
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
-        std::move(drafts), {}, 0.0, std::move(head_origin), target_state, head_state,
+        std::move(drafts), {}, {}, 0.0, std::move(head_origin), target_state, head_state,
         stop_tokens);
 }
 

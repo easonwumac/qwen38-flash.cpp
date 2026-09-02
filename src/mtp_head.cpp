@@ -2,7 +2,9 @@
 
 #include "qwen38/quantization_geometry.hpp"
 
+#include <algorithm>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -141,6 +143,46 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
           false) {
     if (tensors.manifest().config().mtp_layer_count != 1) {
         throw std::runtime_error("Qwen3.8 MTP head must contain exactly one layer");
+    }
+    if (const char* path = std::getenv("QWEN38_MTP_HEAD_ADAPTER");
+        path != nullptr && path[0] != '\0') {
+        head_adapter_store_ = std::make_unique<MlxSafetensors>(path);
+        head_adapter_b_ = head_adapter_store_->tensor("lora_b");
+        const std::vector<int> b_shape = head_adapter_b_.shape();
+        if (b_shape.size() != 2 ||
+            b_shape[0] != dimension(vocabulary_size_, "adapter vocabulary")) {
+            throw std::runtime_error("MTP head adapter lora_b shape mismatch");
+        }
+        const int rank = b_shape[1];
+        for (std::size_t depth = 1; depth <= 4; ++depth) {
+            MlxArray a = head_adapter_store_->tensor(
+                "lora_a.depth" + std::to_string(depth));
+            if (a.shape() != std::vector<int>{rank, dimension(hidden_size_, "adapter hidden")}) {
+                throw std::runtime_error("MTP head adapter lora_a shape mismatch");
+            }
+            head_adapter_a_.push_back(std::move(a));
+        }
+        std::clog << "qwen38: MTP head adapter enabled rank=" << rank << '\n';
+    }
+    if (const char* path = std::getenv("QWEN38_MTP_HIDDEN_ADAPTER");
+        path != nullptr && path[0] != '\0') {
+        hidden_adapter_store_ = std::make_unique<MlxSafetensors>(path);
+        hidden_adapter_b_ = hidden_adapter_store_->tensor("hidden_lora_b");
+        const std::vector<int> b_shape = hidden_adapter_b_.shape();
+        if (b_shape.size() != 2 ||
+            b_shape[0] != dimension(hidden_size_, "hidden adapter output")) {
+            throw std::runtime_error("MTP hidden adapter lora_b shape mismatch");
+        }
+        const int rank = b_shape[1];
+        for (std::size_t depth = 1; depth <= 4; ++depth) {
+            MlxArray a = hidden_adapter_store_->tensor(
+                "hidden_lora_a.depth" + std::to_string(depth));
+            if (a.shape() != std::vector<int>{rank, dimension(hidden_size_, "hidden adapter input")}) {
+                throw std::runtime_error("MTP hidden adapter lora_a shape mismatch");
+            }
+            hidden_adapter_a_.push_back(std::move(a));
+        }
+        std::clog << "qwen38: MTP hidden adapter enabled rank=" << rank << '\n';
     }
 }
 
@@ -341,11 +383,31 @@ MtpDecodeStep QwenMtpHead::forward_decode_lazy_token(
     const MlxArray& target_pre_mixer_stream,
     const MlxArray& next_token,
     const std::size_t query_position,
-    MtpDecodeState& state) const {
+    MtpDecodeState& state,
+    const std::size_t adapter_depth,
+    MlxArray* final_mixed_trace) const {
     MlxArray stream = forward_stream_lazy_token(
         target_pre_mixer_stream, next_token, query_position, state, nullptr);
     HyperConnectionRead final = final_mixer_.read(stream);
-    MlxArray logits = project(final.mixed, language_head_);
+    if (final_mixed_trace != nullptr) {
+        *final_mixed_trace = final.mixed.share();
+    }
+    MlxArray head_input = final.mixed.share();
+    if (adapter_depth != 0 && !hidden_adapter_a_.empty()) {
+        const std::size_t index = std::min(adapter_depth, hidden_adapter_a_.size()) - 1;
+        MlxArray projected = MlxArray::matmul(
+            head_input, hidden_adapter_a_[index].transpose());
+        head_input = MlxArray::add(
+            head_input, MlxArray::matmul(projected, hidden_adapter_b_.transpose()));
+    }
+    MlxArray logits = project(head_input, language_head_);
+    if (adapter_depth != 0 && !head_adapter_a_.empty()) {
+        const std::size_t index = std::min(adapter_depth, head_adapter_a_.size()) - 1;
+        MlxArray projected = MlxArray::matmul(
+            final.mixed, head_adapter_a_[index].transpose());
+        logits = MlxArray::add(
+            logits, MlxArray::matmul(projected, head_adapter_b_.transpose()));
+    }
     return {
         .logits = std::move(logits),
         .pre_mixer_stream = std::move(stream),

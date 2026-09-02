@@ -47,7 +47,9 @@ public:
         const MlxArray& target_pre_mixer_stream,
         const MlxArray& next_token,
         std::size_t query_position,
-        MtpDecodeState& state) const;
+        MtpDecodeState& state,
+        std::size_t adapter_depth = 0,
+        MlxArray* final_mixed_trace = nullptr) const;
     void consume_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
@@ -103,6 +105,12 @@ private:
     MlxArray hidden_norm_;
     DecoderLayer layer_;
     HyperConnection final_mixer_;
+    std::unique_ptr<MlxSafetensors> head_adapter_store_;
+    std::vector<MlxArray> head_adapter_a_;
+    MlxArray head_adapter_b_;
+    std::unique_ptr<MlxSafetensors> hidden_adapter_store_;
+    std::vector<MlxArray> hidden_adapter_a_;
+    MlxArray hidden_adapter_b_;
 };
 
 } // namespace qwen38

@@ -76,6 +76,7 @@ MtpTargetVerification verify_mtp_target_serial_oracle(
         GreedyStep greedy = greedy_from_logits(target.logits);
         verification.rows.push_back({
             .greedy = greedy,
+            .final_mixed = MlxArray{},
             .pre_mixer_stream = std::move(target.pre_mixer_stream),
             .state_after = model.snapshot_state(working),
         });
@@ -117,6 +118,7 @@ MtpTargetVerification verify_mtp_target_layer_major_reference(
             .greedy = batch_argmax_enabled
                 ? greedy_rows[index]
                 : greedy_from_logits(row.logits),
+            .final_mixed = std::move(row.final_mixed),
             .pre_mixer_stream = std::move(row.pre_mixer_stream),
             .state_after = std::move(row.state_after),
         });

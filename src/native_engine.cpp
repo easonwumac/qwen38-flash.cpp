@@ -306,6 +306,7 @@ GenerationResult NativeEngine::complete_impl(
             std::to_string(options_.max_generation_tokens) + ")");
     }
     std::scoped_lock lock(inference_mutex_);
+    begin_mtp_calibration_request();
     const std::vector<std::uint32_t> prompt_tokens = tokenizer_.encode(prompt);
     if (prompt_tokens.empty()) throw std::runtime_error("prompt produced no tokens");
     const std::size_t context_limit = tensors_.manifest().config().max_context_tokens;

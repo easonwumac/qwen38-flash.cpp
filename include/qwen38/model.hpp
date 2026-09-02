@@ -36,6 +36,7 @@ struct TargetDecodeStep {
 
 struct TargetVerifyStep {
     MlxArray logits;
+    MlxArray final_mixed;
     MlxArray pre_mixer_stream;
     ModelDecodeState state_after;
 };

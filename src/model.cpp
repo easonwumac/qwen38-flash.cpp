@@ -340,6 +340,7 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
                 bits_);
             result.push_back({
                 .logits = std::move(logits),
+                .final_mixed = std::move(final.mixed),
                 .pre_mixer_stream = std::move(streams[row]),
                 .state_after = std::move(checkpoints[row]),
             });
@@ -369,6 +370,7 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     for (std::size_t row = 0; row < tokens.size(); ++row) {
         result.push_back({
             .logits = slice_sequence_row(logits_batch, row),
+            .final_mixed = slice_sequence_row(final.mixed, row),
             .pre_mixer_stream = std::move(streams[row]),
             .state_after = std::move(checkpoints[row]),
         });

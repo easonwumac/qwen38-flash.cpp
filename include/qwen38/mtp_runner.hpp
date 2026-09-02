@@ -11,6 +11,11 @@
 
 namespace qwen38 {
 
+// Starts a diagnostic capture request. No-op unless QWEN38_MTP_CALIBRATION_FILE
+// is configured; kept outside the hot round path so held-out splits can follow
+// complete user requests instead of leaking adjacent rounds.
+void begin_mtp_calibration_request();
+
 struct MtpRoundStep {
     std::vector<std::uint32_t> emitted_tokens;
     std::vector<std::uint32_t> draft_tokens;

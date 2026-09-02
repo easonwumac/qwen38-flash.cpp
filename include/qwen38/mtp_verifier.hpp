@@ -14,6 +14,7 @@ namespace qwen38 {
 // with a layer-major S=2..4 pass while preserving these exact results.
 struct MtpTargetVerifyRow {
     GreedyStep greedy;
+    MlxArray final_mixed;
     MlxArray pre_mixer_stream;
     ModelDecodeState state_after;
 };
