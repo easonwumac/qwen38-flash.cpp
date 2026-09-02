@@ -207,8 +207,9 @@ MlxArray QwenMtpHead::embed(const std::uint32_t token) const {
 }
 
 MlxArray QwenMtpHead::embed(const MlxArray& ids) const {
-    if (ids.shape() != std::vector<int>{1}) {
-        throw std::runtime_error("MTP lazy token id must have shape [1]");
+    const std::vector<int> id_shape = ids.shape();
+    if (id_shape.size() != 1 || id_shape[0] < 1 || id_shape[0] > 1024) {
+        throw std::runtime_error("MTP token ids must have shape [S], S=1..1024");
     }
     MlxArray value = MlxArray::dequantize(
         MlxArray::take_axis(embedding_.weight, ids, 0),
@@ -216,7 +217,8 @@ MlxArray QwenMtpHead::embed(const MlxArray& ids) const {
         MlxArray::take_axis(embedding_.biases, ids, 0),
         group_size_,
         embedding_.bits);
-    const std::vector<int> shape{1, 1, dimension(hidden_size_, "hidden size")};
+    const std::vector<int> shape{
+        1, id_shape[0], dimension(hidden_size_, "hidden size")};
     return value.reshape(shape);
 }
 
@@ -356,6 +358,65 @@ void QwenMtpHead::consume_committed_batch(
     }
     state.layer = std::move(checkpoints.back());
     state.row_count += tokens.size();
+}
+
+void QwenMtpHead::consume_prefill_batch(
+    const MlxArray& target_pre_mixer_streams,
+    const std::span<const std::uint32_t> tokens,
+    const std::size_t query_position,
+    MtpDecodeState& state) const {
+    const std::vector<int> expected{
+        1, dimension(tokens.size(), "prefill rows"),
+        dimension(hidden_size_ * stream_count_, "stream width")};
+    if (tokens.empty() || tokens.size() > 512 ||
+        target_pre_mixer_streams.shape() != expected) {
+        throw std::runtime_error(
+            "MTP prefill batch requires 1 to 512 matching target rows");
+    }
+    if (!state.position_base.has_value()) state.position_base = query_position;
+    if (query_position != *state.position_base + state.row_count) {
+        throw std::runtime_error("MTP prefill positions must be contiguous");
+    }
+    if (state.row_count == 0) {
+        state.layer.full_attention.position_base = query_position;
+    }
+
+    std::vector<std::int32_t> token_values;
+    token_values.reserve(tokens.size());
+    for (const std::uint32_t token : tokens) {
+        if (token >= vocabulary_size_) {
+            throw std::runtime_error("MTP token id is out of range");
+        }
+        token_values.push_back(static_cast<std::int32_t>(token));
+    }
+    MlxArray ids = MlxArray::from_int32(
+        token_values, std::vector<int>{dimension(tokens.size(), "prefill rows")});
+    MlxArray normalized_embedding = embed(ids).rms_norm(embedding_norm_, epsilon_);
+    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
+    MlxArray normalized_hidden =
+        target_pre_mixer_streams.rms_norm(hidden_norm_, epsilon_);
+    const int rows = dimension(tokens.size(), "prefill rows");
+    MlxArray hidden_projection = project(
+        normalized_hidden.reshape(std::vector<int>{
+            1, rows, dimension(stream_count_, "stream count"),
+            dimension(hidden_size_, "hidden size")}),
+        fc_hidden_);
+    MlxArray combined = MlxArray::add(
+        hidden_projection,
+        embedding_projection.reshape(std::vector<int>{
+            1, rows, 1, dimension(hidden_size_, "hidden size")}));
+    MlxArray output = layer_.forward_prefill(
+        combined.reshape(expected), tokens, state.layer);
+    state.row_count += tokens.size();
+
+    std::vector<const MlxArray*> outputs{&output};
+    if (state.layer.full_attention.qsa_raw_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_raw_keys);
+    }
+    if (state.layer.full_attention.qsa_pooled_keys.get().ctx != nullptr) {
+        outputs.push_back(&state.layer.full_attention.qsa_pooled_keys);
+    }
+    MlxArray::eval_all(outputs);
 }
 
 MtpDecodeStep QwenMtpHead::forward_decode(

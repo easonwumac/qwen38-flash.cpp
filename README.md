@@ -368,14 +368,25 @@ kept whole through GDN and MoE while full-attention layers process two ordered
 metadata twice. Adaptive mode retains an explicit 1024-row chunk through
 32,768 forwarded tokens and then reduces it to 512; `--prefill-chunk-fixed` is
 required to exercise 1024 rows at longer contexts. The optimized profiles
-retain their default chunk 512 through 32,768 forwarded tokens, then reduce to
-chunk 128 for longer prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
+retain their default chunk 512 through 66,048 forwarded tokens, then reduce to
+chunk 128 for larger prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
 from 463.7 tok/s with the old chunk-128 crossover to 655.45/638.38 tok/s, while
 a 32,760-token prompt reached 532.67 tok/s and ended at a 36.66 GiB physical
 footprint. The first-token output hash was unchanged. `--prefill-chunk-fixed`
 disables the long-prompt adaptive reduction for
 guarded throughput experiments; it must remain behind the memory guard because
 larger long-prompt batches increase the Metal working set.
+
+The turbo profile also primes the Q8 MTP head with one vectorized prompt batch
+instead of replaying every prompt token through the decode-width path. Set
+`QWEN38_BATCH_MTP_PREFILL=0` for the serial rollback. Together with bounded
+temporary lossy9 qmeta lifetime and packed QSA above 16,384 tokens, a guarded
+65,601-token deterministic needle request completed correctly at 534.86 prompt
+tok/s (122.65 s). MTP depth was 4, prefix caching was disabled, peak physical
+footprint was 39.7 GiB, peak RSS was 34.7 GiB, and minimum available memory was
+8.7 GiB on the 64 GiB M5 Pro. Repeated experimental candidates ranged from
+roughly 525 to 541 prompt tok/s. This clears the former 600-second timeout, but
+does not meet the 600 prompt-tok/s promotion target yet.
 
 With the REAP-288 MLX 4-bit repack, MTP and prefix caches disabled, a guarded
 32,792-token numbered-lines prompt improved from 502.35 tok/s at chunk 512 to

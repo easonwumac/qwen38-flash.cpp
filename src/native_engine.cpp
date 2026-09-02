@@ -71,6 +71,25 @@ bool is_prefix(
         std::equal(prefix.begin(), prefix.end(), tokens.begin());
 }
 
+MlxArray slice_sequence_rows(
+    const MlxArray& batch,
+    const std::size_t begin,
+    const std::size_t end) {
+    const std::vector<int> shape = batch.shape();
+    if (shape.size() != 3 || begin >= end || end > static_cast<std::size_t>(shape[1])) {
+        throw std::runtime_error("invalid prefill stream slice");
+    }
+    return batch.slice(
+        std::vector<int>{0, static_cast<int>(begin), 0},
+        std::vector<int>{1, static_cast<int>(end), shape[2]},
+        std::vector<int>{1, 1, 1});
+}
+
+bool batched_mtp_prefill_enabled() {
+    const char* value = std::getenv("QWEN38_BATCH_MTP_PREFILL");
+    return value == nullptr || std::string_view(value) != "0";
+}
+
 bool mtp_state_matches_target(
     const MtpDecodeState& mtp_state,
     const std::size_t target_token_count) {
@@ -384,20 +403,54 @@ GenerationResult NativeEngine::complete_impl(
                 prefix_cache_->mtp_cumulative_profitability_keep;
         }
     }
+    const auto consume_target_batch = [&](
+        const MlxArray& stream_batch,
+        const std::size_t offset,
+        const std::size_t count) {
+        if (mtp_head_ != nullptr && batched_mtp_prefill_enabled()) {
+            const std::size_t first_token = previous_target_stream.has_value() ? offset : offset + 1;
+            if (first_token < offset + count) {
+                const std::size_t rows = offset + count - first_token;
+                MlxArray target_rows = previous_target_stream.has_value()
+                    ? (rows == 1
+                        ? previous_target_stream->share()
+                        : MlxArray::concatenate(
+                              *previous_target_stream,
+                              slice_sequence_rows(stream_batch, 0, rows - 1),
+                              1))
+                    : slice_sequence_rows(stream_batch, 0, rows);
+                mtp_head_->consume_prefill_batch(
+                    target_rows,
+                    std::span<const std::uint32_t>(prompt_tokens.data() + first_token, rows),
+                    first_token,
+                    mtp_state);
+            }
+            previous_target_stream = slice_sequence_rows(stream_batch, count - 1, count);
+        } else {
+            for (std::size_t row = 0; row < count; ++row) {
+                const std::size_t index = offset + row;
+                if (mtp_head_ != nullptr && previous_target_stream.has_value()) {
+                    mtp_head_->consume_decode(
+                        *previous_target_stream, prompt_tokens[index], index, mtp_state);
+                }
+                previous_target_stream = slice_sequence_rows(stream_batch, row, row + 1);
+            }
+        }
+    };
     for (std::size_t offset = prefill_offset; offset < prefill_rows;
          offset += request_prefill_chunk) {
         const std::size_t count = std::min(
             request_prefill_chunk, prefill_rows - offset);
-        std::vector<MlxArray> streams = model_.prefill_chunk(
+        MlxArray stream_batch = model_.prefill_chunk_batch(
             std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state,
             profile_prefill_enabled ? &prefill_layer_ms : nullptr);
-        for (std::size_t row = 0; row < count; ++row) {
-            const std::size_t index = offset + row;
-            if (mtp_head_ != nullptr && previous_target_stream.has_value()) {
-                mtp_head_->consume_decode(
-                    *previous_target_stream, prompt_tokens[index], index, mtp_state);
-            }
-            previous_target_stream = std::move(streams[row]);
+        for (std::size_t batch_offset = 0; batch_offset < count; batch_offset += 512) {
+            const std::size_t batch_count = std::min<std::size_t>(512, count - batch_offset);
+            MlxArray batch = batch_offset == 0 && batch_count == count
+                ? stream_batch.share()
+                : slice_sequence_rows(
+                      stream_batch, batch_offset, batch_offset + batch_count);
+            consume_target_batch(batch, offset + batch_offset, batch_count);
         }
     }
     model_.clear_prefill_qmeta_cache();

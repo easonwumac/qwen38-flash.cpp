@@ -60,6 +60,11 @@ public:
         std::span<const std::uint32_t> tokens,
         std::size_t query_position,
         MtpDecodeState& state) const;
+    void consume_prefill_batch(
+        const MlxArray& target_pre_mixer_streams,
+        std::span<const std::uint32_t> tokens,
+        std::size_t query_position,
+        MtpDecodeState& state) const;
 
 private:
     struct QuantizedProjection {

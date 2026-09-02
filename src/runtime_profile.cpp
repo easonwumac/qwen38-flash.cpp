@@ -77,6 +77,9 @@ void apply_runtime_profile(const std::string_view profile) {
     if (config.aggressive_turbo) {
         set_environment_default("QWEN38_COMPACT_QMETA", "lossy9");
         set_environment_default("QWEN38_TARGET_TOPK", "8");
+        set_environment_default("QWEN38_QMETA_PREFILL_DEFER_TEMPORARY", "1");
+        set_environment_default("QWEN38_QSA_PACKED_PREFILL", "1");
+        set_environment_default("QWEN38_QSA_PACKED_MIN_TOKENS", "16384");
     }
 }
 
@@ -87,6 +90,7 @@ std::size_t select_prefill_chunk_rows(
         throw std::runtime_error("prefill chunk rows must be between 1 and 1024");
     }
     if (configured_rows <= 256 || prompt_rows <= 32768) return configured_rows;
+    if (configured_rows <= 512 && prompt_rows <= 66048) return configured_rows;
     if (configured_rows > 512) return 512;
     return 128;
 }

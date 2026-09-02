@@ -211,6 +211,19 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
     const std::span<const std::uint32_t> tokens,
     ModelDecodeState& state,
     std::vector<double>* layer_ms) const {
+    MlxArray stream_batch = prefill_chunk_batch(tokens, state, layer_ms);
+    std::vector<MlxArray> streams;
+    streams.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        streams.push_back(slice_sequence_row(stream_batch, row));
+    }
+    return streams;
+}
+
+MlxArray QwenModel::prefill_chunk_batch(
+    const std::span<const std::uint32_t> tokens,
+    ModelDecodeState& state,
+    std::vector<double>* layer_ms) const {
     constexpr std::size_t max_prefill_rows = 1024;
     if (tokens.empty() || tokens.size() > max_prefill_rows) {
         throw std::runtime_error("prefill chunk must contain 1 to 1024 tokens");
@@ -261,11 +274,7 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
         }
     }
     state.token_count += tokens.size();
-    streams.reserve(tokens.size());
-    for (std::size_t row = 0; row < tokens.size(); ++row) {
-        streams.push_back(slice_sequence_row(stream_batch, row));
-    }
-    return streams;
+    return stream_batch;
 }
 
 std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
