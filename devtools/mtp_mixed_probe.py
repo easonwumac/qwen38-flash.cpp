@@ -55,6 +55,9 @@ def main():
             "proposed_by_position": mtp["proposed_by_position"],
             "top2_rejected_by_position": mtp.get("top2_rejected_by_position"),
             "top2_recovered_by_position": mtp.get("top2_recovered_by_position"),
+            "draft_ms": mtp.get("draft_ms", 0.0),
+            "verify_ms": mtp.get("verify_ms", 0.0),
+            "commit_ms": mtp.get("commit_ms", 0.0),
         }
     print(json.dumps(results, indent=2, sort_keys=True))
 

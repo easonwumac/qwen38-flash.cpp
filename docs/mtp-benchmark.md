@@ -94,6 +94,14 @@ Peak physical footprint was 40.7 GiB. Fixed depth 4 remains an experiment:
 general prompts with lower fourth-position acceptance can lose throughput, so
 the next promotion gate is a mixed-domain adaptive-depth cohort.
 
+The benchmark client also reports cumulative draft, target-verify, and commit
+phase time. A later guarded 128-token Q8/adaptive-S4 repeat kept the exact
+31-round, 97/124 path and measured a 65.45 tok/s median: target verification
+used 1,644.6 ms (84.1% of generation), drafting 272.2 ms (13.9%), and accepted
+state commit 30.7 ms (1.6%). Reaching 75 tok/s on this path requires removing
+about 249 ms, so commit-only or barrier-only work cannot meet the target;
+drafter bandwidth and verifier-wide execution remain the material levers.
+
 An opt-in adaptive policy now starts short prompts at depth 4 and checks the
 fourth position directly for eight rounds. On the retained fixture it kept
 depth 4 and reached 65.852/65.684 tok/s at 128 tokens (65.768 median) and

@@ -35,6 +35,9 @@ class Measurement:
     depth: int
     promotions: int
     demotions: int
+    draft_ms: float
+    verify_ms: float
+    commit_ms: float
     wall_ms: float
 
     @property
@@ -104,6 +107,9 @@ def measurement_from_response(
             depth=int(mtp["depth"]),
             promotions=int(mtp.get("promotions", 0)),
             demotions=int(mtp.get("demotions", 0)),
+            draft_ms=float(mtp.get("draft_ms", 0.0)),
+            verify_ms=float(mtp.get("verify_ms", 0.0)),
+            commit_ms=float(mtp.get("commit_ms", 0.0)),
             wall_ms=wall_ms,
         )
     except (KeyError, TypeError, ValueError) as error:
@@ -162,6 +168,11 @@ def summarize(samples: list[Measurement]) -> dict[str, Any]:
         "median_acceptance": statistics.median(acceptance),
         "proposed_by_position": proposed_by_position,
         "accepted_by_position": accepted_by_position,
+        "median_phase_ms": {
+            "draft": statistics.median(sample.draft_ms for sample in samples),
+            "verify": statistics.median(sample.verify_ms for sample in samples),
+            "commit": statistics.median(sample.commit_ms for sample in samples),
+        },
         "acceptance_by_position": [
             accepted / proposed if proposed else 0.0
             for accepted, proposed in zip(accepted_by_position, proposed_by_position)
