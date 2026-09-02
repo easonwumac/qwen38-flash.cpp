@@ -82,8 +82,8 @@ int main(int argc, char** argv) {
         if ((profile_components || profile_verify) && rows == 1) {
             throw std::runtime_error("component profiling requires ROWS greater than 1");
         }
-        if (profile_verify && rows > 4) {
-            throw std::runtime_error("verify component profiling requires ROWS <= 4");
+        if (profile_verify && rows > 5) {
+            throw std::runtime_error("verify component profiling requires ROWS <= 5");
         }
         if (rows == 0 || rows > 512) {
             throw std::runtime_error("PREFILL_ROWS must be between 1 and 512");
