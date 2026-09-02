@@ -34,7 +34,7 @@ void print_usage(const char* program) {
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
         << " [--profile safe|speed|latency|long-context|memory]"
-        << " [--prefill-chunk 1..512] [--prefill-chunk-fixed]"
+        << " [--prefill-chunk 1..1024] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
         << " [--qmeta-cache-max-prompt-tokens N]"
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
@@ -67,7 +67,7 @@ std::size_t parse_prefill_chunk(const std::string& value) {
     std::size_t parsed = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
-        parsed == 0 || parsed > 512) {
+        parsed == 0 || parsed > 1024) {
         throw std::runtime_error("invalid prefill chunk: " + value);
     }
     return parsed;

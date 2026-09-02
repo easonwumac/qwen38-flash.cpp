@@ -44,8 +44,8 @@ int main(int argc, char **argv) {
             argc >= 4 ? std::optional<std::size_t>(std::stoul(argv[3])) : std::nullopt;
         const std::string profile = argc == 6 ? argv[5] : "speed";
         if (explicit_chunk_rows.has_value() &&
-            (*explicit_chunk_rows == 0 || *explicit_chunk_rows > 512)) {
-            throw std::runtime_error("CHUNK_ROWS must be between 1 and 512");
+            (*explicit_chunk_rows == 0 || *explicit_chunk_rows > 1024)) {
+            throw std::runtime_error("CHUNK_ROWS must be between 1 and 1024");
         }
         qwen38::apply_runtime_profile(profile);
 

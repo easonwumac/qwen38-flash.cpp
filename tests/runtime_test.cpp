@@ -34,6 +34,8 @@ void run_runtime_tests() {
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 8193) == 512);
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 32768) == 512);
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(512, 32769) == 128);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(1024, 32768) == 1024);
+    QWEN38_CHECK(qwen38::select_prefill_chunk_rows(1024, 32769) == 512);
     QWEN38_CHECK(qwen38::select_prefill_chunk_rows(64, 262144) == 64);
 
     qwen38::RuntimeState runtime;

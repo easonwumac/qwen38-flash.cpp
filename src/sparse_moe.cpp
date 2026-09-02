@@ -712,8 +712,8 @@ MlxArray SparseMoe::forward_verify_impl(
         return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
     };
     const std::vector<int> shape = input.shape();
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 512) {
-        throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..512");
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
+        throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..1024");
     }
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
     if (fused_gate_up_ && fused_down_ && device_router != nullptr &&
@@ -879,8 +879,8 @@ MlxArray SparseMoe::forward_prefill_impl(
         return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
     };
     const std::vector<int> shape = input.shape();
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 512) {
-        throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..512");
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
+        throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..1024");
     }
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     const bool mixed_quantization = !fused_gate_up_ || !fused_down_;

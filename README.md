@@ -320,10 +320,15 @@ flag is set.
 
 `--prefill-chunk 64` is the default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
-Values through 512 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
+Values through 1024 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
 oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
-startup instead of failing partway through a request. The optimized profiles
-retain the configured chunk 512 through 32,768 forwarded tokens, then reduce to
+startup instead of failing partway through a request. A 1024-row superchunk is
+kept whole through GDN and MoE while full-attention layers process two ordered
+512-row subchunks, retaining the attention-state contract without decoding MoE
+metadata twice. Adaptive mode retains an explicit 1024-row chunk through
+32,768 forwarded tokens and then reduces it to 512; `--prefill-chunk-fixed` is
+required to exercise 1024 rows at longer contexts. The optimized profiles
+retain their default chunk 512 through 32,768 forwarded tokens, then reduce to
 chunk 128 for longer prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
 from 463.7 tok/s with the old chunk-128 crossover to 655.45/638.38 tok/s, while
 a 32,760-token prompt reached 532.67 tok/s and ended at a 36.66 GiB physical
@@ -331,6 +336,16 @@ footprint. The first-token output hash was unchanged. `--prefill-chunk-fixed`
 disables the long-prompt adaptive reduction for
 guarded throughput experiments; it must remain behind the memory guard because
 larger long-prompt batches increase the Metal working set.
+
+With the REAP-288 MLX 4-bit repack, MTP and prefix caches disabled, a guarded
+32,792-token numbered-lines prompt improved from 502.35 tok/s at chunk 512 to
+517.16 tok/s with the split 1024-row superchunk; the greedy first-token hash was
+unchanged. At 65,560 tokens, combining the superchunk with the experimental
+`QWEN38_QSA_PACKED_MIN_TOKENS=32768` setting reached 433.55/435.62 tok/s versus
+367.41/357.89 tok/s at the retained defaults, with the same first-token hash in
+both candidate runs. Peak physical footprint was 39.8 GiB. The earlier packed
+QSA threshold remains the default because one prompt hash is not sufficient to
+establish broad numerical parity for the lower threshold.
 
 The native engine caps the MLX allocator cache at 256 MiB in serial as well as
 MTP mode. Before this bound covered serial inference, a 23,555-token request was

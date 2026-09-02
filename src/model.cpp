@@ -202,9 +202,9 @@ std::vector<MlxArray> QwenModel::prefill_chunk(
     const std::span<const std::uint32_t> tokens,
     ModelDecodeState& state,
     std::vector<double>* layer_ms) const {
-    constexpr std::size_t max_prefill_rows = 512;
+    constexpr std::size_t max_prefill_rows = 1024;
     if (tokens.empty() || tokens.size() > max_prefill_rows) {
-        throw std::runtime_error("prefill chunk must contain 1 to 512 tokens");
+        throw std::runtime_error("prefill chunk must contain 1 to 1024 tokens");
     }
     if (state.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");

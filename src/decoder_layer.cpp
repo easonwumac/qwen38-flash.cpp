@@ -213,7 +213,7 @@ MlxArray DecoderLayer::forward_prefill(
     const std::span<const std::uint32_t> tokens,
     DecoderLayerState& state) const {
     const std::vector<int> shape = stream_batch.shape();
-    if (tokens.empty() || tokens.size() > 512 || shape.size() != 3 || shape[0] != 1 ||
+    if (tokens.empty() || tokens.size() > 1024 || shape.size() != 3 || shape[0] != 1 ||
         shape[1] != static_cast<int>(tokens.size())) {
         throw std::runtime_error("decoder prefill requires a matching [1,S,streams] batch");
     }
@@ -234,9 +234,25 @@ MlxArray DecoderLayer::forward_prefill(
     if (linear_attention_ != nullptr) {
         attention_output = linear_attention_->forward_prefill(
             attention.mixed, state.linear_attention);
-    } else {
+    } else if (tokens.size() <= 512) {
         attention_output = full_attention_->forward_prefill(
             attention.mixed, state.full_attention);
+    } else {
+        constexpr std::size_t attention_rows = 512;
+        const std::vector<int> mixed_shape = attention.mixed.shape();
+        const std::vector<int> strides{1, 1, 1};
+        std::vector<MlxArray> chunks;
+        chunks.reserve((tokens.size() + attention_rows - 1) / attention_rows);
+        for (std::size_t offset = 0; offset < tokens.size(); offset += attention_rows) {
+            const std::size_t count = std::min(attention_rows, tokens.size() - offset);
+            MlxArray mixed_chunk = attention.mixed.slice(
+                std::vector<int>{0, static_cast<int>(offset), 0},
+                std::vector<int>{1, static_cast<int>(offset + count), mixed_shape[2]},
+                strides);
+            chunks.push_back(full_attention_->forward_prefill(
+                mixed_chunk, state.full_attention));
+        }
+        attention_output = concatenate_rows(chunks);
     }
     MlxArray post_attention = attention_hyper_connection_.write(
         stream_batch, attention_output, attention.injection);
