@@ -19,6 +19,14 @@ void set_environment_default(const char* name, const char* value) {
 RuntimeProfileConfig runtime_profile_config(const std::string_view profile) {
     if (profile == "safe") return {};
     if (profile == "speed") return {.optimized = true, .resident_expert_range = "12:28"};
+    if (profile == "turbo") {
+        return {
+            .optimized = true,
+            .aggressive_turbo = true,
+            .allocator_cache_mib = 32,
+            .resident_expert_range = "12:29",
+        };
+    }
     if (profile == "latency") return {.optimized = true, .resident_expert_range = "12:34"};
     if (profile == "long-context") {
         return {.optimized = true, .resident_expert_range = ""};
@@ -65,6 +73,10 @@ void apply_runtime_profile(const std::string_view profile) {
         set_environment_default("QWEN38_QMETA_PREFILL_CACHE", "0");
         set_environment_default("QWEN38_QMETA_PREFILL_DEFER_TEMPORARY", "1");
         set_environment_default("QWEN38_QSA_PACKED_PREFILL", "1");
+    }
+    if (config.aggressive_turbo) {
+        set_environment_default("QWEN38_COMPACT_QMETA", "lossy9");
+        set_environment_default("QWEN38_TARGET_TOPK", "8");
     }
 }
 

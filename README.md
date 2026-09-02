@@ -323,6 +323,15 @@ QWEN38_COMPACT_QMETA=1 ./build-all/qwen38-server \
   --model /path/to/model --profile speed
 ```
 
+An aggressive decode-only experiment combines a 512-medoid 9-bit affine
+metadata sidecar with target top-8 routing. Build it with `--bits 9`, then run
+with `--profile turbo --mtp-depth 4`; the profile selects lossy9, target top-8,
+resident layers `12:29`, and a 32 MiB allocator cache. On the 64 GiB M5 Pro,
+the deterministic depth-4 128-token fixture reached a stable 75.69--75.90
+tok/s and the process peaked at 36.6 GiB footprint. This mode changes target
+outputs and is deliberately not selected by `speed`; lossless16/top-10 remains
+the quality-preserving decode recipe.
+
 On the 64 GiB M5 Pro, the same 1,152-token MTP workload measured 30.68 GiB RSS
 with lossless16 versus 36.49 GiB for the full-metadata control. The exact
 89/103 and 185/205 acceptance paths and generated output were preserved.

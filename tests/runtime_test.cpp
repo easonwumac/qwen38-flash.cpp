@@ -10,6 +10,12 @@ void run_runtime_tests() {
     QWEN38_CHECK(speed_profile.optimized);
     QWEN38_CHECK(speed_profile.resident_expert_range == "12:28");
 
+    const auto turbo_profile = qwen38::runtime_profile_config("turbo");
+    QWEN38_CHECK(turbo_profile.optimized);
+    QWEN38_CHECK(turbo_profile.aggressive_turbo);
+    QWEN38_CHECK(turbo_profile.allocator_cache_mib == 32);
+    QWEN38_CHECK(turbo_profile.resident_expert_range == "12:29");
+
     const auto latency_profile = qwen38::runtime_profile_config("latency");
     QWEN38_CHECK(latency_profile.optimized);
     QWEN38_CHECK(latency_profile.resident_expert_range == "12:34");

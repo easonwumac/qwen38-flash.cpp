@@ -30,6 +30,25 @@ int checked_int(const std::size_t value, const char* name) {
     return static_cast<int>(value);
 }
 
+std::size_t effective_experts_per_token(
+    const std::string_view prefix,
+    const std::size_t configured) {
+    const char* value = std::getenv("QWEN38_TARGET_TOPK");
+    if (value == nullptr || value[0] == '\0' ||
+        !prefix.starts_with("language_model.model.layers.")) {
+        return configured;
+    }
+    std::size_t parsed_value = 0;
+    const std::string_view text(value);
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), parsed_value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+        parsed_value < 6 || parsed_value > configured) {
+        throw std::runtime_error("QWEN38_TARGET_TOPK must be between 6 and configured top-k");
+    }
+    return parsed_value;
+}
+
 int compact_qmeta_requested_bits() {
     const char* value = std::getenv("QWEN38_COMPACT_QMETA");
     if (value == nullptr || std::string_view(value) == "0") return 0;
@@ -278,7 +297,7 @@ SparseMoe::SparseMoe(
     const bool normalize_topk_probability)
     : layer_index_(layer_index(prefix)),
       expert_count_(expert_count),
-      experts_per_token_(experts_per_token),
+      experts_per_token_(effective_experts_per_token(prefix, experts_per_token)),
       group_size_(checked_int(quantization_group_size, "quantization_group_size")),
       normalize_topk_probability_(normalize_topk_probability),
       router_weight_(tensors.tensor(std::string(prefix) + ".gate.weight")),
@@ -303,6 +322,9 @@ SparseMoe::SparseMoe(
     compact_qmeta_ =
         expert_gate_.qmeta.present() && expert_up_.qmeta.present() &&
         expert_down_.qmeta.present();
+    if (experts_per_token_ != experts_per_token && !compact_qmeta_) {
+        throw std::runtime_error("QWEN38_TARGET_TOPK currently requires compact qmeta");
+    }
     if (compact_qmeta_requested_bits() != 0 &&
         std::string_view(prefix).starts_with("language_model.model.layers.") &&
         !compact_qmeta_) {
@@ -317,7 +339,9 @@ SparseMoe::SparseMoe(
     const char* fused = std::getenv("QWEN38_FUSED_MOE");
     const char* q8_exact = std::getenv("QWEN38_Q8_EXACT_MOE");
     if (fused != nullptr && std::string_view(fused) == "1" &&
-        expert_count_ >= experts_per_token_ && experts_per_token_ == 10 &&
+        expert_count_ >= experts_per_token_ &&
+        ((compact_qmeta_ && experts_per_token_ >= 6 && experts_per_token_ <= 10) ||
+         experts_per_token_ == 10) &&
         expert_gate_.bits == expert_up_.bits && expert_gate_.bits == expert_down_.bits &&
         (expert_gate_.bits == 4 || expert_gate_.bits == 8) &&
         group_size_ == 64) {
@@ -458,11 +482,13 @@ MlxArray SparseMoe::forward_compact_routed(
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 ||
         input_shape[2] != 2560 || input_shape[1] < 1 || input_shape[1] > 8 ||
-        experts_per_token_ != 10) {
-        throw std::runtime_error("compact routed MoE requires [1,S,2560], S=1..8");
+        experts_per_token_ < 6 || experts_per_token_ > 10) {
+        throw std::runtime_error(
+            "compact routed MoE requires [1,S,2560], S=1..8, top-k=6..10");
     }
     const int rows = input_shape[1];
-    const int slots = rows * 10;
+    const int topk = checked_int(experts_per_token_, "compact top-k");
+    const int slots = rows * topk;
     MlxArray flat_experts = experts.reshape(std::vector<int>{slots}).astype(MLX_UINT32);
     MlxArray flat_weights = weights.reshape(std::vector<int>{slots});
 
@@ -474,15 +500,16 @@ MlxArray SparseMoe::forward_compact_routed(
     const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
         {.shape = {slots, 640}, .dtype = input.dtype()},
     }};
-    const std::array<int, 3> gate_grid{rows * 200 * 1024, 1, 1};
+    const std::array<int, 3> gate_grid{rows * topk * 20 * 1024, 1, 1};
     const std::array<int, 3> gate_threadgroup{1024, 1, 1};
     const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
         {.name = "T", .value = input.dtype()},
     }};
-    const std::array<MlxMetalIntTemplate, 3> gate_int_templates{{
+    const std::array<MlxMetalIntTemplate, 4> gate_int_templates{{
         {.name = "QGBITS", .value = expert_gate_.qmeta.bits},
         {.name = "QUBITS", .value = expert_up_.qmeta.bits},
         {.name = "ALIGNED16", .value = qmeta_aligned16_enabled() ? 1 : 0},
+        {.name = "SLOTS", .value = topk},
     }};
     std::vector<MlxArray> gate_result = qmeta_gate_up_kernel()->apply(
         gate_inputs,
@@ -501,9 +528,10 @@ MlxArray SparseMoe::forward_compact_routed(
     }};
     const std::array<int, 3> down_grid{rows * 320 * 64, 1, 1};
     const std::array<int, 3> down_threadgroup{64, 1, 1};
-    const std::array<MlxMetalIntTemplate, 2> down_int_templates{{
+    const std::array<MlxMetalIntTemplate, 3> down_int_templates{{
         {.name = "QBITS", .value = expert_down_.qmeta.bits},
         {.name = "ALIGNED16", .value = qmeta_aligned16_enabled() ? 1 : 0},
+        {.name = "SLOTS", .value = topk},
     }};
     std::vector<MlxArray> down_result = qmeta_down_kernel()->apply(
         down_inputs,
@@ -514,9 +542,10 @@ MlxArray SparseMoe::forward_compact_routed(
         down_int_templates);
     static std::once_flag announced;
     const int qmeta_bits = expert_down_.qmeta.bits;
-    std::call_once(announced, [rows, qmeta_bits] {
+    std::call_once(announced, [rows, qmeta_bits, topk] {
         std::cerr << "[qmeta] compact " << qmeta_bits
-                  << "-bit routed MoE engaged: rows=" << rows << " topk=10\n";
+                  << "-bit routed MoE engaged: rows=" << rows
+                  << " topk=" << topk << '\n';
     });
     return std::move(down_result[0]).reshape(std::vector<int>{1, rows, 2560});
 }
@@ -770,6 +799,7 @@ MlxArray SparseMoe::forward_verify_impl(
         if (overlap_mode == "all" || (layer_index_ == 0 && overlap_mode == "1")) {
             const std::vector<float> routed_ids =
                 experts.astype(MLX_FLOAT32).to_float32();
+            const std::vector<float> routed_weights = weights.to_float32();
             std::vector<bool> seen(expert_count_, false);
             std::size_t unique = 0;
             for (const float value : routed_ids) {
@@ -779,10 +809,30 @@ MlxArray SparseMoe::forward_verify_impl(
                     ++unique;
                 }
             }
+            double bottom_one_sum = 0.0;
+            double bottom_two_sum = 0.0;
+            float bottom_two_max = 0.0F;
+            for (int row = 0; row < rows; ++row) {
+                const auto begin = static_cast<std::ptrdiff_t>(
+                    static_cast<std::size_t>(row) * experts_per_token_);
+                const auto end = begin + static_cast<std::ptrdiff_t>(experts_per_token_);
+                std::vector<float> row_weights(
+                    routed_weights.begin() + begin,
+                    routed_weights.begin() + end);
+                std::sort(row_weights.begin(), row_weights.end());
+                const float bottom_one = row_weights.front();
+                const float bottom_two = bottom_one + row_weights[1];
+                bottom_one_sum += bottom_one;
+                bottom_two_sum += bottom_two;
+                bottom_two_max = std::max(bottom_two_max, bottom_two);
+            }
             std::clog << "qwen38-verify-expert-overlap: layer=" << layer_index_
                       << " rows=" << rows
                       << " selected=" << routed_ids.size()
-                      << " unique=" << unique << '\n';
+                      << " unique=" << unique
+                      << " bottom1_mean=" << bottom_one_sum / rows
+                      << " bottom2_mean=" << bottom_two_sum / rows
+                      << " bottom2_max=" << bottom_two_max << '\n';
         }
         if (timings != nullptr) {
             const std::array<const MlxArray*, 2> routing_outputs{&experts, &weights};

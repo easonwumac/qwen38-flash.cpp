@@ -8,6 +8,8 @@ namespace qwen38 {
 struct RuntimeProfileConfig {
     bool optimized = false;
     bool memory_efficient = false;
+    bool aggressive_turbo = false;
+    std::size_t allocator_cache_mib = 256;
     std::string_view resident_expert_range;
 };
 

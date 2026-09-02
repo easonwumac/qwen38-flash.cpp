@@ -33,11 +33,12 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
-        << " [--profile safe|speed|latency|long-context|memory]"
+        << " [--profile safe|speed|turbo|latency|long-context|memory]"
         << " [--prefill-chunk 1..1024] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
         << " [--qmeta-cache-max-prompt-tokens N]"
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
+        << " [--allocator-cache-mib N]"
         << " [--max-generation-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
@@ -99,6 +100,8 @@ int main(int argc, char** argv) {
         bool qmeta_cache_limit_explicit = false;
         std::uint64_t ssd_prefix_cache_max_bytes = 0;
         std::filesystem::path ssd_prefix_cache_directory;
+        std::size_t allocator_cache_limit_bytes = 256ULL * 1024ULL * 1024ULL;
+        bool allocator_cache_explicit = false;
         std::size_t max_generation_tokens = 4096;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
@@ -113,6 +116,7 @@ int main(int argc, char** argv) {
                  argument == "--qmeta-cache-max-prompt-tokens" ||
                  argument == "--ssd-prefix-cache-gib" ||
                  argument == "--ssd-prefix-cache-dir" ||
+                 argument == "--allocator-cache-mib" ||
                  argument == "--max-generation-tokens" || argument == "--profile") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
@@ -149,6 +153,14 @@ int main(int argc, char** argv) {
                 ssd_prefix_cache_max_bytes = gib * bytes_per_gib;
             } else if (argument == "--ssd-prefix-cache-dir") {
                 ssd_prefix_cache_directory = argv[++i];
+            } else if (argument == "--allocator-cache-mib") {
+                const std::size_t mib = parse_size(argv[++i], "allocator cache size");
+                constexpr std::size_t bytes_per_mib = 1024ULL * 1024ULL;
+                if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / bytes_per_mib) {
+                    throw std::runtime_error("allocator cache size must be positive and bounded");
+                }
+                allocator_cache_limit_bytes = mib * bytes_per_mib;
+                allocator_cache_explicit = true;
             } else if (argument == "--max-generation-tokens") {
                 max_generation_tokens = parse_size(argv[++i], "generation token limit");
                 if (max_generation_tokens == 0) {
@@ -160,6 +172,10 @@ int main(int argc, char** argv) {
         }
         const qwen38::RuntimeProfileConfig profile_config =
             qwen38::runtime_profile_config(profile);
+        if (!allocator_cache_explicit) {
+            allocator_cache_limit_bytes =
+                profile_config.allocator_cache_mib * 1024ULL * 1024ULL;
+        }
         qwen38::apply_runtime_profile(profile);
         if (profile_config.optimized && !prefill_chunk_explicit) {
             prefill_chunk_rows = 512;
@@ -188,6 +204,7 @@ int main(int argc, char** argv) {
                     ssd_prefix_cache_max_bytes;
                 engine_options.ssd_prefix_cache_directory =
                     ssd_prefix_cache_directory;
+                engine_options.allocator_cache_limit_bytes = allocator_cache_limit_bytes;
                 engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
@@ -198,6 +215,8 @@ int main(int argc, char** argv) {
                           << qmeta_cache_max_prompt_tokens
                           << " ssd_prefix_cache_gib="
                           << ssd_prefix_cache_max_bytes / (1024ULL * 1024ULL * 1024ULL)
+                          << " allocator_cache_mib="
+                          << allocator_cache_limit_bytes / (1024ULL * 1024ULL)
                           << " max_generation_tokens=" << max_generation_tokens << '\n';
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else

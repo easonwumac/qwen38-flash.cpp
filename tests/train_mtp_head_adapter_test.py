@@ -13,6 +13,30 @@ import train_mtp_head_adapter as trainer  # noqa: E402
 
 
 class MtpCalibrationRowsTest(unittest.TestCase):
+    def test_greedy_metrics_reports_selective_change_precision(self) -> None:
+        count = 3
+        rows = trainer.CalibrationRows(
+            hidden=np.zeros((count, 2), dtype=np.float32),
+            target_hidden=None,
+            depth=np.ones(count, dtype=np.uint32),
+            draft=np.asarray([1, 2, 3], dtype=np.uint32),
+            target=np.asarray([1, 4, 5], dtype=np.uint32),
+            matched=np.asarray([True, False, False]),
+            position=np.arange(count, dtype=np.uint64),
+            request_id=np.zeros(count, dtype=np.uint64),
+            round_id=np.arange(count, dtype=np.uint64),
+            active=np.ones(count, dtype=np.bool_),
+        )
+        logits = np.zeros((count, 6), dtype=np.float32)
+        logits[0, 1] = 1
+        logits[1, 4] = 1
+        logits[2, 4] = 1
+        metrics = trainer.greedy_metrics(logits, rows, np.arange(count))
+        self.assertEqual(metrics["changed"], 2)
+        self.assertEqual(metrics["repaired"], 1)
+        self.assertEqual(metrics["wrong_to_wrong"], 1)
+        self.assertEqual(metrics["repair_precision"], 0.5)
+
     def test_loads_rows_and_marks_only_live_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "rows.bin"

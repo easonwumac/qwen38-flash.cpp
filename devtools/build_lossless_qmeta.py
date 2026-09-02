@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an exact compact affine-metadata sidecar for Qwen3.8 routed experts."""
+"""Build a compact affine-metadata sidecar for Qwen3.8 routed experts."""
 
 from __future__ import annotations
 
@@ -18,6 +18,78 @@ import numpy as np
 
 BITS = 13
 PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
+
+
+def bf16_to_float(values: np.ndarray) -> np.ndarray:
+    words = values.astype(np.uint32) << np.uint32(16)
+    return words.view(np.float32)
+
+
+def lossy_medoid_dictionary(
+    pairs: np.ndarray, limit: int, iterations: int = 8
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    unique, inverse, counts = np.unique(
+        pairs.reshape(-1), return_inverse=True, return_counts=True
+    )
+    if unique.size <= limit:
+        return unique, inverse, {"mse": 0.0, "max_abs": 0.0}
+    points = np.column_stack(
+        (bf16_to_float(unique & np.uint32(0xFFFF)), bf16_to_float(unique >> 16))
+    ).astype(np.float64)
+    seed = np.argsort(counts, kind="stable")[-limit:]
+    centroids = points[seed].copy()
+    labels = np.zeros(unique.size, dtype=np.int32)
+    for _ in range(iterations):
+        best_distance = np.full(unique.size, np.inf)
+        for start in range(0, limit, 64):
+            distances = np.sum(
+                (points[:, None, :] - centroids[None, start : start + 64, :]) ** 2,
+                axis=2,
+            )
+            local = np.argmin(distances, axis=1)
+            local_distance = distances[np.arange(unique.size), local]
+            improve = local_distance < best_distance
+            labels[improve] = start + local[improve]
+            best_distance[improve] = local_distance[improve]
+        for cluster in range(limit):
+            members = labels == cluster
+            if np.any(members):
+                centroids[cluster] = np.average(
+                    points[members], axis=0, weights=counts[members]
+                )
+
+    medoids: list[int] = []
+    for centroid in centroids:
+        distance = np.sum((points - centroid) ** 2, axis=1)
+        medoids.append(int(np.argmin(distance)))
+    selected = list(dict.fromkeys(medoids))
+    if len(selected) < limit:
+        for index in np.argsort(counts, kind="stable")[::-1]:
+            value = int(index)
+            if value not in selected:
+                selected.append(value)
+                if len(selected) == limit:
+                    break
+    dictionary = unique[np.asarray(selected, dtype=np.int64)]
+    dictionary_points = points[np.asarray(selected, dtype=np.int64)]
+    best_distance = np.full(unique.size, np.inf)
+    nearest = np.zeros(unique.size, dtype=np.uint32)
+    for start in range(0, limit, 64):
+        distances = np.sum(
+            (points[:, None, :] - dictionary_points[None, start : start + 64, :]) ** 2,
+            axis=2,
+        )
+        local = np.argmin(distances, axis=1)
+        local_distance = distances[np.arange(unique.size), local]
+        improve = local_distance < best_distance
+        nearest[improve] = start + local[improve]
+        best_distance[improve] = local_distance[improve]
+    mapped = nearest[inverse]
+    weighted_mse = float(np.average(best_distance, weights=counts))
+    return dictionary, mapped, {
+        "mse": weighted_mse,
+        "max_abs": float(np.sqrt(np.max(best_distance))),
+    }
 
 
 @dataclass(frozen=True)
@@ -136,14 +208,19 @@ def banks(layer_count: int) -> list[tuple[str, str]]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=Path)
-    parser.add_argument("--bits", choices=(13, 16), default=BITS, type=int)
+    parser.add_argument("--bits", choices=(9, 13, 16), default=BITS, type=int)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
     bits = args.bits
     dictionary_limit = 1 << bits
     model = args.model.resolve()
-    output = args.output or Path(f"model-qmeta-lossless{bits}.safetensors")
+    mode = "lossy" if bits == 9 else "lossless"
+    default_name = (
+        "model-qmeta-joint9.safetensors"
+        if bits == 9 else f"model-qmeta-{mode}{bits}.safetensors"
+    )
+    output = args.output or Path(default_name)
     if not output.is_absolute():
         output = model / output
     if output.exists() and not args.overwrite:
@@ -160,7 +237,7 @@ def main() -> int:
     for number, (base, _) in enumerate(bank_list, 1):
         pairs, shape = pair_bank(locations, base)
         unique_count = int(np.unique(pairs).size)
-        if unique_count > dictionary_limit:
+        if bits != 9 and unique_count > dictionary_limit:
             raise RuntimeError(
                 f"{base} needs {unique_count} entries, above {dictionary_limit}"
             )
@@ -170,9 +247,10 @@ def main() -> int:
         tags_name = base + f".qmeta{bits}_tags"
         dictionary_name = base + f".qmeta{bits}_dict"
         tags_bytes = rows * row_bytes
-        dictionary_bytes = unique_count * 4
+        dictionary_count = min(unique_count, dictionary_limit)
+        dictionary_bytes = dictionary_count * 4
         descriptions.append((tags_name, (shape[0], shape[1], row_bytes), tags_bytes))
-        descriptions.append((dictionary_name, (unique_count,), dictionary_bytes))
+        descriptions.append((dictionary_name, (dictionary_count,), dictionary_bytes))
         cursor += tags_bytes + dictionary_bytes
         print(
             f"scan {number:03d}/{len(bank_list)} unique={unique_count:4d} "
@@ -182,9 +260,12 @@ def main() -> int:
 
     header: dict[str, object] = {
         "__metadata__": {
-            "schema": f"qwen38-lossless-qmeta{bits}-v1",
+            "schema": f"qwen38-{mode}-qmeta{bits}-v1",
             "bits": str(bits),
-            "source": "exact BF16 affine scale/bias pairs",
+            "source": (
+                "frequency-weighted BF16 affine scale/bias medoids"
+                if bits == 9 else "exact BF16 affine scale/bias pairs"
+            ),
         }
     }
     offset = 0
@@ -207,16 +288,28 @@ def main() -> int:
         stream.write(header_bytes)
         digest.update(prefix)
         digest.update(header_bytes)
+        worst_mse = 0.0
+        worst_max_abs = 0.0
         for number, (base, _) in enumerate(bank_list, 1):
             pairs, shape = pair_bank(locations, base)
-            dictionary, inverse = np.unique(pairs, return_inverse=True)
-            if dictionary.size != unique_counts[base]:
+            if bits == 9:
+                dictionary, inverse, error = lossy_medoid_dictionary(
+                    pairs, dictionary_limit
+                )
+                worst_mse = max(worst_mse, error["mse"])
+                worst_max_abs = max(worst_max_abs, error["max_abs"])
+            else:
+                dictionary, inverse = np.unique(pairs, return_inverse=True)
+                error = {"mse": 0.0, "max_abs": 0.0}
+            if dictionary.size != min(unique_counts[base], dictionary_limit):
                 raise RuntimeError(f"non-deterministic dictionary size for {base}")
-            if not np.array_equal(dictionary[inverse].reshape(-1), pairs.reshape(-1)):
+            if bits != 9 and not np.array_equal(
+                dictionary[inverse].reshape(-1), pairs.reshape(-1)
+            ):
                 raise RuntimeError(f"lossless round-trip failed for {base}")
             tags = pack_indices(inverse, shape[2], bits)
             packed_indices = unpack_indices(tags, shape[2], bits)
-            if not np.array_equal(
+            if bits != 9 and not np.array_equal(
                 dictionary[packed_indices].reshape(-1), pairs.reshape(-1)
             ):
                 raise RuntimeError(f"packed lossless round-trip failed for {base}")
@@ -227,13 +320,14 @@ def main() -> int:
                 digest.update(data)
             print(
                 f"write {number:03d}/{len(bank_list)} "
-                f"{stream.tell() / (1 << 30):.3f} GiB",
+                f"{stream.tell() / (1 << 30):.3f} GiB "
+                f"mse={error['mse']:.3e} max_abs={error['max_abs']:.3e}",
                 file=sys.stderr,
             )
         stream.flush()
         os.fsync(stream.fileno())
     if partial.stat().st_size != 8 + len(header_bytes) + offset:
-        raise RuntimeError("lossless qmeta output size mismatch")
+        raise RuntimeError("qmeta output size mismatch")
     os.replace(partial, output)
     print(
         json.dumps(
@@ -244,6 +338,8 @@ def main() -> int:
                 "bits": bits,
                 "banks": len(bank_list),
                 "max_unique_pairs": max(unique_counts.values()),
+                "worst_mse": worst_mse,
+                "worst_max_abs": worst_max_abs,
             },
             indent=2,
         )

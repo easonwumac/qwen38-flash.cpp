@@ -129,12 +129,20 @@ def greedy_metrics(
     base = rows.draft[indices]
     matches = predictions == target
     base_matches = base == target
+    changed = predictions != base
+    repaired = matches & ~base_matches
+    broken = ~matches & base_matches
     return {
         "rows": int(len(indices)),
         "accuracy": float(np.mean(matches)) if len(indices) else 0.0,
         "base_accuracy": float(np.mean(base_matches)) if len(indices) else 0.0,
-        "repaired": int(np.sum(matches & ~base_matches)),
-        "broken": int(np.sum(~matches & base_matches)),
+        "changed": int(np.sum(changed)),
+        "repaired": int(np.sum(repaired)),
+        "broken": int(np.sum(broken)),
+        "wrong_to_wrong": int(np.sum(changed & ~matches & ~base_matches)),
+        "repair_precision": (
+            float(np.sum(repaired) / np.sum(changed)) if np.any(changed) else 0.0
+        ),
     }
 
 
@@ -187,6 +195,7 @@ def main() -> None:
     parser.add_argument("--train-fraction", type=float, default=0.75)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--mismatch-weight", type=float, default=1.5)
+    parser.add_argument("--match-weight", type=float, default=1.0)
     parser.add_argument("--loss", choices=("ce", "pairwise"), default="ce")
     parser.add_argument("--margin", type=float, default=0.05)
     args = parser.parse_args()
@@ -247,7 +256,7 @@ def main() -> None:
         selected = mx.take_along_axis(logits, labels[:, None], axis=1).reshape(-1)
         ce = mx.logsumexp(logits, axis=1) - selected
         row_weights = mx.where(
-            matches, 1.0, float(args.mismatch_weight)
+            matches, float(args.match_weight), float(args.mismatch_weight)
         )
         return mx.mean(ce * row_weights)
 
@@ -269,16 +278,19 @@ def main() -> None:
     )
     corrected_eval = base_eval + adapter_eval
     scale_sweep = {}
+    scale_greedy = {}
     for scale in (0.125, 0.25, 0.5, 0.75, 1.0):
-        scale_sweep[str(scale)] = acceptance_metrics(
-            base_eval + scale * adapter_eval, rows, eval_indices
-        )
+        scaled = base_eval + scale * adapter_eval
+        scale_sweep[str(scale)] = acceptance_metrics(scaled, rows, eval_indices)
+        scale_greedy[str(scale)] = greedy_metrics(scaled, rows, eval_indices)
     depth_masks = {}
+    depth_greedy = {}
     for first_depth in (1, 2, 3):
         mask = (rows.depth[eval_indices] >= first_depth).astype(np.float32)[:, None]
-        depth_masks[f"d{first_depth}plus"] = acceptance_metrics(
-            base_eval + mask * adapter_eval, rows, eval_indices
-        )
+        masked = base_eval + mask * adapter_eval
+        key = f"d{first_depth}plus"
+        depth_masks[key] = acceptance_metrics(masked, rows, eval_indices)
+        depth_greedy[key] = greedy_metrics(masked, rows, eval_indices)
     report = {
         "schema_version": 1,
         "rank": args.rank,
@@ -288,7 +300,9 @@ def main() -> None:
         "eval_base": greedy_metrics(base_eval, rows, eval_indices),
         "acceptance": acceptance_metrics(corrected_eval, rows, eval_indices),
         "scale_sweep": scale_sweep,
+        "scale_greedy": scale_greedy,
         "depth_masks": depth_masks,
+        "depth_greedy": depth_greedy,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.output.suffix == ".safetensors":
