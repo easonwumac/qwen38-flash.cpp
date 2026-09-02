@@ -585,6 +585,7 @@ GenerationResult NativeEngine::complete_impl(
         }
 
         std::vector<std::uint32_t> context_copy_proposal;
+        std::size_t context_copy_match_extension = 0;
         if (context_copy.has_value() &&
             result.tokens.size() >= context_copy_suspend_until) {
             const std::size_t cap = context_copy_perfect_rounds >= 2 &&
@@ -593,12 +594,18 @@ GenerationResult NativeEngine::complete_impl(
                 : 4;
             ContextCopyProposal proposal = context_copy->propose_completion(
                 result.tokens, std::min<std::size_t>(cap, remaining));
+            context_copy_match_extension = proposal.match_extension;
             static constexpr std::array<std::size_t, 5> block_ladder{8, 12, 16, 24, 24};
             const std::size_t block = std::min(
                 cap, block_ladder[std::min(
                     proposal.match_extension, block_ladder.size() - 1)]);
             if (proposal.tokens.size() > block) proposal.tokens.resize(block);
-            context_copy_proposal = std::move(proposal.tokens);
+            // A bare six-token suffix is common enough to perturb otherwise
+            // strong learned MTP. Require two additional tokens of exact
+            // left context before spending a target verifier round on it.
+            if (proposal.match_extension >= 2) {
+                context_copy_proposal = std::move(proposal.tokens);
+            }
         }
         const bool used_context_copy = context_copy_proposal.size() >= 2;
         std::vector<std::uint32_t> history_proposal;
@@ -651,7 +658,8 @@ GenerationResult NativeEngine::complete_impl(
                       << " verify_ms=" << step.verify_ms
                       << " commit_ms=" << step.commit_ms
                       << " history=" << (used_history_draft ? 1 : 0)
-                      << " context_copy=" << (used_context_copy ? 1 : 0) << '\n';
+                      << " context_copy=" << (used_context_copy ? 1 : 0)
+                      << " context_extension=" << context_copy_match_extension << '\n';
         }
         if (used_context_copy) {
             ++result.context_copy_rounds;

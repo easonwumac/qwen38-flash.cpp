@@ -55,7 +55,8 @@ measurements.
 When `QWEN38_CONTEXT_COPY=1`, `performance.context_copy` reports its separate
 round, proposal, acceptance, and suspension counters. Long copy blocks still
 contribute to aggregate `mtp.proposed`/`mtp.accepted`; the four positional arrays
-intentionally describe only positions one through four.
+intentionally describe only positions one through four. Candidates require a
+six-token suffix plus two exact tokens of left context before the first probe.
 `mtp.profitability_cache_keep` marks a replay that retained cumulatively
 profitable MTP despite a late fallback; `mtp.profitability_cache_skip` marks a
 cached losing probe that was skipped.

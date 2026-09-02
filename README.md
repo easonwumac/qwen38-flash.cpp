@@ -217,7 +217,8 @@ relative to model and KV residency even at long context.
 
 `QWEN38_CONTEXT_COPY=1` enables an independent prompt-only speculative lane for
 grounded re-emission and edit workloads. It first verifies two four-token
-probes; only consecutive fully accepted probes open longer blocks, capped at 16
+probes, but admits a probe only when the six-token suffix also has at least two
+matching tokens of left context. Only consecutive fully accepted probes open longer blocks, capped at 16
 tokens by default. `QWEN38_CONTEXT_COPY_MAX_TOKENS=4..24` changes that cap. A
 low-acceptance EMA suspends later probes with exponential backoff, and long
 rounds release unused MLX allocator blocks after commit. The target verifier is
