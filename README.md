@@ -167,6 +167,14 @@ tokens so it cannot grow alongside the long-context attention state. Override
 that crossover with `--qmeta-cache-max-prompt-tokens`; zero disables decoded
 qmeta prefill caching for every request.
 
+`--profile memory` is the lowest-pressure exact-weight preset for the retained
+Qwen3.8 Flash Next build. It uses the lossless13 compact metadata sidecar,
+leaves expert pages pageable, disables decoded-qmeta and RAM prefix caches,
+keeps MTP off unless explicitly requested, enables packed QSA above 65,536
+tokens, and retains the validated 256 MiB MLX allocator cap. The lossless13 sidecar is
+required; startup fails clearly instead of silently falling back to the larger
+metadata representation. Use the memory guard for every long-context run.
+
 `--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
 companion, short prompts start at depth 2 for an eight-round probe and promote
 to depth 3 only after at least 10 accepted drafts. A promoted request is checked

@@ -33,7 +33,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
-        << " [--profile safe|speed|latency|long-context]"
+        << " [--profile safe|speed|latency|long-context|memory]"
         << " [--prefill-chunk 1..512] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
         << " [--qmeta-cache-max-prompt-tokens N]"
@@ -89,11 +89,14 @@ int main(int argc, char** argv) {
         qwen38::ServerConfig config;
         std::string profile = "safe";
         std::optional<std::size_t> mtp_depth;
+        bool mtp_depth_explicit = false;
         std::size_t prefill_chunk_rows = 64;
         bool prefill_chunk_explicit = false;
         bool adaptive_prefill_chunks = true;
         std::size_t prefix_cache_max_tokens = 8192;
+        bool prefix_cache_explicit = false;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
+        bool qmeta_cache_limit_explicit = false;
         std::uint64_t ssd_prefix_cache_max_bytes = 0;
         std::filesystem::path ssd_prefix_cache_directory;
         std::size_t max_generation_tokens = 4096;
@@ -124,6 +127,7 @@ int main(int argc, char** argv) {
                 profile = argv[++i];
             } else if (argument == "--mtp-depth") {
                 mtp_depth = parse_mtp_depth(argv[++i]);
+                mtp_depth_explicit = true;
             } else if (argument == "--prefill-chunk") {
                 prefill_chunk_rows = parse_prefill_chunk(argv[++i]);
                 prefill_chunk_explicit = true;
@@ -131,9 +135,11 @@ int main(int argc, char** argv) {
                 adaptive_prefill_chunks = false;
             } else if (argument == "--prefix-cache-tokens") {
                 prefix_cache_max_tokens = parse_size(argv[++i], "prefix cache token limit");
+                prefix_cache_explicit = true;
             } else if (argument == "--qmeta-cache-max-prompt-tokens") {
                 qmeta_cache_max_prompt_tokens =
                     parse_size(argv[++i], "qmeta cache prompt token limit");
+                qmeta_cache_limit_explicit = true;
             } else if (argument == "--ssd-prefix-cache-gib") {
                 const std::size_t gib = parse_size(argv[++i], "SSD prefix cache size");
                 constexpr std::uint64_t bytes_per_gib = 1024ULL * 1024ULL * 1024ULL;
@@ -157,6 +163,11 @@ int main(int argc, char** argv) {
         qwen38::apply_runtime_profile(profile);
         if (profile_config.optimized && !prefill_chunk_explicit) {
             prefill_chunk_rows = 512;
+        }
+        if (profile_config.memory_efficient) {
+            if (!mtp_depth_explicit) mtp_depth = 0;
+            if (!prefix_cache_explicit) prefix_cache_max_tokens = 0;
+            if (!qmeta_cache_limit_explicit) qmeta_cache_max_prompt_tokens = 0;
         }
 
         qwen38::RuntimeState runtime;

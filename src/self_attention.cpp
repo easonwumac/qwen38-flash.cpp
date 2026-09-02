@@ -2,11 +2,15 @@
 
 #include "qwen38/quantization_geometry.hpp"
 
+#include "qsa_metal_kernels.hpp"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -55,6 +59,19 @@ MlxArray integer_scalar(const std::int32_t value) {
     const std::vector<std::int32_t> values{value};
     const std::vector<int> shape{};
     return MlxArray::from_int32(values, shape);
+}
+
+std::shared_ptr<MlxMetalKernel> packed_qsa_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"query", "keys", "values", "indices", "valid", "scale"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_packed_qsa_attention",
+            inputs,
+            "output",
+            qsa_metal::packed_attention,
+            qsa_metal::header);
+    }();
+    return kernel;
 }
 
 bool use_sdpa_decode(const std::size_t token_count) {
@@ -311,9 +328,10 @@ MlxArray SelfAttention::apply_rope_rows(
         transformed, input.slice(rest_start, rest_stop, strides), 3);
 }
 
-MlxArray SelfAttention::update_qsa_and_build_mask(
+SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const MlxArray& input,
-    SelfAttentionState& state) const {
+    SelfAttentionState& state,
+    const bool packed) const {
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1) {
         throw std::runtime_error("QSA requires a single [1,S,hidden] sequence");
@@ -412,7 +430,6 @@ MlxArray SelfAttention::update_qsa_and_build_mask(
         static_cast<double>(ratio),
         MLX_INT32).reshape(std::vector<int>{1, dimension(block_count, "QSA blocks")});
     MlxArray visible = MlxArray::less_equal(block_ends, positions).expand_dims(0);
-
     MlxArray block_indices = MlxArray::arange(
         0.0, static_cast<double>(block_count), 1.0, MLX_FLOAT32);
     MlxArray tie_bias = MlxArray::multiply(
@@ -428,6 +445,54 @@ MlxArray SelfAttention::update_qsa_and_build_mask(
         std::vector<int>{0, 0, first_top},
         std::vector<int>{1, rows, dimension(block_count, "QSA blocks")},
         strides3);
+    if (packed) {
+        MlxArray selected_block_valid = MlxArray::take_along_axis(
+            visible, top_indices, -1);
+        MlxArray offsets = MlxArray::arange(
+            0.0, static_cast<double>(ratio), 1.0, MLX_INT32)
+                               .reshape(std::vector<int>{1, 1, 1, ratio});
+        MlxArray selected_indices = MlxArray::add(
+            MlxArray::multiply(
+                top_indices.expand_dims(-1), integer_scalar(ratio)),
+            offsets)
+                                        .reshape(std::vector<int>{1, rows, budget});
+        MlxArray selected_valid = selected_block_valid.expand_dims(-1)
+                                      .broadcast_to(std::vector<int>{
+                                          1, rows, block_topk, ratio})
+                                      .reshape(std::vector<int>{1, rows, budget});
+
+        const int tail_slots = ratio - 1;
+        if (tail_slots > 0) {
+            MlxArray tail_offsets = MlxArray::arange(
+                0.0, static_cast<double>(tail_slots), 1.0, MLX_INT32)
+                                        .reshape(std::vector<int>{1, tail_slots});
+            MlxArray completed_for_query = MlxArray::floor_divide(
+                MlxArray::add(positions, integer_scalar(1)), integer_scalar(ratio));
+            MlxArray tail_start = MlxArray::multiply(
+                completed_for_query, integer_scalar(ratio));
+            MlxArray tail_indices = MlxArray::add(tail_start, tail_offsets);
+            MlxArray tail_valid = MlxArray::less_equal(tail_indices, positions);
+            tail_indices = MlxArray::where(
+                tail_valid, tail_indices, integer_scalar(0));
+            selected_indices = MlxArray::concatenate(
+                selected_indices, tail_indices.expand_dims(0), 2);
+            selected_valid = MlxArray::concatenate(
+                selected_valid, tail_valid.expand_dims(0), 2);
+        }
+        MlxArray sentinel_indices = MlxArray::where(
+            selected_valid, selected_indices, integer_scalar(dimension(total, "QSA sentinel")));
+        MlxArray order = sentinel_indices.argsort_axis(-1);
+        selected_indices = MlxArray::take_along_axis(
+            sentinel_indices, order, -1);
+        selected_valid = MlxArray::less_equal(
+            selected_indices, integer_scalar(dimension(total - 1, "QSA last token")));
+        selected_indices = MlxArray::where(
+            selected_valid, selected_indices, integer_scalar(0));
+        return {
+            .packed_indices = std::move(selected_indices),
+            .packed_mask = std::move(selected_valid),
+        };
+    }
     MlxArray selected = MlxArray::put_along_axis(
         MlxArray::zeros(
             std::vector<int>{1, rows, dimension(block_count, "QSA blocks")},
@@ -469,7 +534,73 @@ MlxArray SelfAttention::update_qsa_and_build_mask(
         std::clog << "qwen38: QSA engaged at " << total << " tokens ("
                   << block_count << " blocks, top " << block_topk << ")\n";
     });
-    return mask.reshape(std::vector<int>{1, 1, rows, dimension(total, "QSA KV")});
+    return {
+        .dense_mask = mask.reshape(
+            std::vector<int>{1, 1, rows, dimension(total, "QSA KV")}),
+    };
+}
+
+MlxArray SelfAttention::packed_qsa_attention(
+    const MlxArray& query,
+    const MlxArray& keys,
+    const MlxArray& values,
+    const QsaSelection& selection) const {
+    const std::vector<int> query_shape = query.shape();
+    const std::vector<int> key_shape = keys.shape();
+    const std::vector<int> index_shape = selection.packed_indices.shape();
+    if (query_shape.size() != 4 || key_shape.size() != 4 || index_shape.size() != 3 ||
+        query_shape[0] != 1 || key_shape[0] != 1 || index_shape[0] != 1 ||
+        query_shape[2] != index_shape[1]) {
+        throw std::runtime_error("packed QSA shape mismatch");
+    }
+    const int rows = query_shape[2];
+    const int kv_heads = key_shape[1];
+    const int selected = index_shape[2];
+    const int head_dimension = key_shape[3];
+    if (head_dimension % 32 != 0 || query_shape[1] % kv_heads != 0 ||
+        query_shape[1] / kv_heads > 16 ||
+        query.dtype() != keys.dtype() || query.dtype() != values.dtype()) {
+        throw std::runtime_error("packed QSA kernel contract mismatch");
+    }
+    MlxArray scale = scalar(
+        1.0F / std::sqrt(static_cast<float>(head_dimension_)), MLX_FLOAT32);
+    const std::array<const MlxArray*, 6> inputs{
+        &query,
+        &keys,
+        &values,
+        &selection.packed_indices,
+        &selection.packed_mask,
+        &scale,
+    };
+    const int thread_count = 512;
+    const std::array<int, 3> grid{thread_count, rows, kv_heads};
+    const std::array<int, 3> threadgroup{thread_count, 1, 1};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = query.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 7> int_templates{{
+        {.name = "R", .value = rows},
+        {.name = "TOTAL", .value = key_shape[2]},
+        {.name = "S", .value = selected},
+        {.name = "HQ", .value = query_shape[1]},
+        {.name = "HK", .value = kv_heads},
+        {.name = "D", .value = head_dimension},
+        {.name = "TG", .value = thread_count},
+    }};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {
+            .shape = {1, rows, query_shape[1], head_dimension},
+            .dtype = query.dtype(),
+        },
+    }};
+    std::vector<MlxArray> result = packed_qsa_kernel()->apply(
+        inputs,
+        outputs,
+        grid,
+        threadgroup,
+        dtype_templates,
+        int_templates);
+    return std::move(result.front());
 }
 
 void SelfAttention::copy_qsa_checkpoint(
@@ -505,7 +636,7 @@ MlxArray SelfAttention::forward_decode(
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] != 1) {
         throw std::runtime_error("attention decode requires shape [1,1,hidden]");
     }
-    MlxArray qsa_mask = update_qsa_and_build_mask(input, state);
+    QsaSelection qsa = update_qsa_and_build_mask(input, state);
     const int heads = dimension(attention_heads_, "attention heads");
     const int kv_heads = dimension(key_value_heads_, "key/value heads");
     const int head_dimension = dimension(head_dimension_, "head dimension");
@@ -535,13 +666,13 @@ MlxArray SelfAttention::forward_decode(
     }
     ++state.token_count;
     MlxArray attended;
-    if (qsa_mask.get().ctx != nullptr) {
+    if (qsa.dense_mask.get().ctx != nullptr) {
         attended = MlxArray::scaled_dot_product_attention(
             query,
             state.keys,
             state.values,
             1.0F / std::sqrt(static_cast<float>(head_dimension_)),
-            qsa_mask).swapaxes(1, 2);
+            qsa.dense_mask).swapaxes(1, 2);
     } else if (use_sdpa_decode(state.token_count)) {
         attended = MlxArray::scaled_dot_product_attention(
             query,
@@ -607,7 +738,7 @@ MlxArray SelfAttention::forward_verify(
                 complete.qsa_pooled_keys = origin.qsa_pooled_keys.share();
             }
         }
-        MlxArray qsa_mask = update_qsa_and_build_mask(input, complete);
+        QsaSelection qsa = update_qsa_and_build_mask(input, complete);
         MlxArray query = query_gate_batch.slice(
             std::vector<int>{0, 0, 0, 0},
             std::vector<int>{1, input_shape[1], heads, head_dimension},
@@ -650,7 +781,7 @@ MlxArray SelfAttention::forward_verify(
             copy_qsa_checkpoint(
                 complete, checkpoints[row].token_count, checkpoints[row]);
         }
-        MlxArray attended = qsa_mask.get().ctx == nullptr
+        MlxArray attended = qsa.dense_mask.get().ctx == nullptr
             ? MlxArray::scaled_dot_product_attention(
                   query,
                   complete_keys,
@@ -662,7 +793,7 @@ MlxArray SelfAttention::forward_verify(
                   complete_keys,
                   complete_values,
                   1.0F / std::sqrt(static_cast<float>(head_dimension_)),
-                  qsa_mask).swapaxes(1, 2);
+                  qsa.dense_mask).swapaxes(1, 2);
         const std::vector<int> flat_shape{1, input_shape[1], heads * head_dimension};
         MlxArray gated = MlxArray::multiply(
             attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
@@ -705,7 +836,7 @@ MlxArray SelfAttention::forward_verify(
             : MlxArray::concatenate(origin.values, new_values, 2);
     }
     for (std::size_t row = 0; row < rows; ++row) {
-        MlxArray qsa_mask = update_qsa_and_build_mask(
+        QsaSelection qsa = update_qsa_and_build_mask(
             slice_sequence_row(input, row), working);
         MlxArray query_gate = slice_sequence_row(query_gate_batch, row);
         MlxArray query = query_gate.slice(
@@ -755,13 +886,13 @@ MlxArray SelfAttention::forward_verify(
         }
 
         MlxArray attended;
-        if (qsa_mask.get().ctx != nullptr) {
+        if (qsa.dense_mask.get().ctx != nullptr) {
             attended = MlxArray::scaled_dot_product_attention(
                 query,
                 working.keys,
                 working.values,
                 1.0F / std::sqrt(static_cast<float>(head_dimension_)),
-                qsa_mask).swapaxes(1, 2);
+                qsa.dense_mask).swapaxes(1, 2);
         } else if (use_sdpa_decode(working.token_count)) {
             attended = MlxArray::scaled_dot_product_attention(
                 query,
@@ -810,7 +941,22 @@ MlxArray SelfAttention::forward_prefill(
     const int heads = dimension(attention_heads_, "attention heads");
     const int kv_heads = dimension(key_value_heads_, "key/value heads");
     const int head_dimension = dimension(head_dimension_, "head dimension");
-    MlxArray qsa_mask = update_qsa_and_build_mask(input, state);
+    const char* packed_qsa = std::getenv("QWEN38_QSA_PACKED_PREFILL");
+    std::size_t packed_qsa_min_tokens = 65536;
+    if (const char* configured = std::getenv("QWEN38_QSA_PACKED_MIN_TOKENS");
+        configured != nullptr) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(configured, &end, 10);
+        if (end == configured || *end != '\0') {
+            throw std::runtime_error("QWEN38_QSA_PACKED_MIN_TOKENS must be an integer");
+        }
+        packed_qsa_min_tokens = static_cast<std::size_t>(parsed);
+    }
+    const bool packed_qsa_enabled = packed_qsa != nullptr &&
+        std::string_view(packed_qsa) == "1" &&
+        state.token_count + static_cast<std::size_t>(rows) >= packed_qsa_min_tokens;
+    QsaSelection qsa = update_qsa_and_build_mask(
+        input, state, packed_qsa_enabled);
     MlxArray query_gate = project(input, query_projection_).reshape(
         std::vector<int>{1, rows, heads, 2 * head_dimension});
     const std::vector<int> strides{1, 1, 1, 1};
@@ -839,19 +985,22 @@ MlxArray SelfAttention::forward_prefill(
     }
     state.token_count += static_cast<std::size_t>(rows);
 
-    MlxArray attended = qsa_mask.get().ctx == nullptr
+    MlxArray attended = qsa.dense_mask.get().ctx == nullptr &&
+            qsa.packed_indices.get().ctx == nullptr
         ? MlxArray::scaled_dot_product_attention(
               query,
               state.keys,
               state.values,
               1.0F / std::sqrt(static_cast<float>(head_dimension_)),
               true).swapaxes(1, 2)
+        : qsa.packed_indices.get().ctx != nullptr
+        ? packed_qsa_attention(query, state.keys, state.values, qsa)
         : MlxArray::scaled_dot_product_attention(
               query,
               state.keys,
               state.values,
               1.0F / std::sqrt(static_cast<float>(head_dimension_)),
-              qsa_mask).swapaxes(1, 2);
+              qsa.dense_mask).swapaxes(1, 2);
     const std::vector<int> flat_shape{1, rows, heads * head_dimension};
     MlxArray gated = MlxArray::multiply(
         attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());

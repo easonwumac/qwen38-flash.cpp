@@ -80,6 +80,8 @@ int qsa_smoke(
     qwen38::MlxTensorStore& tensors,
     qwen38::SelfAttention& layer,
     const qwen38::MlxArray& input) {
+    static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
+    static_cast<void>(::setenv("QWEN38_QSA_PACKED_MIN_TOKENS", "0", 1));
     const auto& config = tensors.manifest().config();
     const std::size_t budget = config.indexer_budget;
     const std::size_t ratio = config.indexer_compress_ratio;
@@ -98,6 +100,24 @@ int qsa_smoke(
         origin.qsa_raw_keys.shape() != std::vector<int>({
             1, static_cast<int>(budget), static_cast<int>(config.indexer_head_dimension)})) {
         throw std::runtime_error("QSA pre-engagement state is incomplete");
+    }
+
+    qwen38::SelfAttentionState dense_prefill_state = snapshot(origin);
+    qwen38::SelfAttentionState packed_prefill_state = snapshot(origin);
+    const std::array<int, 3> packed_repetitions{1, 512, 1};
+    auto packed_input = input.tile(packed_repetitions);
+    static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+    auto dense_prefill = layer.forward_prefill(packed_input, dense_prefill_state);
+    const auto dense_prefill_values = dense_prefill.astype(MLX_FLOAT32).to_float32();
+    static_cast<void>(::setenv("QWEN38_QSA_PACKED_PREFILL", "1", 1));
+    auto packed_prefill = layer.forward_prefill(packed_input, packed_prefill_state);
+    const auto packed_prefill_values = packed_prefill.astype(MLX_FLOAT32).to_float32();
+    static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+    const double packed_prefill_cosine = cosine(
+        dense_prefill_values, packed_prefill_values);
+    if (packed_prefill_state.token_count != budget + 512 ||
+        packed_prefill_cosine < 0.999) {
+        throw std::runtime_error("packed QSA prefill diverged from dense attention");
     }
 
     qwen38::SelfAttentionState batched_origin = snapshot(origin);
@@ -142,10 +162,73 @@ int qsa_smoke(
             throw std::runtime_error("QSA verifier checkpoint is misaligned");
         }
     }
+
+    std::size_t scale_context = budget;
+    if (const char* configured = std::getenv("QWEN38_QSA_SMOKE_CONTEXT_TOKENS");
+        configured != nullptr) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(configured, &end, 10);
+        if (end == configured || *end != '\0' || parsed < budget || parsed % 512 != 0) {
+            throw std::runtime_error(
+                "QWEN38_QSA_SMOKE_CONTEXT_TOKENS must be a 512-aligned value at least budget");
+        }
+        scale_context = static_cast<std::size_t>(parsed);
+    }
+    qwen38::SelfAttentionState scale_origin = snapshot(origin);
+    static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+    for (std::size_t offset = budget; offset < scale_context; offset += 512) {
+        auto extension = layer.forward_prefill(packed_input, scale_origin);
+        extension.eval();
+        qwen38::MlxArray::clear_cache();
+    }
+    std::size_t scale_rows = 512;
+    if (const char* configured = std::getenv("QWEN38_QSA_SMOKE_ROWS");
+        configured != nullptr) {
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(configured, &end, 10);
+        if (end == configured || *end != '\0' || parsed == 0 || parsed > 512) {
+            throw std::runtime_error("QWEN38_QSA_SMOKE_ROWS must be between 1 and 512");
+        }
+        scale_rows = static_cast<std::size_t>(parsed);
+    }
+    const std::array<int, 3> scale_repetitions{
+        1, static_cast<int>(scale_rows), 1};
+    auto scale_input = input.tile(scale_repetitions);
+    static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+    const auto measure_prefill = [&](const bool packed) {
+        qwen38::SelfAttentionState measured_state = snapshot(scale_origin);
+        if (packed) {
+            static_cast<void>(::setenv("QWEN38_QSA_PACKED_PREFILL", "1", 1));
+        } else {
+            static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+        }
+        const auto started = std::chrono::steady_clock::now();
+        auto output = layer.forward_prefill(scale_input, measured_state);
+        auto values = output.astype(MLX_FLOAT32).to_float32();
+        const double elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return std::pair{elapsed_ms, std::move(values)};
+    };
+    const auto dense_scale = measure_prefill(false);
+    const auto packed_scale = measure_prefill(true);
+    const auto reverse_dense_scale = measure_prefill(false);
+    static_cast<void>(::unsetenv("QWEN38_QSA_PACKED_PREFILL"));
+    const double scale_cosine = cosine(
+        reverse_dense_scale.second, packed_scale.second);
+    if (scale_cosine < 0.999) {
+        throw std::runtime_error("scaled packed QSA prefill diverged from dense attention");
+    }
     std::cout << "{\"qsa_engaged_tokens\":" << engaged_tokens
               << ",\"raw_rows\":" << checkpoints.back().qsa_raw_keys.shape()[1]
               << ",\"pooled_blocks\":" << checkpoints.back().qsa_pooled_count
-              << ",\"batch_serial_cosine\":" << output_cosine << "}\n";
+              << ",\"batch_serial_cosine\":" << output_cosine
+              << ",\"packed_prefill_cosine\":" << packed_prefill_cosine
+              << ",\"scale_context\":" << scale_context
+              << ",\"scale_rows\":" << scale_rows
+              << ",\"dense_ms\":" << dense_scale.first
+              << ",\"packed_ms\":" << packed_scale.first
+              << ",\"reverse_dense_ms\":" << reverse_dense_scale.first
+              << ",\"scale_cosine\":" << scale_cosine << "}\n";
     return EXIT_SUCCESS;
 }
 

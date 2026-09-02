@@ -17,6 +17,11 @@ void run_runtime_tests() {
     const auto long_context_profile = qwen38::runtime_profile_config("long-context");
     QWEN38_CHECK(long_context_profile.optimized);
     QWEN38_CHECK(long_context_profile.resident_expert_range.empty());
+
+    const auto memory_profile = qwen38::runtime_profile_config("memory");
+    QWEN38_CHECK(memory_profile.optimized);
+    QWEN38_CHECK(memory_profile.memory_efficient);
+    QWEN38_CHECK(memory_profile.resident_expert_range.empty());
     bool invalid_profile_rejected = false;
     try {
         static_cast<void>(qwen38::runtime_profile_config("unknown"));

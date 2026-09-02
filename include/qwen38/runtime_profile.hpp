@@ -7,6 +7,7 @@ namespace qwen38 {
 
 struct RuntimeProfileConfig {
     bool optimized = false;
+    bool memory_efficient = false;
     std::string_view resident_expert_range;
 };
 

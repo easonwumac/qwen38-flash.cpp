@@ -23,6 +23,13 @@ RuntimeProfileConfig runtime_profile_config(const std::string_view profile) {
     if (profile == "long-context") {
         return {.optimized = true, .resident_expert_range = ""};
     }
+    if (profile == "memory") {
+        return {
+            .optimized = true,
+            .memory_efficient = true,
+            .resident_expert_range = "",
+        };
+    }
     throw std::runtime_error("invalid profile: " + std::string(profile));
 }
 
@@ -52,6 +59,11 @@ void apply_runtime_profile(const std::string_view profile) {
         {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
     };
     for (const auto& [name, value] : settings) set_environment_default(name, value);
+    if (config.memory_efficient) {
+        set_environment_default("QWEN38_COMPACT_QMETA", "lossless13");
+        set_environment_default("QWEN38_QMETA_PREFILL_CACHE", "0");
+        set_environment_default("QWEN38_QSA_PACKED_PREFILL", "1");
+    }
 }
 
 std::size_t select_prefill_chunk_rows(

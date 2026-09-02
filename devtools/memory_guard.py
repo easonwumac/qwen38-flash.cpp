@@ -130,9 +130,9 @@ def stop_tree(pid: int) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--min-start-gib", type=float, default=42.0)
-    parser.add_argument("--min-available-gib", type=float, default=8.0)
+    parser.add_argument("--min-available-gib", type=float, default=12.0)
     parser.add_argument("--max-rss-gib", type=float, default=38.0)
-    parser.add_argument("--max-footprint-gib", type=float, default=48.0)
+    parser.add_argument("--max-footprint-gib", type=float, default=44.0)
     parser.add_argument("--interval", type=float, default=0.25)
     parser.add_argument("--lock-file", default="/tmp/qwen38-memory-guard.lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -165,6 +165,14 @@ def main() -> int:
     peak_rss = 0.0
     peak_footprint = 0.0
     minimum_available = start_available
+
+    def report_peak() -> None:
+        print(
+            f"memory_guard: peak_footprint={peak_footprint:.1f} GiB "
+            f"peak_rss={peak_rss:.1f} GiB "
+            f"minimum_available={minimum_available:.1f} GiB",
+            file=sys.stderr,
+        )
     handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {
         signum: signal.getsignal(signum) for signum in handled_signals
@@ -183,6 +191,7 @@ def main() -> int:
             if shutdown_signal != 0:
                 stop_tree(child.pid)
                 child.wait()
+                report_peak()
                 return 128 + shutdown_signal
             current_rss = guarded_tree_rss_gib(child.pid)
             current_footprint = guarded_tree_footprint_gib(child.pid)
@@ -213,12 +222,7 @@ def main() -> int:
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-    print(
-        f"memory_guard: peak_footprint={peak_footprint:.1f} GiB "
-        f"peak_rss={peak_rss:.1f} GiB "
-        f"minimum_available={minimum_available:.1f} GiB",
-        file=sys.stderr,
-    )
+    report_peak()
     return child.returncode
 
 

@@ -37,6 +37,12 @@ public:
         SelfAttentionState& state) const;
 
 private:
+    struct QsaSelection {
+        MlxArray dense_mask;
+        MlxArray packed_indices;
+        MlxArray packed_mask;
+    };
+
     struct QuantizedProjection {
         MlxArray weight;
         MlxArray scales;
@@ -60,9 +66,15 @@ private:
         std::size_t position,
         std::size_t step,
         std::size_t vector_dimension) const;
-    [[nodiscard]] MlxArray update_qsa_and_build_mask(
+    [[nodiscard]] QsaSelection update_qsa_and_build_mask(
         const MlxArray& input,
-        SelfAttentionState& state) const;
+        SelfAttentionState& state,
+        bool packed = false) const;
+    [[nodiscard]] MlxArray packed_qsa_attention(
+        const MlxArray& query,
+        const MlxArray& keys,
+        const MlxArray& values,
+        const QsaSelection& selection) const;
     void copy_qsa_checkpoint(
         const SelfAttentionState& complete,
         std::size_t token_count,
