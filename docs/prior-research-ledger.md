@@ -291,11 +291,22 @@ The implementation order is deliberately narrow:
    kernel opportunity is a fused, exact S=2..4 verifier path that removes
     model-byte movement, intermediates, and dispatches across multiple
     consumers. Improving one projection in isolation is explicitly excluded.
-6. **Complete fused HC promotion.** The read-only port has an A/B/A win. Add
+6. **Metal-4 W8A8 prefill projections.** A compile probe proved that the
+   existing C++/MLX-C custom-kernel path accepts Metal Performance Primitives
+   tensor operations on the M5 Pro. Synthetic Cider W8A8 tests at the three
+   real GDN projection geometries (`2560x10240`, `2560x6144`, and
+   `6144x2560`) reached roughly 1.43--2.21x the native affine-Q4 projection
+   speed at 512 rows with about 0.9958 output cosine. Cider's W4A8 path
+   produced invalid near-zero cosine here and is excluded. Prototype W8A8 as
+   a prefill-only GDN sidecar, retaining Q4 for decode; gate it on full-model
+   PP, next-token quality, and the roughly 1 GiB added resident-weight cost.
+   This is derived from the MIT-licensed Cider design:
+   https://github.com/Mininglamp-AI/cider.
+7. **Complete fused HC promotion.** The read-only port has an A/B/A win. Add
    per-layer numerical oracles, mixed-prompt decode cohorts, then fold the
    preceding HC write into the next read with explicit PLE/capture/final-head
    flush barriers.
-7. **Branch-local shallow tree only after linear MTP is profitable.** A B=2,
+8. **Branch-local shallow tree only after linear MTP is profitable.** A B=2,
    depth-2 shadow implementation is justified only if measured extra verify-row
    cost is lower than its acceptance benefit and all recurrent/QSA state is
    branch-local.
