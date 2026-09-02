@@ -1,5 +1,7 @@
 #include "qwen38/mtp_head.hpp"
 
+#include "qwen38/quantization_geometry.hpp"
+
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -50,28 +52,8 @@ int infer_projection_bits(
     const std::string base(prefix);
     const std::vector<int> weight_shape = tensors.tensor(base + ".weight").shape();
     const std::vector<int> scale_shape = tensors.tensor(base + ".scales").shape();
-    if (weight_shape.empty() || scale_shape.empty() || weight_shape.size() != scale_shape.size()) {
-        throw std::runtime_error("cannot infer MTP quantization geometry");
-    }
-    if (weight_shape.back() <= 0 || scale_shape.back() <= 0) {
-        throw std::runtime_error("invalid MTP quantization geometry");
-    }
-    const std::size_t packed = static_cast<std::size_t>(weight_shape.back());
-    const std::size_t groups = static_cast<std::size_t>(scale_shape.back());
-    if (packed == 0 || groups == 0 || group_size == 0 ||
-        groups > std::numeric_limits<std::size_t>::max() / group_size) {
-        throw std::runtime_error("invalid MTP quantization geometry");
-    }
-    const std::size_t width = groups * group_size;
-    if (packed > std::numeric_limits<std::size_t>::max() / 32 ||
-        packed * 32 % width != 0) {
-        throw std::runtime_error("non-integral MTP quantization bits");
-    }
-    const std::size_t bits = packed * 32 / width;
-    if (bits != 4 && bits != 8) {
-        throw std::runtime_error("MTP projections must use affine Q4 or Q8");
-    }
-    return static_cast<int>(bits);
+    return infer_affine_quantization_bits(
+        weight_shape, scale_shape, group_size, "MTP");
 }
 
 ModelConfig mtp_layer_config(const ModelConfig& target, const int bits) {
