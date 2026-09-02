@@ -220,6 +220,8 @@ directions. New code should build on them.
 | Naive concatenated proposal tree | GDN, PLE, QSA, KV, and MTP-head state are branch-dependent | Not a small optimization; only revisit as a true branch-local runtime |
 | Full target execution on ANE | Unsupported operators, conversion overhead, and memory movement dominate | Not on the critical path; ANE may be reconsidered only for a measured isolated subgraph |
 | More aggressive model quantization without a quality gate | It changes the requested quality target and does not remove dispatch/state costs | Not a substitute for runtime optimization |
+| BF16 QSA indexer score GEMM | A guarded 65,536-token one-layer smoke initially appeared faster, but counterposed runs measured 42.17 ms for FP32 and 44.29 ms for BF16 with dense/packed cosine 1.0 | Rejected and removed. The first result was thermal/order noise; lower precision did not reduce the dependency-matched critical path |
+| Fused Metal QSA ReLU/head reduction | Two counterposed one-layer 65,536-token smokes improved packed QSA from a 42.16 ms mean to 40.96 ms (about 2.9%) with cosine 1.0. The authoritative 65,560-token full-model run retained the `b344d80e...` first-token hash but reached only 446.66 PP tok/s at 39.8 GiB peak, below the retained 463.55--473.62 four-layer-qmeta path | Rejected and removed. Replacing two MLX graph nodes with a custom dispatch reduced the isolated operation but worsened complete lazy-graph scheduling; do not promote selection microbenchmarks without the full prefill gate |
 
 ## High-upside work not yet ported
 

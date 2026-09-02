@@ -355,6 +355,29 @@ threshold produced 466.02/442.49 tok/s with the retained first-token hash and a
 39.9 GiB peak physical footprint. Set `QWEN38_QSA_PACKED_TILE=16` for the
 diagnostic rollback.
 
+For a guarded 64K throughput experiment, retaining decoded qmeta for only the
+first four layers is the measured memory/speed sweet spot:
+
+```bash
+QWEN38_QSA_PACKED_MIN_TOKENS=32768 \
+QWEN38_QMETA_PREFILL_CACHE=1 \
+QWEN38_QMETA_PREFILL_CACHE_LAYERS=4 \
+./devtools/memory_guard.py \
+  --min-start-gib 40 --min-available-gib 10 \
+  --max-rss-gib 40 --max-footprint-gib 42 -- \
+  ./build-all/qwen38-server --model /path/to/model --profile memory \
+  --prefill-chunk 1024 --prefill-chunk-fixed \
+  --qmeta-cache-max-prompt-tokens 262144 --prefix-cache-tokens 0 --mtp-depth 0
+```
+
+On the same 65,560-token numbered-lines prompt this reached 473.62/463.55
+tok/s, a 468.59 tok/s median versus 454.26 without the cache (+3.2%). Both runs
+retained the `b344d80e...` first-token hash; peak physical footprint was 40.2
+GiB and minimum reclaimable memory was 11.0 GiB. Caching eight layers did not
+improve the cold sample (460.08 tok/s), so four layers remains an experimental
+recipe rather than a default. It is validated on one deterministic prompt, not
+as a mixed-domain quality or universal throughput claim.
+
 The native engine caps the MLX allocator cache at 256 MiB in serial as well as
 MTP mode. Before this bound covered serial inference, a 23,555-token request was
 stopped by the memory guard at 5.8 GiB available memory. With the common bound,
