@@ -11,6 +11,7 @@ constexpr std::size_t short_prompt_limit = 2048;
 constexpr std::size_t probe_round_limit = 8;
 constexpr std::size_t probe_accept_threshold = 10;
 constexpr std::size_t monitor_round_limit = 12;
+constexpr std::size_t depth_four_probation_round_limit = 4;
 constexpr std::size_t depth_four_monitor_round_limit = 8;
 constexpr std::size_t promotion_probation_round_limit = 4;
 
@@ -76,6 +77,20 @@ void MtpDepthPolicy::observe(
         monitor_proposed_ += proposed;
         monitor_accepted_ += accepted;
         if (accepted >= 4) ++monitor_fourth_accepted_;
+        if (!depth_four_probation_complete_ &&
+            monitor_rounds_ == depth_four_probation_round_limit &&
+            monitor_fourth_accepted_ * 2 < depth_four_probation_round_limit) {
+            depth_ = 3;
+            ++demotions_;
+            monitor_rounds_ = 0;
+            monitor_proposed_ = 0;
+            monitor_accepted_ = 0;
+            monitor_fourth_accepted_ = 0;
+            return;
+        }
+        if (monitor_rounds_ == depth_four_probation_round_limit) {
+            depth_four_probation_complete_ = true;
+        }
         if (monitor_rounds_ == depth_four_monitor_round_limit) {
             if (monitor_fourth_accepted_ * 2 < depth_four_monitor_round_limit) {
                 depth_ = 3;

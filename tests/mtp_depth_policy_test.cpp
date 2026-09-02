@@ -90,6 +90,11 @@ void run_mtp_depth_policy_tests() {
     for (int round = 0; round < 5; ++round) adaptive_three.observe(4, 3);
     QWEN38_CHECK(adaptive_three.depth() == 3);
     QWEN38_CHECK(adaptive_three.demotions() == 1);
+    qwen38::MtpDepthPolicy adaptive_early(3, 32);
+    adaptive_early.observe(4, 4);
+    for (int round = 0; round < 3; ++round) adaptive_early.observe(4, 3);
+    QWEN38_CHECK(adaptive_early.depth() == 3);
+    QWEN38_CHECK(adaptive_early.demotions() == 1);
     qwen38::MtpDepthPolicy adaptive_long(3, 2049);
     QWEN38_CHECK(adaptive_long.depth() == 2);
     QWEN38_CHECK(!adaptive_long.probing());

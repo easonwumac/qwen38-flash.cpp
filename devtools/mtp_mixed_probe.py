@@ -42,6 +42,8 @@ def main():
         )
         mtp = payload["performance"]["mtp"]
         results[name] = {
+            "completion_tokens": payload["usage"]["completion_tokens"],
+            "finish_reason": payload["choices"][0]["finish_reason"],
             "tps": payload["performance"]["generation_tps"],
             "sha256": hashlib.sha256(text.encode()).hexdigest(),
             "rounds": mtp["rounds"],

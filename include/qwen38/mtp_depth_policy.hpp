@@ -21,6 +21,7 @@ private:
     bool probing_{false};
     bool monitoring_{false};
     bool adaptive_four_{false};
+    bool depth_four_probation_complete_{false};
     bool promotion_probation_complete_{false};
     std::size_t probe_rounds_{0};
     std::size_t probe_accepted_{0};

@@ -104,3 +104,12 @@ A one-sample 128-token mixed probe measured code 54.09 versus 43.23 tok/s
 output hashes matched their controls; explanation followed a different valid
 greedy path. This is evidence for an experimental switch, not a default-policy
 promotion or a broad quality claim.
+
+The policy now adds a one-time four-round probation before the eight-round
+window. Per-round traces showed 4/4 successful fourth positions on the retained
+fixture, 3/4 on code, 4/4 on JSON, 1/4 on explanation, and 0/4 on the short
+creative completion. The `<2/4` early exit therefore preserved the exact
+97/124 and 197/240 fixture paths while cutting explanation's S=4 proposals from
+eight to four. A repeated thermally continuous fixture measured 65.222/65.902
+tok/s medians; these lower timings are not treated as a regression because the
+proposal paths were identical and the machine was not thermally reset.
