@@ -741,6 +741,24 @@ MlxArray SparseMoe::forward_verify_impl(
         weights = weights.reshape(
             std::vector<int>{rows, static_cast<int>(experts_per_token_)});
         weights = weights.astype(MLX_FLOAT32);
+        const char* profile_overlap = std::getenv("QWEN38_PROFILE_VERIFY_EXPERT_OVERLAP");
+        if (layer_index_ == 0 && profile_overlap != nullptr &&
+            std::string_view(profile_overlap) == "1") {
+            const std::vector<float> routed_ids =
+                experts.astype(MLX_FLOAT32).to_float32();
+            std::vector<bool> seen(expert_count_, false);
+            std::size_t unique = 0;
+            for (const float value : routed_ids) {
+                const std::size_t expert = static_cast<std::size_t>(value);
+                if (expert < seen.size() && !seen[expert]) {
+                    seen[expert] = true;
+                    ++unique;
+                }
+            }
+            std::clog << "qwen38-verify-expert-overlap: rows=" << rows
+                      << " selected=" << routed_ids.size()
+                      << " unique=" << unique << '\n';
+        }
         if (timings != nullptr) {
             const std::array<const MlxArray*, 2> routing_outputs{&experts, &weights};
             MlxArray::eval_all(routing_outputs);

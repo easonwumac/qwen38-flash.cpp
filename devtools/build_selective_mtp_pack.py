@@ -9,6 +9,8 @@ from pathlib import Path
 
 PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 GROUPS = {
+    "fc_embedding": ("language_model.mtp.fc_embedding",),
+    "fc_hidden": ("language_model.mtp.fc_hidden",),
     "fc": (
         "language_model.mtp.fc_embedding",
         "language_model.mtp.fc_hidden",
@@ -19,6 +21,10 @@ GROUPS = {
         "language_model.mtp.layers.0.self_attn.v_proj",
         "language_model.mtp.layers.0.self_attn.o_proj",
     ),
+    "attention_q": ("language_model.mtp.layers.0.self_attn.q_proj",),
+    "attention_k": ("language_model.mtp.layers.0.self_attn.k_proj",),
+    "attention_v": ("language_model.mtp.layers.0.self_attn.v_proj",),
+    "attention_o": ("language_model.mtp.layers.0.self_attn.o_proj",),
     "hyper_connection": (
         "language_model.mtp.hyper_connection_mixer.input_mix_weight_down",
         "language_model.mtp.hyper_connection_mixer.input_mix_weight_up",
