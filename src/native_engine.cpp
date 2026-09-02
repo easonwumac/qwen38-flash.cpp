@@ -335,6 +335,10 @@ GenerationResult NativeEngine::complete_impl(
     const auto prompt_started = std::chrono::steady_clock::now();
     const std::span<const std::uint32_t> prefill_tokens(
         prompt_tokens.data(), prefill_rows);
+    const char* profile_prefill = std::getenv("QWEN38_PROFILE_PREFILL");
+    const bool profile_prefill_enabled =
+        profile_prefill != nullptr && std::string_view(profile_prefill) == "1";
+    std::vector<double> prefill_layer_ms;
     if (ssd_prefix_cache_ != nullptr &&
         (prefix_cache_ == nullptr || !is_prefix(prefix_cache_->tokens, prefill_tokens))) {
         std::optional<StoredPrefixState> stored =
@@ -384,7 +388,8 @@ GenerationResult NativeEngine::complete_impl(
         const std::size_t count = std::min(
             request_prefill_chunk, prefill_rows - offset);
         std::vector<MlxArray> streams = model_.prefill_chunk(
-            std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state);
+            std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state,
+            profile_prefill_enabled ? &prefill_layer_ms : nullptr);
         for (std::size_t row = 0; row < count; ++row) {
             const std::size_t index = offset + row;
             if (mtp_head_ != nullptr && previous_target_stream.has_value()) {
@@ -397,6 +402,24 @@ GenerationResult NativeEngine::complete_impl(
     model_.clear_prefill_qmeta_cache();
     const double prompt_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - prompt_started).count();
+    if (!prefill_layer_ms.empty()) {
+        double linear_ms = 0.0;
+        double full_ms = 0.0;
+        for (std::size_t layer = 0; layer < prefill_layer_ms.size(); ++layer) {
+            (layer + 1) % 4 == 0
+                ? full_ms += prefill_layer_ms[layer]
+                : linear_ms += prefill_layer_ms[layer];
+        }
+        const auto slowest = std::ranges::max_element(prefill_layer_ms);
+        std::clog << "qwen38-prefill-profile: tokens=" << prefill_rows
+                  << " chunk=" << request_prefill_chunk
+                  << " total_ms=" << prompt_ms
+                  << " linear_layers_ms=" << linear_ms
+                  << " full_layers_ms=" << full_ms
+                  << " slowest_layer="
+                  << std::distance(prefill_layer_ms.begin(), slowest)
+                  << " slowest_layer_ms=" << *slowest << '\n';
+    }
 
     GenerationResult result;
     result.prompt_tokens = prompt_tokens.size();

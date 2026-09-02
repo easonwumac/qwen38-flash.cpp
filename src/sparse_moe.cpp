@@ -841,6 +841,21 @@ MlxArray SparseMoe::forward_verify_impl(
 }
 
 MlxArray SparseMoe::forward_prefill(const MlxArray& input) const {
+    const char* profile = std::getenv("QWEN38_PROFILE_MOE_PREFILL");
+    if (layer_index_ == 0 && profile != nullptr && std::string_view(profile) == "1") {
+        MoePrefillTimings timings;
+        MlxArray output = forward_prefill_impl(input, &timings);
+        std::clog << "qwen38-moe-prefill-profile: rows=" << input.shape()[1]
+                  << " routing_ms=" << timings.routing_ms
+                  << " gate_qmm_ms=" << timings.gate_qmm_ms
+                  << " up_qmm_ms=" << timings.up_qmm_ms
+                  << " swiglu_ms=" << timings.swiglu_ms
+                  << " down_qmm_ms=" << timings.down_qmm_ms
+                  << " route_reduce_ms=" << timings.route_reduce_ms
+                  << " shared_ms=" << timings.shared_expert_ms
+                  << " merge_ms=" << timings.merge_ms << '\n';
+        return output;
+    }
     return forward_prefill_impl(input, nullptr);
 }
 
