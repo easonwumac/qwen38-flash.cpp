@@ -16,7 +16,7 @@ using namespace metal;
 )metal";
 
 inline constexpr std::string_view packed_attention = R"metal(
-    constexpr uint TILE = 16;
+    constexpr uint TILE = uint(TILE_SIZE);
     constexpr uint DIMS_PER_LANE = D / 32;
     constexpr uint QUERY_HEADS_PER_KV = HQ / HK;
     const uint tid = thread_position_in_threadgroup.x;

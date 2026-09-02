@@ -347,6 +347,14 @@ both candidate runs. Peak physical footprint was 39.8 GiB. The earlier packed
 QSA threshold remains the default because one prompt hash is not sufficient to
 establish broad numerical parity for the lower threshold.
 
+Packed QSA uses a 32-token Metal KV tile by default. Compared with the original
+16-token tile, a guarded one-layer 65,536-token QSA smoke reduced packed
+attention from 66.37 ms to 60.05 ms with dense/packed cosine 1.0. On the full
+65,560-token prompt above, the split superchunk plus the experimental 32K QSA
+threshold produced 466.02/442.49 tok/s with the retained first-token hash and a
+39.9 GiB peak physical footprint. Set `QWEN38_QSA_PACKED_TILE=16` for the
+diagnostic rollback.
+
 The native engine caps the MLX allocator cache at 256 MiB in serial as well as
 MTP mode. Before this bound covered serial inference, a 23,555-token request was
 stopped by the memory guard at 5.8 GiB available memory. With the common bound,

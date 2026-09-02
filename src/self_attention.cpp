@@ -578,7 +578,17 @@ MlxArray SelfAttention::packed_qsa_attention(
     const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
         {.name = "T", .value = query.dtype()},
     }};
-    const std::array<MlxMetalIntTemplate, 7> int_templates{{
+    int tile_size = 32;
+    if (const char* configured = std::getenv("QWEN38_QSA_PACKED_TILE");
+        configured != nullptr) {
+        char* end = nullptr;
+        const long parsed = std::strtol(configured, &end, 10);
+        if (end == configured || *end != '\0' || (parsed != 16 && parsed != 32)) {
+            throw std::runtime_error("QWEN38_QSA_PACKED_TILE must be 16 or 32");
+        }
+        tile_size = static_cast<int>(parsed);
+    }
+    const std::array<MlxMetalIntTemplate, 8> int_templates{{
         {.name = "R", .value = rows},
         {.name = "TOTAL", .value = key_shape[2]},
         {.name = "S", .value = selected},
@@ -586,6 +596,7 @@ MlxArray SelfAttention::packed_qsa_attention(
         {.name = "HK", .value = kv_heads},
         {.name = "D", .value = head_dimension},
         {.name = "TG", .value = thread_count},
+        {.name = "TILE_SIZE", .value = tile_size},
     }};
     const std::array<MlxMetalOutputSpec, 1> outputs{{
         {
