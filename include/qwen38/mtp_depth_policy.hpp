@@ -20,12 +20,14 @@ private:
     std::size_t depth_{0};
     bool probing_{false};
     bool monitoring_{false};
+    bool adaptive_four_{false};
     bool promotion_probation_complete_{false};
     std::size_t probe_rounds_{0};
     std::size_t probe_accepted_{0};
     std::size_t monitor_rounds_{0};
     std::size_t monitor_proposed_{0};
     std::size_t monitor_accepted_{0};
+    std::size_t monitor_fourth_accepted_{0};
     std::size_t monitor_losing_windows_{0};
     std::size_t promotions_{0};
     std::size_t demotions_{0};

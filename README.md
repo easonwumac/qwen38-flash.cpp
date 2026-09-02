@@ -215,6 +215,14 @@ disable history or `QWEN38_HISTORY_DRAFT=1` to force the legacy eager policy.
 The cache stores token IDs and suffix indices only, so its memory is tiny
 relative to model and KV residency even at long context.
 
+`QWEN38_MTP_ADAPTIVE_DEPTH4=1` is an experimental short-prompt policy. It
+starts at depth 4, then retains the fourth draft only when at least four of its
+first eight fourth-position proposals are accepted; otherwise it drops to the
+normal depth-3 monitor. Prompts over 2,048 tokens retain the normal depth-2
+capacity policy. This opt-in can materially accelerate highly predictable code
+but is not the default because low-acceptance prompts pay the initial probe and
+S=4 verification uses a different valid BF16 numerical mode.
+
 The retained high-acceptance MTP path has a standalone regression client and a
 memory-guarded launch recipe in [docs/mtp-benchmark.md](docs/mtp-benchmark.md).
 It checks per-length warm throughput, proposal acceptance, completion length,

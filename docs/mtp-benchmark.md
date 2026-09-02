@@ -93,3 +93,14 @@ zero, disabled history/prefix caches, and 40 GiB RSS/10 GiB availability guard.
 Peak physical footprint was 40.7 GiB. Fixed depth 4 remains an experiment:
 general prompts with lower fourth-position acceptance can lose throughput, so
 the next promotion gate is a mixed-domain adaptive-depth cohort.
+
+An opt-in adaptive policy now starts short prompts at depth 4 and checks the
+fourth position directly for eight rounds. On the retained fixture it kept
+depth 4 and reached 65.852/65.684 tok/s at 128 tokens (65.768 median) and
+66.893/66.804 at 256 (66.848 median), or about +2.1%/+0.5% versus retained auto.
+A one-sample 128-token mixed probe measured code 54.09 versus 43.23 tok/s
+(+25.1%), JSON 53.50 versus 54.22 (-1.3%), explanation 39.32 versus 39.90
+(-1.4%), and creative 38.64 versus 39.83 (-3.0%). Code, JSON, and creative
+output hashes matched their controls; explanation followed a different valid
+greedy path. This is evidence for an experimental switch, not a default-policy
+promotion or a broad quality claim.

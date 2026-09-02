@@ -11,7 +11,13 @@ constexpr std::size_t short_prompt_limit = 2048;
 constexpr std::size_t probe_round_limit = 8;
 constexpr std::size_t probe_accept_threshold = 10;
 constexpr std::size_t monitor_round_limit = 12;
+constexpr std::size_t depth_four_monitor_round_limit = 8;
 constexpr std::size_t promotion_probation_round_limit = 4;
+
+bool adaptive_depth_four_enabled() {
+    const char* value = std::getenv("QWEN38_MTP_ADAPTIVE_DEPTH4");
+    return value != nullptr && std::string_view(value) == "1";
+}
 
 bool early_demotion_enabled() {
     const char* value = std::getenv("QWEN38_MTP_EARLY_DEMOTION");
@@ -33,8 +39,14 @@ MtpDepthPolicy::MtpDepthPolicy(
         throw std::runtime_error("MTP policy depth must be 0 or between 2 and 4");
     }
     if (maximum_depth == 3) {
-        depth_ = 2;
-        probing_ = prompt_tokens <= short_prompt_limit;
+        adaptive_four_ = adaptive_depth_four_enabled();
+        if (adaptive_four_ && prompt_tokens <= short_prompt_limit) {
+            depth_ = 4;
+            monitoring_ = true;
+        } else {
+            depth_ = 2;
+            probing_ = prompt_tokens <= short_prompt_limit;
+        }
     }
 }
 
@@ -58,7 +70,25 @@ void MtpDepthPolicy::observe(
         }
         return;
     }
-    if (!monitoring_ || depth_ != 3 || !demotion_enabled()) return;
+    if (!monitoring_ || !demotion_enabled()) return;
+    if (adaptive_four_ && depth_ == 4) {
+        ++monitor_rounds_;
+        monitor_proposed_ += proposed;
+        monitor_accepted_ += accepted;
+        if (accepted >= 4) ++monitor_fourth_accepted_;
+        if (monitor_rounds_ == depth_four_monitor_round_limit) {
+            if (monitor_fourth_accepted_ * 2 < depth_four_monitor_round_limit) {
+                depth_ = 3;
+                ++demotions_;
+            }
+            monitor_rounds_ = 0;
+            monitor_proposed_ = 0;
+            monitor_accepted_ = 0;
+            monitor_fourth_accepted_ = 0;
+        }
+        return;
+    }
+    if (depth_ != 3) return;
     ++monitor_rounds_;
     monitor_proposed_ += proposed;
     monitor_accepted_ += accepted;

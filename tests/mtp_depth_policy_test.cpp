@@ -78,6 +78,23 @@ void run_mtp_depth_policy_tests() {
     qwen38::MtpDepthPolicy explicit_four(4, 100000);
     QWEN38_CHECK(explicit_four.depth() == 4);
 
+    setenv("QWEN38_MTP_ADAPTIVE_DEPTH4", "1", 1);
+    qwen38::MtpDepthPolicy adaptive_four(3, 32);
+    QWEN38_CHECK(adaptive_four.depth() == 4);
+    for (int round = 0; round < 4; ++round) adaptive_four.observe(4, 4);
+    for (int round = 0; round < 4; ++round) adaptive_four.observe(4, 2);
+    QWEN38_CHECK(adaptive_four.depth() == 4);
+
+    qwen38::MtpDepthPolicy adaptive_three(3, 32);
+    for (int round = 0; round < 3; ++round) adaptive_three.observe(4, 4);
+    for (int round = 0; round < 5; ++round) adaptive_three.observe(4, 3);
+    QWEN38_CHECK(adaptive_three.depth() == 3);
+    QWEN38_CHECK(adaptive_three.demotions() == 1);
+    qwen38::MtpDepthPolicy adaptive_long(3, 2049);
+    QWEN38_CHECK(adaptive_long.depth() == 2);
+    QWEN38_CHECK(!adaptive_long.probing());
+    unsetenv("QWEN38_MTP_ADAPTIVE_DEPTH4");
+
     QWEN38_CHECK(qwen38::should_fallback_mtp(2, 2, 2, 0));
     QWEN38_CHECK(qwen38::should_fallback_mtp(2, 2, 11, 10));
     QWEN38_CHECK(!qwen38::should_fallback_mtp(1, 2, 2, 0));
