@@ -299,7 +299,14 @@ The implementation order is deliberately narrow:
    speed at 512 rows with about 0.9958 output cosine. Cider's W4A8 path
    produced invalid near-zero cosine here and is excluded. Prototype W8A8 as
    a prefill-only GDN sidecar, retaining Q4 for decode; gate it on full-model
-   PP, next-token quality, and the roughly 1 GiB added resident-weight cost.
+   PP, next-token quality, and sidecar memory. Keeping all three INT8 banks
+   beside the Q4 decode banks costs 36 * (2560*10240 + 2560*6144 +
+   6144*2560) bytes, or 1.934 GiB before scales and runtime workspace. The
+   previous 1 GiB estimate confused replacing Q4 with retaining both banks.
+   The synthetic cosine above compares independently quantized Q4 and Q8
+   versions of random floating-point weights; it does not isolate the error
+   of requantizing the retained real Q4 model. That requires a real-weight
+   control and a full-model quality gate.
    This is derived from the MIT-licensed Cider design:
    https://github.com/Mininglamp-AI/cider.
 7. **Complete fused HC promotion.** The read-only port has an A/B/A win. Add
