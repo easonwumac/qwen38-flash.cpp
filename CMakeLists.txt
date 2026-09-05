@@ -126,6 +126,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     target_link_libraries(qwen38-w8a8-gdn-probe PRIVATE qwen38_mlx)
     set_target_properties(qwen38-w8a8-gdn-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-direct-q4-probe devtools/direct_q4_probe.cpp)
+    target_link_libraries(qwen38-direct-q4-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-direct-q4-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-gdn-w8a8-ab
         devtools/gdn_w8a8_ab.cpp
         devtools/w8a8_projection.cpp)

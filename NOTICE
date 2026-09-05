@@ -36,3 +36,6 @@ The developer W8A8 projection probe adapts Cider's per-token quantization and
 Metal 4 cooperative-tensor matrix kernels (Copyright 2026 Mininglamp
 contributors), licensed under MIT. The complete license is retained in
 `devtools/w8a8_gdn_probe_kernels.hpp`.
+
+The developer direct affine-Q4 probe adapts Cider's per-group INT8 MPP kernel
+under the same MIT license, retained in `devtools/direct_q4_kernels.hpp`.

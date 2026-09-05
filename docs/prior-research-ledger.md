@@ -271,6 +271,13 @@ directions. New code should build on them.
 
 ## High-upside work not yet ported
 
+2026-09-06 direct affine-Q4 MPP gate rejected: retaining packed Q4 and using
+group64 INT8 activations with original-input sums for affine bias required only
+1.40625 MiB scratch, but real layer0z M512 measured 0.974625 ms median versus
+native Q4 0.768166 ms (0.788x). Integer and semantic gates passed; cosine was
+0.999829. See `docs/direct-q4-probe.md`. No routed-MoE port or parameter sweep
+is justified by this negative dense gate. Default execution is unchanged.
+
 2026-09-06 complete decoder follow-up: adding HC and grouped top-10 MoE to
 the two-chunk layer-0 test reduced the W8 advantage to 1.023x for z+out and
 1.064x for all three GDN projections (15 alternating pairs, base affine Q4
