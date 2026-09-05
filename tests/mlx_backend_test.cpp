@@ -390,6 +390,7 @@ int main() {
         std::filesystem::temp_directory_path() /
         ("qwen38-prefix-cache-test-" + std::to_string(
             std::chrono::steady_clock::now().time_since_epoch().count()));
+    const std::array<std::uint32_t, 4> prompt_tokens{1, 2, 3, 4};
     {
         qwen38::PrefixCacheStore store(cache_path, 16ULL * 1024ULL * 1024ULL, 1);
         const std::array<std::uint32_t, 2> short_tokens{1, 2};
@@ -398,7 +399,17 @@ int main() {
         const std::array<std::uint32_t, 3> long_tokens{1, 2, 3};
         persisted.target.token_count = long_tokens.size();
         store.save(long_tokens, persisted);
-        const std::array<std::uint32_t, 4> prompt_tokens{1, 2, 3, 4};
+    }
+    {
+        // Reopen after destroying the writer store, then prove that a miss does
+        // not damage the persistent artifact needed by a later prefix hit.
+        qwen38::PrefixCacheStore store(cache_path, 16ULL * 1024ULL * 1024ULL, 1);
+        const std::array<std::uint32_t, 2> nonmatching_tokens{9, 9};
+        if (store.load_longest(nonmatching_tokens).has_value()) {
+            std::cerr << "SSD prefix-cache nonmatching lookup mismatch\n";
+            std::filesystem::remove_all(cache_path);
+            return 1;
+        }
         std::optional<qwen38::StoredPrefixState> cache_hit =
             store.load_longest(prompt_tokens);
         if (!cache_hit.has_value() ||

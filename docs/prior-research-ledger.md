@@ -271,6 +271,15 @@ directions. New code should build on them.
 
 ## High-upside work not yet ported
 
+2026-09-06 memory-lifetime change: when SSD prefix caching is enabled, an
+unmatched RAM prefix is released before disk lookup or replacement prefill.
+Matching RAM prefixes and RAM-only operation are unchanged. Persistent-store
+tests cover recreation, a nonmatching lookup, and subsequent longest-prefix
+state restoration. This removes a stale owner, but no full-model footprint or
+throughput improvement has yet been measured. If the previous SSD write failed
+or its entry was evicted, a later request may need to recompute the discarded
+prefix; inference arithmetic is unchanged.
+
 The implementation order is deliberately narrow:
 
 1. **Exact MTP model and lifecycle.** Load the Q8 sidecar, apply delta norms,
@@ -303,6 +312,9 @@ The implementation order is deliberately narrow:
    beside the Q4 decode banks costs 36 * (2560*10240 + 2560*6144 +
    6144*2560) bytes, or 1.934 GiB before scales and runtime workspace. The
    previous 1 GiB estimate confused replacing Q4 with retaining both banks.
+   The retained checkpoint header audit confirms 36 GDN layers; including
+   per-output FP32 scales, these three sidecar banks require 2,078,908,416
+   bytes (1.936 GiB), before activation/workspace allocations.
    The synthetic cosine above compares independently quantized Q4 and Q8
    versions of random floating-point weights; it does not isolate the error
    of requantizing the retained real Q4 model. That requires a real-weight

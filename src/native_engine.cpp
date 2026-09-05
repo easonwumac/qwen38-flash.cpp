@@ -361,6 +361,10 @@ GenerationResult NativeEngine::complete_impl(
     std::vector<double> prefill_layer_ms;
     if (ssd_prefix_cache_ != nullptr &&
         (prefix_cache_ == nullptr || !is_prefix(prefix_cache_->tokens, prefill_tokens))) {
+        // The SSD store is the fallback owner for nonmatching prefixes. Drop the
+        // stale RAM snapshot before loading or running a full prefill so its
+        // shared backing allocations do not overlap the replacement state.
+        prefix_cache_.reset();
         std::optional<StoredPrefixState> stored =
             ssd_prefix_cache_->load_longest(prefill_tokens);
         if (stored.has_value()) {
