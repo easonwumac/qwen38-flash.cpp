@@ -31,3 +31,8 @@ the same MIT license and attribution.
 
 The Qwen Sparse Attention indexer/cache contract was implemented with reference
 to mlx-serve under the same MIT license and attribution.
+
+The developer W8A8 projection probe adapts Cider's per-token quantization and
+Metal 4 cooperative-tensor matrix kernels (Copyright 2026 Mininglamp
+contributors), licensed under MIT. The complete license is retained in
+`devtools/w8a8_gdn_probe_kernels.hpp`.

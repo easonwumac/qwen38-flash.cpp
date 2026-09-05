@@ -271,6 +271,19 @@ directions. New code should build on them.
 
 ## High-upside work not yet ported
 
+2026-09-06 native MPP probe: the standalone C++/MLX-C developer path now
+performs per-token INT8 activation quantization, Metal 4 MPP GEMM and BF16
+output conversion. A real layer-0 `in_proj_z` Q4 tuple (6144x2560), with seeded
+synthetic BF16 activations at 512 rows, measured 0.768588 ms mean versus
+1.046917 ms for native Q4 (1.362x, 3 warmups and 10 alternating pairs).
+Cosine was 0.999878, maximum absolute error 0.086914, RMSE 0.004777; exact
+INT32 reference checks passed at 32 and 128 rows. The guarded process peaked
+at 0.4 GiB physical footprint. This is not a full-GDN or full-model quality
+or PP result, and requires 15.023 MiB of extra W8 weights/scales for this
+projection. W8 is derived from the retained dequantized Q4 tensor. Runtime
+defaults are unchanged; follow-up must use actual layer activations and
+measure the complete layer before wider deployment.
+
 2026-09-06 guard correction: available-memory estimates now sum textual
 `vm_stat` free, inactive and speculative pages without adding purgeable pages,
 which can overlap other queues. The command's free field already subtracts
