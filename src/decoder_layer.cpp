@@ -77,18 +77,21 @@ DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
 DecoderLayer::DecoderLayer(
     MlxTensorStore& tensors,
     const std::size_t layer_index,
-    const ModelConfig& config)
+    const ModelConfig& config,
+    GatedDeltaNetProjectionHook* projection_hook)
     : DecoderLayer(
           tensors,
           "language_model.model.layers." + std::to_string(layer_index),
           layer_index,
-          config) {}
+          config,
+          projection_hook) {}
 
 DecoderLayer::DecoderLayer(
     MlxTensorStore& tensors,
     std::string prefix,
     const std::size_t layer_index,
-    const ModelConfig& config)
+    const ModelConfig& config,
+    GatedDeltaNetProjectionHook* projection_hook)
     : layer_index_(layer_index),
       attention_hyper_connection_(
           tensors,
@@ -121,7 +124,7 @@ DecoderLayer::DecoderLayer(
     }
     if (config.layer_types[layer_index] == "linear_attention") {
         linear_attention_ = std::make_unique<GatedDeltaNet>(
-            tensors, prefix + ".linear_attn", config);
+            tensors, prefix + ".linear_attn", config, projection_hook);
     } else if (config.layer_types[layer_index] == "full_attention") {
         full_attention_ = std::make_unique<SelfAttention>(
             tensors, prefix + ".self_attn", config);

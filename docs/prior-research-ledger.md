@@ -271,6 +271,17 @@ directions. New code should build on them.
 
 ## High-upside work not yet ported
 
+2026-09-06 complete decoder follow-up: adding HC and grouped top-10 MoE to
+the two-chunk layer-0 test reduced the W8 advantage to 1.023x for z+out and
+1.064x for all three GDN projections (15 alternating pairs, base affine Q4
+full metadata, not turbo). Guard peak was 2.6 GiB. The selective arm preserved
+GDN state on identical inputs; both changed decoder outputs. See
+`docs/decoder-w8a8-ab.md`. Do not extrapolate the earlier 22% GDN-only result
+to whole-model PP or promote persistent W8 copies without measuring their
+roughly 1–2 GiB model-wide cost against this smaller benefit. The next
+memory-compatible research gate is packed affine-Q4 INT8 computation with
+bounded temporary tiles, not a persistent INT8 copy of all experts.
+
 2026-09-06 native MPP probe: the standalone C++/MLX-C developer path now
 performs per-token INT8 activation quantization, Metal 4 MPP GEMM and BF16
 output conversion. A real layer-0 `in_proj_z` Q4 tuple (6144x2560), with seeded

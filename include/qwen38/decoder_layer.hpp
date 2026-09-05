@@ -38,12 +38,17 @@ struct DecoderLayerTrace {
 
 class DecoderLayer final {
 public:
-    DecoderLayer(MlxTensorStore& tensors, std::size_t layer_index, const ModelConfig& config);
+    DecoderLayer(
+        MlxTensorStore& tensors,
+        std::size_t layer_index,
+        const ModelConfig& config,
+        GatedDeltaNetProjectionHook* projection_hook = nullptr);
     DecoderLayer(
         MlxTensorStore& tensors,
         std::string prefix,
         std::size_t layer_index,
-        const ModelConfig& config);
+        const ModelConfig& config,
+        GatedDeltaNetProjectionHook* projection_hook = nullptr);
     ~DecoderLayer();
 
     [[nodiscard]] MlxArray forward_decode(

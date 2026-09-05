@@ -132,6 +132,12 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     target_link_libraries(qwen38-gdn-w8a8-ab PRIVATE qwen38_mlx)
     set_target_properties(qwen38-gdn-w8a8-ab PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-decoder-w8a8-ab
+        devtools/decoder_w8a8_ab.cpp
+        devtools/w8a8_projection.cpp)
+    target_link_libraries(qwen38-decoder-w8a8-ab PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-decoder-w8a8-ab PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-embedding-smoke src/embedding_smoke.cpp)
     target_link_libraries(qwen38-embedding-smoke PRIVATE qwen38_mlx)
     set_target_properties(qwen38-embedding-smoke PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
