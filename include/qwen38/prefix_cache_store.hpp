@@ -25,7 +25,9 @@ public:
 
     [[nodiscard]] std::optional<StoredPrefixState> load_longest(
         std::span<const std::uint32_t> prompt_tokens);
-    void save(
+    // Returns false when the completed entry is immediately refused by the
+    // configured capacity limit. This is not an fsync durability guarantee.
+    bool save(
         std::span<const std::uint32_t> tokens,
         const PersistedPrefixState& state);
     void clear();

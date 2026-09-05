@@ -531,8 +531,25 @@ GenerationResult NativeEngine::complete_impl(
         });
         prefix_cache_changed = true;
         if (ssd_prefix_cache_ != nullptr) {
+            const auto cache_write_started = std::chrono::steady_clock::now();
             prompt_cache_tokens = prefix_cache_->tokens;
             prompt_cache_state.emplace(snapshot_prefix_cache(*prefix_cache_));
+            try {
+                if (ssd_prefix_cache_->save(prompt_cache_tokens, *prompt_cache_state)) {
+                    // The persistent copy now owns the prompt checkpoint. Drop
+                    // both shared RAM owners before decode so advancing live
+                    // state can release the old backing allocations.
+                    prefix_cache_.reset();
+                    prompt_cache_state.reset();
+                }
+            } catch (const std::exception& error) {
+                // Preserve the RAM checkpoint and the existing end-of-request
+                // retry path when persistence fails.
+                std::cerr << "SSD prompt prefix cache write failed: "
+                          << error.what() << '\n';
+            }
+            result.prompt_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - cache_write_started).count();
         }
     }
     result.tokens.reserve(max_tokens);

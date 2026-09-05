@@ -141,10 +141,10 @@ std::optional<StoredPrefixState> PrefixCacheStore::load_longest(
     }
 }
 
-void PrefixCacheStore::save(
+bool PrefixCacheStore::save(
     const std::span<const std::uint32_t> tokens,
     const PersistedPrefixState& state) {
-    if (tokens.empty()) return;
+    if (tokens.empty()) return false;
     if (state.target.token_count != tokens.size() ||
         state.target.layers.size() != model_layer_count_) {
         throw std::runtime_error("prefix token/state timeline mismatch");
@@ -166,6 +166,10 @@ void PrefixCacheStore::save(
         throw;
     }
     evict_to_limit();
+    std::error_code token_error;
+    std::error_code state_error;
+    return std::filesystem::is_regular_file(token_path, token_error) && !token_error &&
+        std::filesystem::is_regular_file(state_path, state_error) && !state_error;
 }
 
 void PrefixCacheStore::clear() {

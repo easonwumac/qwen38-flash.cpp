@@ -395,10 +395,16 @@ int main() {
         qwen38::PrefixCacheStore store(cache_path, 16ULL * 1024ULL * 1024ULL, 1);
         const std::array<std::uint32_t, 2> short_tokens{1, 2};
         persisted.target.token_count = short_tokens.size();
-        store.save(short_tokens, persisted);
+        if (!store.save(short_tokens, persisted)) {
+            std::cerr << "SSD prefix-cache unexpectedly refused short entry\n";
+            return 1;
+        }
         const std::array<std::uint32_t, 3> long_tokens{1, 2, 3};
         persisted.target.token_count = long_tokens.size();
-        store.save(long_tokens, persisted);
+        if (!store.save(long_tokens, persisted)) {
+            std::cerr << "SSD prefix-cache unexpectedly refused extended entry\n";
+            return 1;
+        }
     }
     {
         // Reopen after destroying the writer store, then prove that a miss does
@@ -429,6 +435,65 @@ int main() {
         }
     }
     std::filesystem::remove_all(cache_path);
+
+    const std::filesystem::path refused_cache_path =
+        std::filesystem::temp_directory_path() /
+        ("qwen38-prefix-cache-refusal-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+        qwen38::PrefixCacheStore store(refused_cache_path, 1, 1);
+        const std::array<std::uint32_t, 2> tokens{7, 8};
+        persisted.target.token_count = tokens.size();
+        if (store.save(std::span<const std::uint32_t>{}, persisted)) {
+            std::cerr << "SSD prefix-cache accepted empty token sequence\n";
+            std::filesystem::remove_all(refused_cache_path);
+            return 1;
+        }
+        if (store.save(tokens, persisted) || store.load_longest(tokens).has_value()) {
+            std::cerr << "SSD prefix-cache capacity refusal mismatch\n";
+            std::filesystem::remove_all(refused_cache_path);
+            return 1;
+        }
+    }
+    std::filesystem::remove_all(refused_cache_path);
+
+    const std::filesystem::path failed_cache_path =
+        std::filesystem::temp_directory_path() /
+        ("qwen38-prefix-cache-failure-test-" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()));
+    {
+        qwen38::PrefixCacheStore store(failed_cache_path, 16ULL * 1024ULL * 1024ULL, 1);
+        const std::array<std::uint32_t, 2> tokens{7, 8};
+        persisted.target.token_count = tokens.size();
+        if (!store.save(tokens, persisted)) {
+            std::cerr << "SSD prefix-cache failure fixture save failed\n";
+            std::filesystem::remove_all(failed_cache_path);
+            return 1;
+        }
+        std::filesystem::path token_path;
+        for (const auto& entry : std::filesystem::directory_iterator(failed_cache_path)) {
+            if (entry.path().extension() == ".tokens") token_path = entry.path();
+        }
+        if (token_path.empty()) {
+            std::cerr << "SSD prefix-cache failure fixture token file missing\n";
+            std::filesystem::remove_all(failed_cache_path);
+            return 1;
+        }
+        std::filesystem::remove(token_path);
+        std::filesystem::create_directory(token_path);
+        bool threw = false;
+        try {
+            static_cast<void>(store.save(tokens, persisted));
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        if (!threw) {
+            std::cerr << "SSD prefix-cache write failure was not reported\n";
+            std::filesystem::remove_all(failed_cache_path);
+            return 1;
+        }
+    }
+    std::filesystem::remove_all(failed_cache_path);
 
     qwen38::MtpTargetVerification verification{.draft_count = 2, .rows = {}};
     for (std::size_t index = 0; index < 3; ++index) {
