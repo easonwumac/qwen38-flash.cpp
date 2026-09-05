@@ -1,4 +1,5 @@
 #include "qwen38/model.hpp"
+#include "qwen38/token_embedding.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -242,13 +243,17 @@ MlxArray QwenModel::prefill_chunk_batch(
         }
     }
 
-    std::vector<MlxArray> streams;
-    streams.reserve(tokens.size());
-    for (const std::uint32_t token : tokens) {
-        streams.push_back(HyperConnection::initialize_stream(embed(token), stream_count_));
-    }
-    MlxArray stream_batch = concatenate_sequence_rows(streams);
-    streams.clear();
+    MlxArray stream_batch = HyperConnection::initialize_stream(
+        embed_token_batch(
+            embedding_.weight,
+            embedding_.scales,
+            embedding_.biases,
+            tokens,
+            vocabulary_size_,
+            hidden_size_,
+            group_size_,
+            bits_),
+        stream_count_);
     const std::size_t barrier_stride = prefill_barrier_stride();
     auto barrier_started = std::chrono::steady_clock::now();
     std::size_t barrier_begin = 0;

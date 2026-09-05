@@ -106,6 +106,7 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         src/prefix_cache_store.cpp
         src/self_attention.cpp
         src/sparse_moe.cpp
+        src/token_embedding.cpp
     )
     target_include_directories(qwen38_mlx PUBLIC include)
     target_include_directories(qwen38_mlx SYSTEM PUBLIC "${QWEN38_MLXC_HEADER}")
@@ -133,6 +134,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-direct-q4-probe devtools/direct_q4_probe.cpp)
     target_link_libraries(qwen38-direct-q4-probe PRIVATE qwen38_mlx)
     set_target_properties(qwen38-direct-q4-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    add_executable(qwen38-prefill-embedding-ab devtools/prefill_embedding_ab.cpp)
+    target_link_libraries(qwen38-prefill-embedding-ab PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-prefill-embedding-ab PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-gdn-w8a8-ab
         devtools/gdn_w8a8_ab.cpp

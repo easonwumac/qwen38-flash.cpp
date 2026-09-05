@@ -4,14 +4,17 @@
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/mtp_verifier.hpp"
 #include "qwen38/prefix_cache_store.hpp"
+#include "qwen38/token_embedding.hpp"
 
 #include "../src/gdn_metal_kernels.hpp"
 
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -68,6 +71,79 @@ int main() {
         expanded.mean_axis(0).to_float32() != std::vector<float>({1, 2, 3, 4})) {
         std::cerr << "MLX reshape/tile/mean mismatch\n";
         return 1;
+    }
+    {
+        constexpr int vocabulary = 4;
+        constexpr int hidden = 64;
+        std::vector<std::int32_t> packed_values(vocabulary * hidden / 8);
+        for (int token = 0; token < vocabulary; ++token) {
+            const std::int32_t packed_word =
+                static_cast<std::int32_t>(token + 1) * 0x11111111;
+            std::fill_n(packed_values.begin() + token * hidden / 8,
+                        hidden / 8, packed_word);
+        }
+        const std::array<int, 2> packed_shape{vocabulary, hidden / 8};
+        const auto packed = qwen38::MlxArray::from_int32(
+            packed_values, packed_shape).astype(MLX_UINT32);
+        const std::array<float, vocabulary> scale_values{0.125F, 0.25F, 0.5F, 1.0F};
+        const std::array<float, vocabulary> bias_values{0.25F, -0.5F, 1.0F, -1.25F};
+        const std::array<int, 2> qmeta_shape{vocabulary, 1};
+        const auto scales = qwen38::MlxArray::from_float32(
+            scale_values, qmeta_shape).astype(MLX_BFLOAT16);
+        const auto biases = qwen38::MlxArray::from_float32(
+            bias_values, qmeta_shape).astype(MLX_BFLOAT16);
+        for (const std::size_t width : {std::size_t{1}, std::size_t{128}, std::size_t{512}}) {
+            for (const bool diverse : {false, true}) {
+                std::vector<std::uint32_t> token_ids(width);
+                std::vector<float> expected(width * hidden);
+                for (std::size_t row = 0; row < width; ++row) {
+                    const std::uint32_t token = diverse
+                        ? static_cast<std::uint32_t>((row * 3 + 1) % vocabulary)
+                        : 2U;
+                    token_ids[row] = token;
+                    const float value = scale_values[token] * static_cast<float>(token + 1) +
+                                        bias_values[token];
+                    std::fill_n(expected.begin() + static_cast<std::ptrdiff_t>(row * hidden),
+                                hidden, value);
+                }
+                auto embedded = qwen38::embed_token_batch(
+                    packed, scales, biases, token_ids, vocabulary, hidden, 64, 4);
+                if (embedded.shape() !=
+                        std::vector<int>({1, static_cast<int>(width), hidden}) ||
+                    embedded.astype(MLX_FLOAT32).to_float32() != expected) {
+                    std::cerr << "batched token embedding mismatch at width " << width << '\n';
+                    return 1;
+                }
+            }
+        }
+        for (const std::uint32_t invalid : {4U, std::numeric_limits<std::uint32_t>::max()}) {
+            bool rejected = false;
+            try {
+                const std::array<std::uint32_t, 1> token_ids{invalid};
+                static_cast<void>(qwen38::embed_token_batch(
+                    packed, scales, biases, token_ids, vocabulary, hidden, 64, 4));
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            if (!rejected) {
+                std::cerr << "batched token embedding accepted invalid id\n";
+                return 1;
+            }
+        }
+        for (const std::size_t invalid_width : {std::size_t{0}, std::size_t{1025}}) {
+            bool rejected = false;
+            try {
+                const std::vector<std::uint32_t> token_ids(invalid_width, 0);
+                static_cast<void>(qwen38::embed_token_batch(
+                    packed, scales, biases, token_ids, vocabulary, hidden, 64, 4));
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            if (!rejected) {
+                std::cerr << "batched token embedding accepted invalid width\n";
+                return 1;
+            }
+        }
     }
     const auto transposed = left.transpose().to_float32();
     if (transposed != std::vector<float>({1, 3, 2, 4})) {
