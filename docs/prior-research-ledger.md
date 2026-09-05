@@ -271,6 +271,16 @@ directions. New code should build on them.
 
 ## High-upside work not yet ported
 
+2026-09-06 guard correction: available-memory estimates now sum textual
+`vm_stat` free, inactive and speculative pages without adding purgeable pages,
+which can overlap other queues. The command's free field already subtracts
+speculative pages, unlike the raw Mach counter. Historical availability figures
+used the older heuristic and are not directly comparable. Measurement failure
+for a live process now stops/reaps the benchmark (exit 77), including cleanup
+when process enumeration fails; normal exit races remain tolerated. Tests cover
+both measurement errors and the main shutdown path. Neither estimate guarantees
+allocatable memory; physical-footprint limits and conservative margins remain.
+
 2026-09-06 memory-lifetime change: when SSD prefix caching is enabled, an
 unmatched RAM prefix is released before disk lookup or replacement prefill.
 Matching RAM prefixes and RAM-only operation are unchanged. Persistent-store

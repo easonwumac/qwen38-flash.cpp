@@ -19,6 +19,11 @@ GIB = 1024**3
 RUSAGE_INFO_V4 = 4
 PHYS_FOOTPRINT_OFFSET = 72
 RUSAGE_BUFFER_SIZE = 1024
+MEASUREMENT_FAILURE_EXIT = 77
+
+
+class MeasurementError(RuntimeError):
+    """A safety-limit measurement failed while the guarded process was live."""
 
 
 def physical_footprint_bytes(pid: int) -> int:
@@ -49,9 +54,12 @@ def vm_pages() -> dict[str, int]:
 
 def available_gib() -> float:
     pages = vm_pages()
+    # This is a reclaimability heuristic, not an allocation guarantee. vm_stat's
+    # displayed free count excludes speculative pages, so add that disjoint queue.
+    # Purgeable pages can overlap the inactive queue and are therefore omitted.
     reclaimable = sum(
         pages.get(name, 0)
-        for name in ("Pages free", "Pages inactive", "Pages speculative", "Pages purgeable")
+        for name in ("Pages free", "Pages inactive", "Pages speculative")
     )
     return reclaimable * PAGE_SIZE / (1024**3)
 
@@ -82,29 +90,37 @@ def guarded_tree_rss_gib(root_pid: int) -> float:
         protected = guarded_pids(root_pid)
         total_kib = sum(rss for pid, _, _, rss in rows if pid in protected)
         return total_kib / (1024**2)
-    except (subprocess.CalledProcessError, ValueError, IndexError):
-        return 0.0
+    except (subprocess.CalledProcessError, ValueError, IndexError) as error:
+        raise MeasurementError("could not measure guarded process RSS") from error
 
 
 def guarded_tree_footprint_gib(root_pid: int) -> float:
     """Sum physical footprints for the guarded process tree."""
     try:
         protected = guarded_pids(root_pid)
-    except (subprocess.CalledProcessError, ValueError, IndexError):
-        protected = {root_pid}
+    except (subprocess.CalledProcessError, ValueError, IndexError) as error:
+        raise MeasurementError("could not enumerate guarded process tree") from error
     total_bytes = 0
     for pid in protected:
         try:
             total_bytes += physical_footprint_bytes(pid)
-        except (OSError, ProcessLookupError):
-            pass
+        except (OSError, ProcessLookupError) as error:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            raise MeasurementError(
+                f"could not measure physical footprint for live pid {pid}"
+            ) from error
     return total_bytes / GIB
 
 
 def stop_tree(pid: int) -> None:
     try:
         protected = guarded_pids(pid)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, OSError, ValueError, IndexError):
         protected = {pid}
     for child_pid in sorted(protected - {pid}, reverse=True):
         try:
@@ -193,9 +209,19 @@ def main() -> int:
                 child.wait()
                 report_peak()
                 return 128 + shutdown_signal
-            current_rss = guarded_tree_rss_gib(child.pid)
-            current_footprint = guarded_tree_footprint_gib(child.pid)
-            current_available = available_gib()
+            try:
+                current_rss = guarded_tree_rss_gib(child.pid)
+                current_footprint = guarded_tree_footprint_gib(child.pid)
+                current_available = available_gib()
+            except MeasurementError as error:
+                # A process can exit between poll() and measurement. That race is
+                # a normal completion, but a live process must never run unguarded.
+                if child.poll() is not None:
+                    break
+                print(f"memory_guard: measurement failed: {error}", file=sys.stderr)
+                stop_tree(child.pid)
+                child.wait()
+                return MEASUREMENT_FAILURE_EXIT
             peak_rss = max(peak_rss, current_rss)
             peak_footprint = max(peak_footprint, current_footprint)
             minimum_available = min(minimum_available, current_available)

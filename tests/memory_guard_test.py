@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "devtools"))
 import memory_guard  # noqa: E402
@@ -29,6 +30,106 @@ def process_exists(pid: int) -> bool:
 
 
 class MemoryGuardSignalTest(unittest.TestCase):
+    def test_main_stops_live_child_on_measurement_failure(self) -> None:
+        child = mock.Mock(pid=123, returncode=-signal.SIGTERM)
+        child.poll.side_effect = [None, None]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            sys,
+            "argv",
+            [
+                str(GUARD),
+                "--min-start-gib", "0",
+                "--lock-file", str(Path(directory) / "guard.lock"),
+                "--", "dummy",
+            ],
+        ), mock.patch.object(memory_guard, "available_gib", return_value=100), \
+             mock.patch.object(memory_guard.subprocess, "Popen", return_value=child), \
+             mock.patch.object(memory_guard.fcntl, "flock"), \
+             mock.patch("builtins.open", mock.mock_open()), \
+             mock.patch.object(
+                 memory_guard,
+                 "guarded_tree_rss_gib",
+                 side_effect=memory_guard.MeasurementError("failed"),
+             ), mock.patch.object(memory_guard, "stop_tree") as stop_tree:
+            self.assertEqual(memory_guard.main(), memory_guard.MEASUREMENT_FAILURE_EXIT)
+        stop_tree.assert_called_once_with(child.pid)
+        child.wait.assert_called_once_with()
+
+    def test_main_tolerates_measurement_failure_after_child_exit(self) -> None:
+        child = mock.Mock(pid=123, returncode=0)
+        child.poll.side_effect = [None, 0]
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            sys,
+            "argv",
+            [
+                str(GUARD),
+                "--min-start-gib", "0",
+                "--lock-file", str(Path(directory) / "guard.lock"),
+                "--", "dummy",
+            ],
+        ), mock.patch.object(memory_guard, "available_gib", return_value=100), \
+             mock.patch.object(memory_guard.subprocess, "Popen", return_value=child), \
+             mock.patch.object(memory_guard.fcntl, "flock"), \
+             mock.patch("builtins.open", mock.mock_open()), \
+             mock.patch.object(
+                 memory_guard,
+                 "guarded_tree_rss_gib",
+                 side_effect=memory_guard.MeasurementError("exited"),
+             ), mock.patch.object(memory_guard, "stop_tree") as stop_tree:
+            self.assertEqual(memory_guard.main(), 0)
+        stop_tree.assert_not_called()
+        child.wait.assert_not_called()
+
+    def test_available_excludes_overlapping_vm_counters(self) -> None:
+        pages = {
+            "Pages free": 10,
+            "Pages inactive": 20,
+            "Pages speculative": 30,
+            "Pages purgeable": 40,
+        }
+        with mock.patch.object(memory_guard, "vm_pages", return_value=pages), \
+             mock.patch.object(memory_guard, "PAGE_SIZE", 1024**3):
+            self.assertEqual(memory_guard.available_gib(), 60)
+
+    def test_rss_enumeration_failure_is_not_zero(self) -> None:
+        with mock.patch.object(
+            memory_guard,
+            "process_rows",
+            side_effect=subprocess.CalledProcessError(1, ["ps"]),
+        ):
+            with self.assertRaises(memory_guard.MeasurementError):
+                memory_guard.guarded_tree_rss_gib(os.getpid())
+
+    def test_live_footprint_failure_is_not_zero(self) -> None:
+        with mock.patch.object(memory_guard, "guarded_pids", return_value={os.getpid()}), \
+             mock.patch.object(
+                 memory_guard, "physical_footprint_bytes", side_effect=OSError("failed")
+             ):
+            with self.assertRaises(memory_guard.MeasurementError):
+                memory_guard.guarded_tree_footprint_gib(os.getpid())
+
+    def test_exited_pid_footprint_race_is_tolerated(self) -> None:
+        missing_pid = 2**30
+        with mock.patch.object(memory_guard, "guarded_pids", return_value={missing_pid}), \
+             mock.patch.object(
+                 memory_guard,
+                 "physical_footprint_bytes",
+                 side_effect=ProcessLookupError(),
+             ):
+            self.assertEqual(memory_guard.guarded_tree_footprint_gib(missing_pid), 0)
+
+    def test_stop_tree_falls_back_when_process_enumeration_fails(self) -> None:
+        with mock.patch.object(
+            memory_guard, "guarded_pids", side_effect=ValueError("invalid ps output")
+        ), mock.patch.object(memory_guard.os, "killpg") as killpg, mock.patch.object(
+            memory_guard.time, "sleep"
+        ):
+            memory_guard.stop_tree(123)
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(123, signal.SIGTERM), mock.call(123, signal.SIGKILL)],
+        )
+
     def test_physical_footprint_includes_current_process(self) -> None:
         self.assertGreater(memory_guard.physical_footprint_bytes(os.getpid()), 0)
 
