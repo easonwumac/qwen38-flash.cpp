@@ -128,7 +128,8 @@ std::shared_ptr<MlxMetalKernel> norm_gate_kernel() {
 GatedDeltaNet::GatedDeltaNet(
     MlxTensorStore& tensors,
     const std::string_view prefix,
-    const ModelConfig& config)
+    const ModelConfig& config,
+    GatedDeltaNetProjectionHook* projection_hook)
     : key_head_count_(config.linear_key_head_count),
       value_head_count_(config.linear_value_head_count),
       key_head_dimension_(config.linear_key_head_dimension),
@@ -138,6 +139,7 @@ GatedDeltaNet::GatedDeltaNet(
       group_size_(dimension(config.quantization_group_size, "quantization_group_size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       output_gate_type_(config.output_gate_type),
+      projection_hook_(projection_hook),
       qkv_projection_(load_projection(tensors, std::string(prefix) + ".in_proj_qkv")),
       z_projection_(load_projection(tensors, std::string(prefix) + ".in_proj_z")),
       beta_projection_(load_projection(tensors, std::string(prefix) + ".in_proj_b")),
@@ -164,6 +166,7 @@ GatedDeltaNet::QuantizedProjection GatedDeltaNet::load_projection(
     const std::string_view name) {
     const std::string base(name);
     return {
+        .name = base,
         .weight = tensors.tensor(base + ".weight"),
         .scales = tensors.tensor(base + ".scales"),
         .biases = tensors.tensor(base + ".biases"),
@@ -175,6 +178,18 @@ MlxArray GatedDeltaNet::project(
     const QuantizedProjection& projection) const {
     return MlxArray::quantized_matmul(
         input, projection.weight, projection.scales, projection.biases, group_size_, bits_);
+}
+
+MlxArray GatedDeltaNet::project_prefill(
+    const MlxArray& input,
+    const QuantizedProjection& projection) const {
+    if (projection_hook_ != nullptr) {
+        std::optional<MlxArray> overridden = projection_hook_->project_prefill(
+            input, projection.name, projection.weight, projection.scales,
+            projection.biases, group_size_, bits_);
+        if (overridden.has_value()) return std::move(*overridden);
+    }
+    return project(input, projection);
 }
 
 MlxArray GatedDeltaNet::forward_first(const MlxArray& input) const {
@@ -615,7 +630,7 @@ MlxArray GatedDeltaNet::forward_prefill(
     const int value_width = value_heads * value_dimension;
     const int convolution_width = 2 * key_width + value_width;
 
-    MlxArray qkv = project(input, qkv_projection_);
+    MlxArray qkv = project_prefill(input, qkv_projection_);
     MlxArray convolution_state = state.initialized
         ? state.convolution.share()
         : MlxArray::zeros(std::vector<int>{1, 3, convolution_width}, qkv.dtype());
@@ -651,8 +666,9 @@ MlxArray GatedDeltaNet::forward_prefill(
         key.rms_norm(ones, 1.0e-6F),
         scalar(1.0F / std::sqrt(static_cast<float>(key_head_dimension_)), key.dtype()));
 
-    MlxArray beta = project(input, beta_projection_).sigmoid();
-    MlxArray decay_input = MlxArray::add(project(input, decay_projection_), decay_bias_);
+    MlxArray beta = project_prefill(input, beta_projection_).sigmoid();
+    MlxArray decay_input = MlxArray::add(
+        project_prefill(input, decay_projection_), decay_bias_);
     MlxArray softplus = decay_input.astype(MLX_FLOAT32).exp().log1p();
     MlxArray decay_rate = decay_log_.astype(MLX_FLOAT32).exp();
     MlxArray decay = MlxArray::multiply(
@@ -692,11 +708,11 @@ MlxArray GatedDeltaNet::forward_prefill(
     state.initialized = true;
 
     MlxArray normalized = recurrence[0].rms_norm(norm_weight_, epsilon_);
-    MlxArray z = project(input, z_projection_).reshape(
+    MlxArray z = project_prefill(input, z_projection_).reshape(
         std::vector<int>{1, rows, value_heads, value_dimension});
     MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
     MlxArray gated = MlxArray::multiply(normalized, gate);
-    return project(
+    return project_prefill(
         gated.reshape(std::vector<int>{1, rows, value_width}),
         output_projection_);
 }

@@ -3,11 +3,26 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <vector>
 #include <string>
 #include <string_view>
 
 namespace qwen38 {
+
+class GatedDeltaNetProjectionHook {
+public:
+    virtual ~GatedDeltaNetProjectionHook() = default;
+    // Non-owning: the hook must outlive every GatedDeltaNet that receives it.
+    [[nodiscard]] virtual std::optional<MlxArray> project_prefill(
+        const MlxArray& input,
+        std::string_view name,
+        const MlxArray& weight,
+        const MlxArray& scales,
+        const MlxArray& biases,
+        int group_size,
+        int bits) = 0;
+};
 
 struct GatedDeltaNetState {
     MlxArray convolution;
@@ -25,7 +40,8 @@ public:
     GatedDeltaNet(
         MlxTensorStore& tensors,
         std::string_view prefix,
-        const ModelConfig& config);
+        const ModelConfig& config,
+        GatedDeltaNetProjectionHook* projection_hook = nullptr);
 
     // Correct first-token path with zero convolution and recurrent state.
     // Stateful decode and chunked prefill are added on top of this fixture.
@@ -44,6 +60,7 @@ public:
 
 private:
     struct QuantizedProjection {
+        std::string name;
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
@@ -53,6 +70,9 @@ private:
         MlxTensorStore& tensors,
         std::string_view name);
     [[nodiscard]] MlxArray project(
+        const MlxArray& input,
+        const QuantizedProjection& projection) const;
+    [[nodiscard]] MlxArray project_prefill(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
 
@@ -65,6 +85,7 @@ private:
     int group_size_;
     float epsilon_;
     std::string output_gate_type_;
+    GatedDeltaNetProjectionHook* projection_hook_;
     QuantizedProjection qkv_projection_;
     QuantizedProjection z_projection_;
     QuantizedProjection beta_projection_;
