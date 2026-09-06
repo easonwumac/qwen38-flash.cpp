@@ -105,8 +105,9 @@ void append_full(qwen38::SelfAttentionState& state, const std::size_t rows) {
     }
 }
 
-void check_advanced_state(const qwen38::PersistedPrefixState& state) {
-    const std::size_t expected_tokens = kPrompt + kSharedSteps;
+void check_advanced_state(const qwen38::PersistedPrefixState& state,
+                          const std::size_t steps, const std::size_t chunk) {
+    const std::size_t expected_tokens = kPrompt + steps * chunk;
     const auto bf16 = [](const float value) {
         const std::array<float, 1> data{value};
         const std::array<int, 1> shape{1};
@@ -137,12 +138,12 @@ void check_advanced_state(const qwen38::PersistedPrefixState& state) {
             if (full.token_count != expected_tokens || full.position_base != 0 ||
                 full.qsa_pooled_count != expected_tokens / 4)
                 throw std::runtime_error("advanced full-attention metadata mismatch");
-            check_array(full.keys, {1, 2, static_cast<int>(expected_tokens), 256}, 512);
-            check_array(full.values, {1, 2, static_cast<int>(expected_tokens), 256}, 512);
+            check_array(full.keys, {1, 2, static_cast<int>(expected_tokens), 256}, 512 * chunk);
+            check_array(full.values, {1, 2, static_cast<int>(expected_tokens), 256}, 512 * chunk);
             check_array(full.qsa_raw_keys,
-                        {1, static_cast<int>(expected_tokens), 128}, 128);
+                        {1, static_cast<int>(expected_tokens), 128}, 128 * chunk);
             check_array(full.qsa_pooled_keys,
-                        {1, static_cast<int>(expected_tokens / 4), 128}, 128);
+                        {1, static_cast<int>(expected_tokens / 4), 128}, 128 * (chunk == 1 ? 1 : chunk / 4));
         } else {
             const auto& gdn = current.linear_attention;
             if (!gdn.initialized) throw std::runtime_error("advanced GDN metadata mismatch");
@@ -155,11 +156,11 @@ void check_advanced_state(const qwen38::PersistedPrefixState& state) {
     if (mtp.token_count != expected_tokens || mtp.position_base != 0 ||
         mtp.qsa_pooled_count != expected_tokens / 4)
         throw std::runtime_error("advanced MTP metadata mismatch");
-    check_array(mtp.keys, {1, 2, static_cast<int>(expected_tokens), 256}, 512);
-    check_array(mtp.values, {1, 2, static_cast<int>(expected_tokens), 256}, 512);
-    check_array(mtp.qsa_raw_keys, {1, static_cast<int>(expected_tokens), 128}, 128);
+    check_array(mtp.keys, {1, 2, static_cast<int>(expected_tokens), 256}, 512 * chunk);
+    check_array(mtp.values, {1, 2, static_cast<int>(expected_tokens), 256}, 512 * chunk);
+    check_array(mtp.qsa_raw_keys, {1, static_cast<int>(expected_tokens), 128}, 128 * chunk);
     check_array(mtp.qsa_pooled_keys,
-                {1, static_cast<int>(expected_tokens / 4), 128}, 128);
+                {1, static_cast<int>(expected_tokens / 4), 128}, 128 * (chunk == 1 ? 1 : chunk / 4));
     if (!state.previous_target_stream)
         throw std::runtime_error("previous target stream missing");
     check_array(*state.previous_target_stream, {1, 1, 10240}, 10240);
@@ -281,13 +282,17 @@ void check_parity(const qwen38::PersistedPrefixState& left,
 
 int main(int argc, char** argv) {
     const std::string_view mode = argc == 2 ? argv[1] : "";
-    const bool shared = mode == "shared-baseline" || mode == "shared-release";
+    const bool extension = mode == "extension-baseline" || mode == "extension-release";
+    const bool shared = mode == "shared-baseline" || mode == "shared-release" || extension;
     if (argc != 2 || (mode != "baseline" && mode != "release" && !shared)) {
         std::cerr << "usage: qwen38-prefix-memory-probe "
-                     "baseline|release|shared-baseline|shared-release\n";
+                     "baseline|release|shared-baseline|shared-release|extension-baseline|extension-release\n";
         return 2;
     }
-    const bool release = mode == "release" || mode == "shared-release";
+    const bool release = mode == "release" || mode == "shared-release" || mode == "extension-release";
+    std::size_t previous_limit{};
+    if (mlx_set_memory_limit(&previous_limit, 3584ULL * 1024ULL * 1024ULL) != 0)
+        throw std::runtime_error("could not set probe allocation limit");
     static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
     std::cout << std::unitbuf;
     TempDir temporary;
@@ -297,7 +302,7 @@ int main(int argc, char** argv) {
     std::cout << "sample=prompt footprint=" << prompt_footprint << '\n';
     double save_ms = 0.0;
     double load_ms = 0.0;
-    if (release) {
+    if (release || extension) {
         const auto file = temporary.path / "prefix.safetensors";
         auto started = std::chrono::steady_clock::now();
         qwen38::save_prefix_state(file, prompt);
@@ -329,16 +334,18 @@ int main(int argc, char** argv) {
             prompt = qwen38::PersistedPrefixState(0);
             std::cout << "sample=released footprint=" << footprint() << '\n';
         }
-        for (std::size_t step = 0; step < kSharedSteps; ++step) {
+        const std::size_t chunk = extension ? 256 : 1;
+        const std::size_t steps = extension ? (kLive - kPrompt) / chunk : kSharedSteps;
+        for (std::size_t step = 0; step < steps; ++step) {
             const auto step_started = std::chrono::steady_clock::now();
-            advance_state(live, 1);
+            advance_state(live, chunk);
             std::cout << "sample=step" << (step + 1)
                       << " footprint=" << footprint()
                       << " step_ms=" << std::chrono::duration<double, std::milli>(
                              std::chrono::steady_clock::now() - step_started).count()
                       << '\n';
         }
-        check_advanced_state(live);
+        check_advanced_state(live, steps, chunk);
         std::cout << "mode=" << mode
                   << " live_logical_bytes=" << logical_bytes(live)
                   << " final_footprint=" << footprint()

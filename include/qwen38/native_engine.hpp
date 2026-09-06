@@ -74,6 +74,9 @@ private:
         std::optional<bool> mtp_profitable;
         std::optional<std::uint32_t> mtp_profitability_current_token;
         bool mtp_cumulative_profitability_keep{false};
+        // True only after a successful store/load of this exact checkpoint.
+        // Not serialized: a failed/refused save must preserve the RAM fallback.
+        bool ssd_backed{false};
     };
 
     NativeEngineOptions options_;
@@ -93,7 +96,7 @@ private:
         const TextDeltaCallback* on_delta);
     [[nodiscard]] PersistedPrefixState snapshot_prefix_cache(
         const PrefixCacheEntry& entry) const;
-    void persist_prefix_cache(const PrefixCacheEntry& entry) const;
+    bool persist_prefix_cache(const PrefixCacheEntry& entry) const;
 };
 
 // Owns the native engine on one dedicated thread. Recent MLX releases bind

@@ -381,6 +381,7 @@ GenerationResult NativeEngine::complete_impl(
                     persistent.mtp_profitability_current_token,
                 .mtp_cumulative_profitability_keep =
                     persistent.mtp_cumulative_profitability_keep,
+                .ssd_backed = true,
             });
         }
     }
@@ -405,6 +406,15 @@ GenerationResult NativeEngine::complete_impl(
             cached_mtp_profitability = prefix_cache_->mtp_profitable;
             cached_mtp_cumulative_keep =
                 prefix_cache_->mtp_cumulative_profitability_keep;
+        }
+        if (ssd_prefix_cache_ != nullptr && prefix_cache_->ssd_backed &&
+            prefill_offset < prefill_rows) {
+            // The live snapshots above own everything needed for continuation.
+            // Keeping this old checkpoint through extension pins the old KV
+            // backing allocations. Its SSD copy remains available for retry;
+            // no extra save/load or change to the compute path is necessary.
+            // Exact hits retain their existing profitability/cache behavior.
+            prefix_cache_.reset();
         }
     }
     const auto consume_target_batch = [&](
@@ -882,7 +892,8 @@ GenerationResult NativeEngine::complete_impl(
             if (prefix_cache_ != nullptr &&
                 (!prompt_cache_state.has_value() ||
                     prefix_cache_->tokens != prompt_cache_tokens)) {
-                persist_prefix_cache(*prefix_cache_);
+                prefix_cache_->ssd_backed = false;
+                prefix_cache_->ssd_backed = persist_prefix_cache(*prefix_cache_);
             }
         } catch (const std::exception& error) {
             std::cerr << "SSD prefix cache write failed: " << error.what() << '\n';
@@ -915,10 +926,10 @@ PersistedPrefixState NativeEngine::snapshot_prefix_cache(
     return persistent;
 }
 
-void NativeEngine::persist_prefix_cache(const PrefixCacheEntry& entry) const {
-    if (ssd_prefix_cache_ == nullptr) return;
+bool NativeEngine::persist_prefix_cache(const PrefixCacheEntry& entry) const {
+    if (ssd_prefix_cache_ == nullptr) return false;
     const PersistedPrefixState persistent = snapshot_prefix_cache(entry);
-    ssd_prefix_cache_->save(entry.tokens, persistent);
+    return ssd_prefix_cache_->save(entry.tokens, persistent);
 }
 
 void NativeEngine::clear_cache() {
