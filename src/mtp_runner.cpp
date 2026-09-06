@@ -15,9 +15,25 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#ifdef QWEN38_MTP_MEMORY_RESEARCH
+#include <iostream>
+#endif
 
 namespace qwen38 {
 namespace {
+
+#ifdef QWEN38_MTP_MEMORY_RESEARCH
+void trace_mtp_memory(const char* phase) {
+    std::size_t active{}, cache{}, peak{};
+    if (mlx_get_active_memory(&active) || mlx_get_cache_memory(&cache) ||
+        mlx_get_peak_memory(&peak)) throw std::runtime_error("MTP memory query failed");
+    std::cerr << "[mtp-memory] " << phase << " active=" << active
+              << " cache=" << cache << " peak=" << peak << '\n';
+}
+#define QWEN38_TRACE_MTP_MEMORY(phase) trace_mtp_memory(phase)
+#else
+#define QWEN38_TRACE_MTP_MEMORY(phase) ((void)0)
+#endif
 
 std::atomic<std::uint64_t> next_calibration_request{
     static_cast<std::uint64_t>(
@@ -235,8 +251,10 @@ MtpRoundStep finish_greedy_mtp_round(
     // uncommitted speculative position.
     const auto verify_started = std::chrono::steady_clock::now();
     head_state = std::move(head_origin);
+    QWEN38_TRACE_MTP_MEMORY("restored_head");
     MtpTargetVerification verification = verify_mtp_target_layer_major_reference(
         target, current_token, drafts, target_state);
+    QWEN38_TRACE_MTP_MEMORY("verified_target");
     const double verify_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - verify_started).count();
     std::vector<std::uint32_t> target_rows;
@@ -302,7 +320,9 @@ MtpRoundStep finish_greedy_mtp_round(
     }
     commit_mtp_target_verification(
         std::move(verification), decision.accepted, target_state);
+    QWEN38_TRACE_MTP_MEMORY("committed");
     target.materialize_speculative_state(target_state);
+    QWEN38_TRACE_MTP_MEMORY("materialized");
     const std::size_t next_query_position = query_position + decision.accepted + 1;
     if (target_state.token_count != next_query_position) {
         throw std::runtime_error("MTP committed target length mismatch");
@@ -354,6 +374,7 @@ MtpRoundStep run_greedy_mtp_round_reference(
         throw std::runtime_error("MTP draft depth must be between 2 and 4");
     }
     MtpDecodeState head_origin = head.snapshot_state(head_state);
+    QWEN38_TRACE_MTP_MEMORY("before_draft");
     const auto draft_started = std::chrono::steady_clock::now();
     std::vector<std::uint32_t> drafts;
     std::vector<std::uint32_t> secondary_drafts;
@@ -384,6 +405,7 @@ MtpRoundStep run_greedy_mtp_round_reference(
     }
     const double draft_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - draft_started).count();
+    QWEN38_TRACE_MTP_MEMORY("after_draft");
     return finish_greedy_mtp_round(
         target, head, current_token, previous_target_stream, query_position,
         std::move(drafts), std::move(secondary_drafts), std::move(draft_hidden_rows), draft_ms,

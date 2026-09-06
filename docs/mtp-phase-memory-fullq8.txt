@@ -1,0 +1,37 @@
+[phase] loading target and MTP head
+[memory] constructed active=12801513256 cache=6 peak=12801513256 footprint=12886697464
+[phase] bootstrap decode
+[qmeta] compact 16-bit routed MoE engaged: rows=1 topk=10
+[memory] bootstrap_before_release active=38995615756 cache=11698376 peak=38995770594 footprint=39147335592
+[memory] bootstrap_after_release active=38995107852 cache=12206280 peak=38995770594 footprint=39147335592
+[phase] serial greedy oracle
+[memory] serial_before_release active=39067014552 cache=23006612 peak=39088866954 footprint=39228026840
+[memory] serial_after_release active=39006580750 cache=83440414 peak=39088866954 footprint=39228026840
+[memory] serial_after_cache_clear active=39006580750 cache=0 peak=39088866954 footprint=39225651160
+[phase] MTP rounds
+[memory] mtp_before_round active=39006580750 cache=0 peak=39088866954 footprint=39225569240
+[mtp-memory] before_draft active=39006580750 cache=0 peak=39088866954
+[mtp-memory] after_draft active=40608043030 cache=1740218 peak=40609510096
+[mtp-memory] restored_head active=40608032790 cache=1750458 peak=40609510096
+[mtp-memory] verified_target active=40675189268 cache=5727164 peak=40677621820
+[mtp-memory] committed active=40614222702 cache=66693730 peak=40677621820
+[mtp-memory] materialized active=40614222702 cache=66693730 peak=40677621820
+[memory] mtp_after_round active=40614222702 cache=66693730 peak=40677621820 footprint=40821666856
+[memory] mtp_before_round active=40614189934 cache=0 peak=40677621820 footprint=40819881000
+[mtp-memory] before_draft active=40614189934 cache=0 peak=40677621820
+[mtp-memory] after_draft active=40614197358 cache=1960632 peak=40677621820
+[mtp-memory] restored_head active=40614189934 cache=1968056 peak=40677621820
+[mtp-memory] verified_target active=40677527912 cache=11542432 peak=40685560196
+[mtp-memory] committed active=40614284572 cache=74785772 peak=40685560196
+[mtp-memory] materialized active=40614284572 cache=74785772 peak=40685560196
+[memory] mtp_after_round active=40614284572 cache=74785772 peak=40685560196 footprint=40829924392
+[memory] mtp_before_round active=40614284572 cache=0 peak=40685560196 footprint=40827024424
+[mtp-memory] before_draft active=40614284572 cache=0 peak=40685560196
+[mtp-memory] after_draft active=40614750486 cache=1568004 peak=40685560196
+[mtp-memory] restored_head active=40614732566 cache=1585924 peak=40685560196
+[mtp-memory] verified_target active=40676162990 cache=12810274 peak=40685777676
+[mtp-memory] committed active=40614389500 cache=74583764 peak=40685777676
+[mtp-memory] materialized active=40614389500 cache=74583764 peak=40685777676
+[memory] mtp_after_round active=40614389500 cache=74583764 peak=40685777676 footprint=40829908008
+{"tokens_checked":4,"rounds":3,"accepted":2,"serial_ms":1473.79,"serial_tps":2.7141,"mtp_ms":430.928,"mtp_emitted":5,"mtp_tps":11.6029,"tokens":[271,40,599,264],"serial_parity":true}
+memory_guard: peak_footprint=38.0 GiB peak_rss=35.4 GiB minimum_available=10.2 GiB
