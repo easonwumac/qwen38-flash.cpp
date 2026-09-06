@@ -1312,8 +1312,12 @@ MlxArray SparseMoe::forward_prefill_impl(
         timings->up_qmm_ms = elapsed_ms(up_started);
     }
     const auto swiglu_started = Clock::now();
-    MlxArray gate = raw_gate.silu();
-    MlxArray expert_hidden = MlxArray::multiply(gate, up);
+    const char* swiglu_candidate = std::getenv("QWEN38_PP_SWIGLU");
+    MlxArray expert_hidden = swiglu_candidate != nullptr &&
+        std::string_view(swiglu_candidate) == "1" && raw_gate.dtype() == MLX_BFLOAT16 &&
+        up.dtype() == MLX_BFLOAT16
+        ? pp_swiglu(raw_gate, up)
+        : MlxArray::multiply(raw_gate.silu(), up);
     if (timings != nullptr) {
         expert_hidden.eval();
         timings->swiglu_ms = elapsed_ms(swiglu_started);

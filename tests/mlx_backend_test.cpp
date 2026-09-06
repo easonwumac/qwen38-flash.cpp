@@ -41,6 +41,11 @@ int main() {
             std::array<int, 3>{1, rows, topk}).astype(MLX_BFLOAT16);
         const auto order = qwen38::MlxArray::from_int32(permutation,
             std::array<int, 1>{slots});
+        if (qwen38::MlxArray::multiply(down.silu(), down).astype(MLX_FLOAT32).to_float32() !=
+            qwen38::pp_swiglu(down, down).astype(MLX_FLOAT32).to_float32()) {
+            std::cerr << "PP SwiGLU differs from stock BF16 output\n";
+            return 1;
+        }
         const auto reference = qwen38::MlxArray::multiply(
             qwen38::MlxArray::take_axis(down, order, 0).reshape(
                 std::array<int, 4>{1, rows, topk, hidden}),

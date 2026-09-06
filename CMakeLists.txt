@@ -130,6 +130,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-prefix-memory-probe devtools/prefix_memory_probe.cpp)
     target_link_libraries(qwen38-prefix-memory-probe PRIVATE qwen38_mlx)
     add_executable(qwen38-pp-reduce-layer-ab devtools/pp_reduce_layer_ab.cpp)
+    add_executable(qwen38-pp-reduce-group-probe devtools/pp_reduce_group_probe.cpp)
+    target_link_libraries(qwen38-pp-reduce-group-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-pp-reduce-group-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     target_link_libraries(qwen38-pp-reduce-layer-ab PRIVATE qwen38_mlx)
     set_target_properties(qwen38-pp-reduce-layer-ab PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
