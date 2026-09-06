@@ -5,7 +5,7 @@ It does not change model loading or production MoE execution and never asks
 MLX to load a complete projection or a complete shard tensor.
 
 The probe opens only the layer-0 safetensors header and obtains CPU views from
-`SafetensorsFile`. For expert ID 1, IDs 1–8 and IDs 1–10 it imports a page-aligned U8
+`SafetensorsFile`. For cumulative expert ranges U1, U8 and U10 it imports a page-aligned U8
 window around each selected gate/up/down weight, scale, and bias range, then
 uses an MLX U8 slice for the exact expert bytes. This keeps every managed raw
 pointer page-aligned while still exercising the real byte geometry. The probe
@@ -52,7 +52,7 @@ hardware. A copy result is a supported fallback, not a failed correctness
 case. No conclusion about production zero-copy paging follows without this
 probe's result on the target machine.
 
-## Verified result
+## Initial byte-read result (a8b1611)
 
 The retained layer-0 Q4/group-64 geometry has 819,200 weight bytes per expert
 per projection, plus BF16 scales/biases. On Apple M5 Pro / 64 GiB / macOS 26.5
@@ -78,10 +78,46 @@ failure is fatal rather than silently treated as zero.
 
 Limitations: the two layer-0 shard filenames are specific to the retained
 131-shard pack. Alignment windows at tensor boundaries are deliberately
-rejected. The copy fallback was not exercised on this hardware. There is no
-quantized MoE computation, real routing, cold-SSD benchmark or full-model run
-yet. This validates a managed GPU-readable region primitive, not 30 GiB
+rejected. The managed-import copy fallback was not exercised on this hardware.
+There is no routed MoE computation, real routing, cold-SSD benchmark or full-model
+run yet. This validates a managed GPU-readable region primitive, not 30 GiB
 inference or preservation of decode/PP performance.
+
+## Typed Q4 computation and alignment correction
+
+The next test caught a real integration hazard: the retained layer-0 payload
+starts at byte 845 in the shard. Expert weight/scales/biases therefore have an
+odd byte offset (the tested addresses were 13 modulo 16). U8 window equality
+passes, but viewing that same address as U32/BF16 and sending it directly to
+stock QMM produced NaNs and incorrect outputs. Copied input bytes were identical
+and the copied QMM outputs were finite. The pinned MLX `View` shares contiguous
+buffers without checking typed-pointer alignment; `Slice` and `Reshape` retain
+the offset. Consequently, byte-readable aliasing is **not** typed-QMM eligibility.
+
+The probe now conservatively requires 16-byte alignment for direct typed views.
+Misaligned expert slices are copied by a small U8 Metal kernel into a new aligned
+MLX allocation, then viewed/reshaped as U32/BF16. Only exact expert bytes are
+staged, never a whole projection. `mlx_copy` was tested and rejected as a means
+to force alignment: it is a logical copy that can still share the odd-offset
+backing. The explicit byte kernel verifies both a new address and alignment.
+The reference independently copies CPU oracle bytes into an aligned U8 array
+before viewing them; it never dereferences an odd CPU pointer as U32/BF16.
+
+For each selected expert's gate/up/down projection, BF16 inputs with deterministic
+signed values exercise rows 1, 4 and 32. The checks cover input byte equality,
+output shape/dtype, finite results on both paths and exact BF16 output bits.
+No tolerance was relaxed to obtain a pass. Each round passes 171 QMM comparisons;
+three rounds pass 513 comparisons. Every tested typed projection required staging
+(`typed_aliased=0`, `typed_staged=171` per round), although all 171 raw byte
+windows still alias their mappings.
+
+On the same M5 Pro / 64 GiB system, the corrected three-round run reached about
+56 MiB peak MLX active and 159 MiB lifetime peak physical footprint. Each round
+returned MLX active/cache to 0/0; process footprint settled at 133–134 MiB.
+These figures include copied validation oracles. They are not a production cache
+budget or throughput measurement. Routed MoE reductions and cache eviction are
+the next gates. An aligned on-disk repack could remove this particular staging
+copy, but no weights were repacked or modified in this experiment.
 
 Verification: fresh developer-target build and coordinator full build passed
 with two compiler jobs. CTest: core, memory guard and MLX tests passed;

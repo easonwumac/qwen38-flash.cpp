@@ -74,6 +74,14 @@ actual byte hits and reads on diverse prompts before predicting throughput.
   established. Then increase context and enable MTP separately. Record RSS,
   physical footprint, MLX active/cache bytes, page-ins, swaps, PP and decode.
 
+Typed projection gate now passes after a correction: this retained pack's odd
+payload offset cannot feed stock U32/BF16 QMM directly. Exact expert U8 bytes
+must first be copied into aligned GPU staging buffers. The probe checks this
+address requirement and exact BF16 projection outputs; see
+[managed expert-region results](managed-expert-region.md). Budget both imported
+window and staging buffer while their GPU work overlaps. Do not equate the raw
+window alias counter with zero-copy inference.
+
 No full-model launch is justified by the import probe alone. The 30 GiB process
 budget needs a measured reserve outside MLX; polling guards are a secondary
 stop mechanism, not an allocation-time guarantee.

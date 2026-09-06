@@ -1,4 +1,5 @@
 #include "qwen38/safetensors.hpp"
+#include "qwen38/mlx_backend.hpp"
 
 #include <mlx/c/mlx.h>
 #include <libproc.h>
@@ -7,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -314,6 +316,198 @@ int mlx_dimension(const std::size_t value, const std::string_view label) {
     return static_cast<int>(value);
 }
 
+struct ArrayHandle {
+    mlx_array value{};
+    ~ArrayHandle() {
+        if (value.ctx != nullptr) static_cast<void>(mlx_array_free(value));
+    }
+    ArrayHandle() = default;
+    ArrayHandle(const ArrayHandle&) = delete;
+    ArrayHandle& operator=(const ArrayHandle&) = delete;
+};
+
+struct StreamHandle {
+    mlx_stream value{gpu_stream()};
+    ~StreamHandle() { static_cast<void>(mlx_stream_free(value)); }
+};
+
+struct TypedStats {
+    std::size_t aliased{0};
+    std::size_t staged{0};
+};
+
+qwen38::MlxArray align_expert_bytes(qwen38::MlxArray input, const int bytes) {
+    // mlx_copy is a logical copy and may share its input. A small explicit
+    // byte kernel guarantees a newly allocated, aligned output buffer.
+    static const std::array<const char*, 1> names{"input_bytes"};
+    static const qwen38::MlxMetalKernel kernel(
+        "qwen38_expert_align_bytes", names, "output_bytes",
+        "uint i = thread_position_in_grid.x; output_bytes[i] = input_bytes[i];");
+    const std::array<const qwen38::MlxArray*, 1> inputs{&input};
+    return kernel.apply(inputs, std::vector<int>{bytes}, MLX_UINT8,
+                        std::array<int, 3>{bytes, 1, 1}, std::array<int, 3>{256, 1, 1});
+}
+
+qwen38::MlxArray typed_expert(
+    const Imported& window,
+    const qwen38::TensorView& tensor,
+    const std::size_t expert,
+    const bool copied,
+    TypedStats* stats = nullptr) {
+    const Window geometry = page_window(tensor, expert);
+    const std::size_t bytes = tensor.bytes.size() / tensor.shape[0];
+    const std::vector<int> shape{
+        mlx_dimension(tensor.shape[1], "expert rows"),
+        mlx_dimension(tensor.shape[2], "expert columns"),
+    };
+    if (geometry.delta > window.oracle.size() ||
+        bytes > window.oracle.size() - geometry.delta) {
+        throw std::runtime_error("typed expert exceeds independent oracle");
+    }
+    const int start = mlx_dimension(geometry.delta, "typed slice start");
+    const int stop = mlx_dimension(geometry.delta + bytes, "typed slice end");
+    const int stride = 1;
+    StreamHandle stream;
+    ArrayHandle sliced;
+    ArrayHandle aligned;
+    ArrayHandle typed;
+    const auto* base = static_cast<const std::byte*>(array_data(window.value, MLX_UINT8));
+    if (base == nullptr) throw std::runtime_error("typed expert source data unavailable");
+    const auto* source = base + geometry.delta;
+    // Raw safetensors payloads need not be naturally aligned. Byte reads are
+    // valid there, but stock typed QMM kernels are not. Stage exact U8 bytes
+    // BEFORE viewing them as U32/BF16, never cast an odd host pointer either.
+    const bool needs_staging = reinterpret_cast<std::uintptr_t>(source) % 16 != 0;
+    if (copied) {
+        const int byte_count = mlx_dimension(bytes, "oracle byte count");
+        aligned.value = mlx_array_new_data(
+            window.oracle.data() + geometry.delta, &byte_count, 1, MLX_UINT8);
+        if (aligned.value.ctx == nullptr) throw std::runtime_error("copied QMM oracle allocation failed");
+    } else {
+        check(mlx_slice(&sliced.value, window.value, &start, 1, &stop, 1, &stride, 1,
+                        stream.value), "typed expert byte slice");
+        if (needs_staging) {
+            auto staged = align_expert_bytes(
+                qwen38::MlxArray(std::exchange(sliced.value, mlx_array{})),
+                mlx_dimension(bytes, "aligned byte count"));
+            check(mlx_array_set(&aligned.value, staged.get()), "retain aligned expert bytes");
+        }
+    }
+    const mlx_array byte_array = copied || needs_staging ? aligned.value : sliced.value;
+    check(mlx_view(&typed.value, byte_array, dtype(tensor.dtype), stream.value),
+          "reinterpret expert bytes");
+    qwen38::MlxArray result(std::exchange(typed.value, mlx_array{}));
+    result = result.reshape(shape);
+    result.eval();
+    check(mlx_synchronize(stream.value), "typed view completion");
+    const void* actual = array_data(result.get(), dtype(tensor.dtype));
+    if (reinterpret_cast<std::uintptr_t>(actual) % 16 != 0 ||
+        (!copied && !needs_staging && actual != source) ||
+        ((copied || needs_staging) && actual == source)) {
+        throw std::runtime_error("typed expert alignment/ownership assertion failed");
+    }
+    if (!copied && stats != nullptr) {
+        if (needs_staging) ++stats->staged;
+        else ++stats->aliased;
+    }
+    return result;
+}
+
+void verify_projection_qmm(
+    const Projection& projection,
+    const std::size_t expert,
+    const Imported& weight_window,
+    const Imported& scale_window,
+    const Imported& bias_window,
+    TypedStats& stats) {
+    if (projection.weight.dtype != "U32" || projection.scales.dtype != "BF16" ||
+        projection.biases.dtype != "BF16" ||
+        projection.weight.shape[1] != projection.scales.shape[1] ||
+        projection.scales.shape[1] != projection.biases.shape[1] ||
+        projection.scales.shape[2] != projection.biases.shape[2] ||
+        projection.weight.shape[2] / 8 != projection.scales.shape[2] ||
+        projection.weight.shape[2] % 8 != 0) {
+        throw std::runtime_error("QMM probe requires affine Q4/group64 geometry");
+    }
+    auto mapped_weight = typed_expert(weight_window, projection.weight, expert, false, &stats);
+    auto mapped_scales = typed_expert(scale_window, projection.scales, expert, false, &stats);
+    auto mapped_biases = typed_expert(bias_window, projection.biases, expert, false, &stats);
+    auto copied_weight = typed_expert(weight_window, projection.weight, expert, true);
+    auto copied_scales = typed_expert(scale_window, projection.scales, expert, true);
+    auto copied_biases = typed_expert(bias_window, projection.biases, expert, true);
+    const auto check_inputs = [](const qwen38::MlxArray& mapped,
+                                 const qwen38::MlxArray& copied) {
+        mapped.eval();
+        copied.eval();
+        synchronize_gpu();
+        const std::size_t bytes = mlx_array_nbytes(mapped.get());
+        if (bytes != mlx_array_nbytes(copied.get()) ||
+            std::memcmp(array_data(mapped.get(), mapped.dtype()),
+                        array_data(copied.get(), copied.dtype()), bytes) != 0) {
+            throw std::runtime_error("typed QMM source bytes differ before computation");
+        }
+    };
+    check_inputs(mapped_weight, copied_weight);
+    check_inputs(mapped_scales, copied_scales);
+    check_inputs(mapped_biases, copied_biases);
+    const int width = mlx_dimension(projection.scales.shape[2] * 64, "QMM width");
+    for (const int rows : {1, 4, 32}) {
+        std::vector<float> input(static_cast<std::size_t>(rows) * width);
+        for (std::size_t i = 0; i < input.size(); ++i) {
+            input[i] = static_cast<float>(static_cast<int>((i * 17 + expert * 13) % 127) - 63)
+                / 64.0F;
+        }
+        const auto x = qwen38::MlxArray::from_float32(
+            input, std::vector<int>{rows, width}).astype(MLX_BFLOAT16);
+        auto mapped = qwen38::MlxArray::quantized_matmul(
+            x, mapped_weight, mapped_scales, mapped_biases, 64, 4);
+        auto copied = qwen38::MlxArray::quantized_matmul(
+            x, copied_weight, copied_scales, copied_biases, 64, 4);
+        const auto mapped_values = mapped.astype(MLX_FLOAT32).to_float32();
+        const auto copied_values = copied.astype(MLX_FLOAT32).to_float32();
+        synchronize_gpu();
+        const std::size_t expected = static_cast<std::size_t>(rows) * projection.weight.shape[1];
+        if (mapped.dtype() != MLX_BFLOAT16 || copied.dtype() != MLX_BFLOAT16 ||
+            mapped.shape() != std::vector<int>{rows, mlx_dimension(projection.weight.shape[1], "QMM outputs")} ||
+            mapped.shape() != copied.shape() ||
+            mapped_values.size() != expected || copied_values.size() != expected ||
+            !std::all_of(mapped_values.begin(), mapped_values.end(),
+                         [](float value) { return std::isfinite(value); }) ||
+            !std::all_of(copied_values.begin(), copied_values.end(),
+                         [](float value) { return std::isfinite(value); }) ||
+            std::memcmp(array_data(mapped.get(), MLX_BFLOAT16),
+                        array_data(copied.get(), MLX_BFLOAT16), expected * 2) != 0) {
+            std::cerr << "qmm_sizes mapped=" << mapped_values.size()
+                      << " copied=" << copied_values.size() << " expected=" << expected << '\n';
+            for (std::size_t i = 0; i < std::min<std::size_t>(8,
+                     std::min(mapped_values.size(), copied_values.size())); ++i) {
+                std::cerr << "output[" << i << "] mapped=" << mapped_values[i]
+                          << " copied=" << copied_values[i] << '\n';
+            }
+            std::cerr << "alignment_mod16 weight="
+                      << reinterpret_cast<std::uintptr_t>(array_data(mapped_weight.get(), MLX_UINT32)) % 16
+                      << " scales="
+                      << reinterpret_cast<std::uintptr_t>(array_data(mapped_scales.get(), MLX_BFLOAT16)) % 16
+                      << " biases="
+                      << reinterpret_cast<std::uintptr_t>(array_data(mapped_biases.get(), MLX_BFLOAT16)) % 16 << '\n';
+            for (int mask = 1; mask <= 7; ++mask) {
+                auto mixed = qwen38::MlxArray::quantized_matmul(x,
+                    mask & 1 ? mapped_weight : copied_weight,
+                    mask & 2 ? mapped_scales : copied_scales,
+                    mask & 4 ? mapped_biases : copied_biases, 64, 4);
+                const auto values = mixed.astype(MLX_FLOAT32).to_float32();
+                synchronize_gpu();
+                std::cerr << "mapped_input_mask=" << mask << " exact="
+                          << (values.size() == copied_values.size() &&
+                              std::memcmp(values.data(), copied_values.data(), values.size() * sizeof(float)) == 0)
+                          << " first=" << values.front() << '\n';
+            }
+            throw std::runtime_error("mapped/copy QMM mismatch: " + projection.name +
+                " expert=" + std::to_string(expert) + " rows=" + std::to_string(rows));
+        }
+    }
+}
+
 void check_cleanup(
     const std::vector<std::shared_ptr<CleanupState>>& states,
     const std::size_t expected_successes,
@@ -448,6 +642,8 @@ int run_probe(int argc, char** argv) {
         std::vector<std::shared_ptr<CleanupState>> cleanup_states;
         std::size_t alias_count = 0;
         std::size_t copy_count = 0;
+        TypedStats typed_stats;
+        std::size_t qmm_cases = 0;
         for (const std::size_t count : {std::size_t{1}, std::size_t{8}, std::size_t{10}}) {
             const std::size_t first_expert = 1;
             if (count + first_expert > expert_count) throw std::runtime_error("fixture lacks requested experts");
@@ -495,12 +691,19 @@ int run_probe(int argc, char** argv) {
                         static_cast<void>(mlx_array_free(exact_window));
                         static_cast<void>(mlx_stream_free(slice_stream));
                     }
+                    verify_projection_qmm(projection, expert,
+                        imports[imports.size() - 3], imports[imports.size() - 2], imports.back(), typed_stats);
+                    qmm_cases += 3;
                 }
             }
             print_memory(std::string("U") + std::to_string(count) + "_loaded");
         }
         std::cout << "imports=" << imports.size() << " alias=" << alias_count
                   << " copy=" << copy_count << '\n';
+        std::cout << "qmm_parity_cases=" << qmm_cases
+                  << " rows=1,4,32 finite=true exact=true\n";
+        std::cout << "typed_aliased=" << typed_stats.aliased
+                  << " typed_staged=" << typed_stats.staged << '\n';
         if (process_usage().ri_lifetime_max_phys_footprint > 1024ULL * mib) {
             throw std::runtime_error("probe exceeded 1 GiB lifetime footprint guard");
         }
