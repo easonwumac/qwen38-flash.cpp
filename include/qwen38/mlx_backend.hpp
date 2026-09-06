@@ -264,12 +264,16 @@ private:
 
 class MlxTensorStore final {
 public:
-    explicit MlxTensorStore(ModelManifest manifest, std::size_t expert_budget = 0)
-        : manifest_(std::move(manifest)), paged_(expert_budget != 0), experts_(expert_budget) {}
+    explicit MlxTensorStore(ModelManifest manifest, std::size_t expert_budget = 0,
+                            bool batch_experts = false)
+        : manifest_(std::move(manifest)), paged_(expert_budget != 0), experts_(expert_budget),
+          batch_experts_(batch_experts) {}
 
     using ExpertArrays = std::vector<MlxArray>;
     using ExpertLease = ExpertCache<ExpertArrays>::Handle;
     [[nodiscard]] bool paged() const noexcept { return paged_; }
+    [[nodiscard]] bool batch_experts() const noexcept { return batch_experts_; }
+    bool set_expert_budget(std::size_t bytes);
     [[nodiscard]] ExpertLease expert(std::string_view prefix, std::size_t id);
     [[nodiscard]] const ExpertCache<ExpertArrays>::Stats& expert_stats() const { return experts_.stats(); }
     [[nodiscard]] double expert_load_ms() const noexcept { return expert_load_ms_; }
@@ -285,6 +289,7 @@ private:
     bool paged_{false};
     ExpertCache<ExpertArrays> experts_;
     double expert_load_ms_{0};
+    bool batch_experts_{false};
     std::unordered_map<std::string, std::unique_ptr<SafetensorsFile>> catalogs_;
     [[nodiscard]] TensorView disk_view(const std::string& name);
     [[nodiscard]] MlxArray read_tensor(const std::string& name, std::optional<std::size_t> row);

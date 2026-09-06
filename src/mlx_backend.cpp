@@ -1083,8 +1083,13 @@ MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optiona
     if (result.get().ctx == nullptr) throw std::runtime_error("paged tensor allocation failed");
     if (mlx_array_nbytes(result.get()) != bytes)
         throw std::runtime_error("paged tensor byte geometry mismatch");
-    result.eval();
-    check(mlx_synchronize(default_gpu_stream()), "paged tensor completion");
+    // The pinned MLX-C new_data constructor synchronously copies host data.
+    // Keep the original per-field fences as an A/B reference, but batch mode
+    // only fences once after the complete expert bundle has been constructed.
+    if (!batch_experts_ || !row) {
+        result.eval();
+        check(mlx_synchronize(default_gpu_stream()), "paged tensor completion");
+    }
     return result;
 }
 
@@ -1116,6 +1121,7 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
         auto arrays = std::make_shared<ExpertArrays>();
         arrays->reserve(names.size());
         for (const auto& name : names) arrays->push_back(read_tensor(name, id));
+        check(mlx_synchronize(default_gpu_stream()), "paged expert bundle completion");
         std::size_t after = 0;
         check(mlx_get_active_memory(&after), "paged memory after load");
         if (after < before || after - before > bytes)
@@ -1125,6 +1131,13 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             std::chrono::steady_clock::now() - started).count();
         return arrays;
     });
+}
+
+bool MlxTensorStore::set_expert_budget(const std::size_t bytes) {
+    std::scoped_lock lock(mutex_);
+    if (!paged_) throw std::runtime_error("expert paging is disabled");
+    check(mlx_synchronize(default_gpu_stream()), "paged resize fence");
+    return experts_.set_budget(bytes);
 }
 
 std::size_t MlxTensorStore::open_shard_count() const {

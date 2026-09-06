@@ -1,5 +1,9 @@
 # Full-model paging under a 24 GiB test ceiling
 
+Follow-up: [elastic 24/32 GiB and batch-fence experiments](elastic-24-32g-probe.md).
+The current probe defaults to batch leases; add `--serial` to reproduce the
+original synchronization path described below.
+
 ## Scope
 
 Research-only `qwen38-paged-model-probe`; the server/default loader is unchanged.
