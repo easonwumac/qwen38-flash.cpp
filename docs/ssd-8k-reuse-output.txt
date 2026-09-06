@@ -1,0 +1,9 @@
+qwen38-server: SSD prefix cache="EXPERIMENT_CACHE/bc2692487e8afec6" limit_bytes=4294967296
+[qmeta] temporary prefill metadata uses grouped layer barriers
+qwen38: QSA engaged at 2560 tokens (640 blocks, top 512)
+[qmeta] compact 16-bit routed MoE engaged: rows=5 topk=10
+qwen38: grouped-query SDPA decode engaged at 8221 cached attention tokens
+qwen38: batched grouped-query SDPA verifier engaged with 5 rows at 8220 cached attention tokens
+{"case":0,"repeat":0,"cached":0,"prompt_tokens":8221,"prompt_ms":18473.2,"generation_ms":1852.28,"first_delta_ms":18843.6,"wall_ms":20372.8,"idle_footprint_bytes":41314498416,"idle_active_bytes":40548682674,"idle_cache_bytes":270273123,"accepted":10,"proposed":20,"rounds":5,"fallbacks":0,"repeat_equal":true,"tokens":[71093,12305,198,727,884,2784,25,514,11,292,25,514,8,1411,514,25]}
+{"case":0,"repeat":1,"cached":8220,"prompt_tokens":8221,"prompt_ms":0.569375,"generation_ms":450.668,"first_delta_ms":112.02,"wall_ms":502.033,"idle_footprint_bytes":41330309096,"idle_active_bytes":40548682674,"idle_cache_bytes":273992103,"accepted":10,"proposed":20,"rounds":5,"fallbacks":0,"repeat_equal":true,"tokens":[71093,12305,198,727,884,2784,25,514,11,292,25,514,8,1411,514,25]}
+memory_guard: peak_footprint=39.2 GiB peak_rss=31.8 GiB minimum_available=8.2 GiB
