@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <numeric>
+#include <fstream>
 #include <mach/mach.h>
 
 namespace {
@@ -76,6 +77,7 @@ int main(int argc, char** argv) {
         bool trace_policy = false;
         bool parallel_reads = false;
         bool fixed_slots=false, fixed_baseline=false;
+        std::string study_path;
         for (int i = 2; i < argc; ++i) {
             const std::string_view flag(argv[i]);
             if (flag == "--layer-parity") layer_only = true;
@@ -95,6 +97,9 @@ int main(int argc, char** argv) {
             else if (flag == "--parallel-reads") parallel_reads = true;
             else if (flag == "--fixed-slots") fixed_slots=true;
             else if (flag == "--fixed-baseline") { fixed_slots=true; fixed_baseline=true; }
+            else if (flag == "--routing-study" && i+1<argc) {
+                study_path=argv[++i]; fixed_slots=true; extended=true; prompt_suite=true;
+            }
             else throw std::runtime_error("unknown probe flag");
         }
         if (argc < 2 || std::getenv("QWEN38_MEMORY_GUARD") == nullptr ||
@@ -105,12 +110,22 @@ int main(int argc, char** argv) {
         if (trace_policy && legacy_frequency) throw std::runtime_error("trace validation requires default frequency");
         if (fixed_slots && (trace_policy || elastic || serial || legacy_frequency || parallel_reads || !unpacked_decode))
             throw std::runtime_error("fixed slots require an isolated probe configuration");
+        if (!study_path.empty() && (layer_only || long_run || fixed_baseline))
+            throw std::runtime_error("routing study requires short fixed candidate");
+        std::ofstream study;
+        if (!study_path.empty()) {
+            if (std::filesystem::exists(study_path)) throw std::runtime_error("study output already exists");
+            study.open(study_path);
+            if (!study) throw std::runtime_error("cannot create study trace");
+            study << "phase\tkind\tkey\tbytes\n";
+        }
         // Research-only: leave 4 GiB outside the MLX cap for host staging and
         // framework memory. The external guard independently limits the process.
         mlx_set_error_handler([](const char* message, void*) { std::cerr << message << '\n'; }, nullptr, nullptr);
         std::size_t old = 0;
         process_ceiling = elastic ? elastic_steady + 8 * gib : 24 * gib;
         if (fixed_slots) process_ceiling=42*gib;
+        if (!study_path.empty()) process_ceiling=36*gib;
         check(mlx_set_memory_limit(&old, layer_only ? 3 * gib : process_ceiling - (fixed_slots ? 2 : 4) * gib));
         check(mlx_set_cache_limit(&old, 0));
         check(mlx_clear_cache());
@@ -169,8 +184,9 @@ int main(int argc, char** argv) {
         if (!plan.feasible) throw std::runtime_error("infeasible probe memory plan");
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]), steady_budget, !serial,
             legacy_frequency ? 64 : 4096, !rowwise_pp, !unpacked_decode, parallel_reads);
-        if (fixed_slots) tensors.enable_fixed_slots(fixed_baseline ? 288 : 256);
-        if (fixed_slots) std::cout << "fixed_hot_per_layer=" << (fixed_baseline ? 288 : 256)
+        const std::size_t hot_count=fixed_baseline ? 288 : study_path.empty() ? 256 : 224;
+        if (fixed_slots) tensors.enable_fixed_slots(hot_count);
+        if (fixed_slots) std::cout << "fixed_hot_per_layer=" << hot_count
             << " fixed_cold_slots_per_layer=" << (fixed_baseline ? 0 : 8)
             << " process_ceiling_gib=" << double(process_ceiling)/gib << std::endl;
         else std::cout << "expert_steady_gib=" << double(steady_budget) / gib
@@ -182,7 +198,18 @@ int main(int argc, char** argv) {
         usage("loaded");
         std::cout << "load_seconds=" << std::chrono::duration<double>(Clock::now() - load_started).count() << std::endl;
         auto state = model.make_state();
-        if (trace_policy) tensors.start_expert_trace();
+        if (trace_policy || !study_path.empty()) tensors.start_expert_trace();
+        std::size_t exported=0;
+        const auto export_phase=[&](const std::string& phase) {
+            if (study_path.empty()) return;
+            const auto& events=tensors.expert_trace();
+            for (; exported<events.size(); ++exported) {
+                const auto& e=events[exported];
+                study << phase << '\t' << static_cast<int>(e.kind) << '\t' << e.key << '\t' << e.bytes << '\n';
+            }
+            study.flush();
+            if (!study) throw std::runtime_error("study trace write failed");
+        };
         std::uint32_t token = 9419;
         std::vector<double> seconds;
         std::uint64_t token_hash = 14695981039346656037ULL;
@@ -217,6 +244,7 @@ int main(int argc, char** argv) {
                   << " step_median_seconds=" << sorted[sorted.size() / 2]
                   << " step_p95_seconds=" << sorted[(sorted.size() - 1) * 95 / 100] << std::endl;
         std::cout << "token_hash=" << token_hash << std::endl;
+        export_phase("warmup_decode");
         if (trace_policy) {
             tensors.stop_expert_trace();
             replay_policies(tensors, steady_budget);
@@ -250,6 +278,7 @@ int main(int argc, char** argv) {
         const auto loads_before = tensors.expert_load_ms();
         const auto start = Clock::now();
         auto prefill_state = model.make_state();
+        std::uint32_t continuation=0;
         std::uint64_t pp_hash = 14695981039346656037ULL;
         std::cout << "prompt_start=" << p << " tokens=" << prompt.size() << std::endl;
         for (std::size_t offset = 0; offset < prompt.size(); offset += 64) {
@@ -257,6 +286,11 @@ int main(int argc, char** argv) {
                 std::min<std::size_t>(64, prompt.size() - offset));
             auto output = model.prefill_chunk_batch(chunk, prefill_state);
             const auto logits = output.astype(MLX_FLOAT32).to_float32();
+            if (!study_path.empty()) {
+                const auto vocab=static_cast<std::size_t>(output.shape().back());
+                auto begin=logits.end()-static_cast<std::ptrdiff_t>(vocab);
+                continuation=static_cast<std::uint32_t>(std::max_element(begin,logits.end())-begin);
+            }
             for (const float value : logits) {
                 if (!std::isfinite(value)) throw std::runtime_error("non-finite prefill logits");
                 pp_hash = (pp_hash ^ std::bit_cast<std::uint32_t>(value)) * 1099511628211ULL;
@@ -269,6 +303,19 @@ int main(int argc, char** argv) {
         std::cout << "pp_hash=" << pp_hash << " misses=" << tensors.expert_stats().misses - misses_before
                   << " load_ms=" << tensors.expert_load_ms() - loads_before << std::endl;
         usage("prefill");
+        export_phase("prompt"+std::to_string(p)+"_pp");
+        if (!study_path.empty()) {
+            const auto decode_start=Clock::now();
+            const auto before=tensors.expert_stats().misses;
+            for (int n=0; n<64; ++n) {
+                continuation=model.greedy_decode(continuation,prefill_state).token;
+                usage("study_decode");
+            }
+            std::cout << "study_prompt=" << p << " decode_steps=64 seconds="
+                << std::chrono::duration<double>(Clock::now()-decode_start).count()
+                << " misses=" << tensors.expert_stats().misses-before << std::endl;
+            export_phase("prompt"+std::to_string(p)+"_decode");
+        }
         }
         if (!fixed_slots && !tensors.set_expert_budget(steady_budget)) throw std::runtime_error("steady shrink blocked");
         std::cout << (fixed_slots ? "fixed_expert_gib=" : "expert_shrunk_gib=")
@@ -276,6 +323,8 @@ int main(int argc, char** argv) {
         const auto restored = usage(fixed_slots ? "fixed_final" : "steady_restored");
         if (elastic && restored > elastic_steady)
             throw std::runtime_error("process failed to return below steady target");
+        if (!study_path.empty()) std::cout << "study_live_misses=" << tensors.expert_stats().misses
+            << " evictions=" << tensors.expert_stats().evictions << " events=" << exported << std::endl;
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "paged probe: " << e.what() << std::endl;

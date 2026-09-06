@@ -1147,7 +1147,7 @@ void MlxTensorStore::enable_fixed_slots(std::size_t hot_count) {
     const char* strict=std::getenv("MLX_STRICT_MEMORY_LIMIT");
     if (!std::getenv("QWEN38_MEMORY_GUARD") || !strict || std::string_view(strict)!="1")
         throw std::runtime_error("fixed slots require guarded strict research runtime");
-    if ((hot_count != 256 && hot_count != 288) || !catalogs_.empty() || !shards_.empty() || fixed_slots())
+    if ((hot_count != 224 && hot_count != 256 && hot_count != 288) || !catalogs_.empty() || !shards_.empty() || fixed_slots())
         throw std::runtime_error("fixed slots must be configured before model load");
     fixed_hot_ = hot_count;
     paged_ = true;
@@ -1157,7 +1157,7 @@ void MlxTensorStore::enable_fixed_slots(std::size_t hot_count) {
 MlxTensorStore::FixedLayer& MlxTensorStore::fixed_layer(const std::string& prefix) {
     if (auto it = fixed_layers_.find(prefix); it != fixed_layers_.end()) return *it->second;
     auto layer = std::make_shared<FixedLayer>();
-    const std::size_t capacity = fixed_hot_ + (fixed_hot_ == 256 ? 8 : 0);
+    const std::size_t capacity = fixed_hot_ + (fixed_hot_ < 288 ? 8 : 0);
     layer->ids.assign(capacity,-1); layer->touches.resize(capacity);
     std::size_t index = 0, charged = 0;
     for (const char* projection : {"gate_proj","up_proj","down_proj"}) {
@@ -1219,7 +1219,8 @@ void MlxTensorStore::preload_fixed_slots() {
 
 bool MlxTensorStore::fixed_batch_fits(std::span<const std::size_t> ids) const {
     // Apply the same overflow arithmetic to the all-resident control.
-    return !fixed_slots() || std::count_if(ids.begin(),ids.end(),[](auto id) { return id>=256; })<=8;
+    return !fixed_slots() || std::count_if(ids.begin(),ids.end(),[&](auto id) {
+        return id>=std::min<std::size_t>(fixed_hot_,256); })<=8;
 }
 
 MlxTensorStore::ExpertLease MlxTensorStore::fixed_expert(const std::string& prefix,std::size_t id) {
@@ -1262,7 +1263,15 @@ std::vector<std::int32_t> MlxTensorStore::fixed_ids(std::string_view prefix,std:
 MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix, const std::size_t id) {
     std::scoped_lock lock(mutex_);
     if (!paged_) throw std::runtime_error("expert paging is disabled");
-    if (fixed_slots()) return fixed_expert(std::string(prefix),id);
+    if (fixed_slots()) {
+        auto lease=fixed_expert(std::string(prefix),id);
+        if (trace_enabled_) {
+            std::size_t bytes=0;
+            for (const auto& f:fixed_layers_.at(std::string(prefix))->disk) bytes+=f.bytes;
+            trace_expert(ExpertTraceKind::access,std::string(prefix)+"/"+std::to_string(id),bytes);
+        }
+        return lease;
+    }
     std::vector<std::string> names;
     std::size_t bytes = 0;
     for (const auto* projection : {"gate_proj", "up_proj", "down_proj"}) {

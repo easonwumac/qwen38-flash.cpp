@@ -751,6 +751,7 @@ MlxArray SparseMoe::forward_paged_packed(const MlxArray& input) const {
         const auto stream=mlx_default_gpu_stream_new();
         const int status=mlx_synchronize(stream); static_cast<void>(mlx_stream_free(stream));
         if (status) throw std::runtime_error("fixed fused completion failed");
+        paged_store_->finish_expert_batch();
         return MlxArray::add(sum,forward_shared(input));
     }
     std::vector<MlxArray> packed;

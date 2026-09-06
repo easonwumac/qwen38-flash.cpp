@@ -284,6 +284,8 @@ if(QWEN38_BUILD_TESTS)
                 NAME qwen38-memory-guard-tests
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/memory_guard_test.py
             )
+            add_test(NAME qwen38-expert-trace-study-tests
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/expert_trace_study_test.py)
         endif()
     endif()
 
