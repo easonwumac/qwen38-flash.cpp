@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <mach/mach.h>
 
 // Isolated synchronous experiment. No arrays/graphs may escape Pool's lifetime.
 // Writes occur only after GPU completion; every invocation creates a fresh graph.
@@ -35,7 +36,9 @@ struct Field {
 };
 struct Pool {
     std::array<Field, 9> fields;
-    explicit Pool(const std::filesystem::path& model, int layer) {
+    int capacity;
+    explicit Pool(const std::filesystem::path& model, int layer, int slots = 16) : capacity(slots) {
+        if (slots < 1 || slots > 288) throw std::runtime_error("invalid slot capacity");
         const auto manifest = ModelManifest::load(model);
         std::size_t f = 0;
         for (const auto* projection : {"gate_proj", "up_proj", "down_proj"}) {
@@ -55,9 +58,9 @@ struct Pool {
                 field.dtype = view.dtype == "U32" ? MLX_UINT32 : MLX_BFLOAT16;
                 if (view.dtype != "U32" && view.dtype != "BF16")
                     throw std::runtime_error("unsupported expert dtype");
-                field.shape = {16, static_cast<int>(view.shape[1]), static_cast<int>(view.shape[2])};
+                field.shape = {slots, static_cast<int>(view.shape[1]), static_cast<int>(view.shape[2])};
                 field.offset = static_cast<std::size_t>(view.bytes.data() - file.mapped_view().data());
-                const std::size_t bytes = 16 * field.row_bytes;
+                const std::size_t bytes = static_cast<std::size_t>(slots) * field.row_bytes;
                 const std::size_t padded = (bytes + 16383) / 16384 * 16384;
                 field.storage = std::shared_ptr<void>(std::aligned_alloc(16384, padded), std::free);
                 if (!field.storage) throw std::bad_alloc();
@@ -72,13 +75,13 @@ struct Pool {
         for (std::size_t f = 0; f < fields.size(); ++f) {
             const int rows = f < 6 ? 640 : 2560;
             const int cols = (f < 6 ? 2560 : 640) / (f % 3 == 0 ? 8 : 64);
-            if (fields[f].shape != std::vector<int>{16, rows, cols} ||
+            if (fields[f].shape != std::vector<int>{slots, rows, cols} ||
                 fields[f].dtype != (f % 3 == 0 ? MLX_UINT32 : MLX_BFLOAT16))
                 throw std::runtime_error("pool requires Q4/group64 BF16");
         }
     }
     void load(int slot, int expert) {
-        if (slot < 0 || slot >= 16 || expert < 0 || expert >= 288)
+        if (slot < 0 || slot >= capacity || expert < 0 || expert >= 288)
             throw std::runtime_error("pool index outside bounds");
         fence();
         for (auto& f : fields) {
@@ -91,6 +94,49 @@ struct Pool {
         // A failed load aborts the probe; production needs transactional publish.
     }
 };
+double footprint() {
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(),TASK_VM_INFO,reinterpret_cast<task_info_t>(&info),&count) != KERN_SUCCESS)
+        throw std::runtime_error("cannot observe footprint");
+    const double value = double(info.phys_footprint)/gib;
+    if (value > 35.8) throw std::runtime_error("layout probe early footprint stop");
+    return value;
+}
+void memory_layout(const std::filesystem::path& model, bool baseline) {
+    // This tests physical expert residency only, not routing, KV or inference.
+    // Numeric IDs stand in for equal-sized hot/cold sets, not a REAP ID mapping.
+    std::vector<std::unique_ptr<Pool>> hot, dynamic;
+    const int hot_count = baseline ? 288 : 256;
+    std::size_t hot_bytes = 0, cold_bytes = 0;
+    for (int layer = 0; layer < 48; ++layer) {
+        auto pool = std::make_unique<Pool>(model,layer,hot_count);
+        for (int expert = 0; expert < hot_count; ++expert) pool->load(expert,expert);
+        for (auto& f : pool->fields) hot_bytes += mlx_array_nbytes(f.array.get());
+        hot.push_back(std::move(pool));
+        std::cout << "hot_layer=" << layer << " footprint_gib=" << footprint() << std::endl;
+    }
+    std::cout << "hot_payload_gib=" << double(hot_bytes)/gib
+              << " hot_footprint_gib=" << footprint() << std::endl;
+    // 8 slots per layer = 384 experts, approximately 1 GiB. Filled with real
+    // cold weights, not untouched virtual reservation. No cache policy claim.
+    for (int layer = 0; layer < (baseline ? 0 : 48); ++layer) {
+        auto pool = std::make_unique<Pool>(model,layer,8);
+        for (int slot = 0; slot < 8; ++slot) pool->load(slot,256+slot);
+        for (auto& f : pool->fields) cold_bytes += mlx_array_nbytes(f.array.get());
+        dynamic.push_back(std::move(pool));
+        footprint();
+    }
+    fence();
+    std::cout << "dynamic_payload_gib=" << double(cold_bytes)/gib
+              << " combined_footprint_gib=" << footprint()
+              << " unpaged_payload_gib=" << double(hot_bytes)*288/hot_count/gib
+              << " net_payload_saved_gib=" << (double(hot_bytes)*(288-hot_count)/hot_count-cold_bytes)/gib << std::endl;
+    dynamic.clear(); hot.clear(); fence();
+    std::size_t active{}; check(mlx_get_active_memory(&active));
+    std::cout << "released_footprint_gib=" << footprint() << " released_mlx_bytes=" << active << std::endl;
+    if (active != 0) throw std::runtime_error("slot layout did not release managed arrays");
+}
 struct Kernels {
     MlxMetalKernel gate, down;
     Kernels() : gate("slot_pool_gate", std::array<const char*,8>{"x","gw","gs","gb","uw","us","ub","experts"},
@@ -141,12 +187,15 @@ template<class F> void bench(const char* name, F run) {
 }
 int main(int argc, char** argv) {
     try {
-        if (argc != 2 || !std::getenv("QWEN38_MEMORY_GUARD") ||
+        const bool baseline = argc == 3 && std::string_view(argv[2]) == "--memory-baseline";
+        const bool layout = baseline || (argc == 3 && std::string_view(argv[2]) == "--memory-layout");
+        if ((argc != 2 && !layout) || !std::getenv("QWEN38_MEMORY_GUARD") ||
             !std::getenv("MLX_STRICT_MEMORY_LIMIT") ||
             std::string_view(std::getenv("MLX_STRICT_MEMORY_LIMIT")) != "1")
             throw std::runtime_error("requires guarded strict allocator and MODEL path");
         mlx_set_error_handler([](const char* msg, void*) { std::cerr << msg << '\n'; },nullptr,nullptr);
-        std::size_t old{}; check(mlx_set_memory_limit(&old,gib)); check(mlx_set_cache_limit(&old,0));
+        std::size_t old{}; check(mlx_set_memory_limit(&old,layout ? 36*gib : gib)); check(mlx_set_cache_limit(&old,0));
+        if (layout) { memory_layout(argv[1],baseline); return 0; }
         Kernels kernels;
         for (int layer : {0,47}) {
             Pool pool(argv[1],layer);
