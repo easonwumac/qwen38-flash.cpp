@@ -93,6 +93,10 @@ int main(int argc, char** argv) {
                 "MoE prefill tests must run through devtools/memory_guard.py");
         }
         qwen38::apply_runtime_profile("speed");
+        std::size_t old_limit{};
+        if (mlx_set_memory_limit(&old_limit, 3ULL * 1024 * 1024 * 1024) != 0)
+            throw std::runtime_error("cannot set smoke allocation limit");
+        static_cast<void>(qwen38::MlxArray::set_cache_limit(64ULL * 1024 * 1024));
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         const auto& config = tensors.manifest().config();
         if (layer >= config.layer_count) {
@@ -176,7 +180,12 @@ int main(int argc, char** argv) {
             std::sort(values.begin(), values.end());
             return values[values.size() / 2];
         };
-        std::cout << "{\"rows\":" << rows << ",\"layer\":" << layer
+        std::size_t peak_bytes{}, active_bytes{};
+        if (mlx_get_peak_memory(&peak_bytes) != 0 || mlx_get_active_memory(&active_bytes) != 0)
+            throw std::runtime_error("cannot query smoke memory");
+        std::cout << "{\"peak_mlx_bytes\":" << peak_bytes
+                  << ",\"active_mlx_bytes\":" << active_bytes
+                  << ",\"rows\":" << rows << ",\"layer\":" << layer
                   << ",\"experts\":[";
         for (std::size_t index = 0; index < selection.experts.size(); ++index) {
             if (index != 0) std::cout << ',';

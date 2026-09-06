@@ -7,6 +7,7 @@
 #include "qwen38/token_embedding.hpp"
 
 #include "../src/gdn_metal_kernels.hpp"
+#include "../src/pp_route_reduce.hpp"
 
 #include <array>
 #include <chrono>
@@ -20,6 +21,37 @@
 #include <vector>
 
 int main() {
+    // Fused PP gather/reduce must preserve BF16 rounding and the stock
+    // eight-partial reduction ordering, including cancellation cases.
+    for (const int rows : {1, 16, 128}) {
+        constexpr int topk = 10, hidden = 2560;
+        const int slots = rows * topk;
+        std::vector<float> data(slots * hidden), probabilities(slots);
+        std::vector<std::int32_t> permutation(slots);
+        for (int i = 0; i < slots * hidden; ++i)
+            data[i] = std::ldexp(static_cast<float>((i * 13) % 257 - 128) / 128.F,
+                                 i % 19 - 9);
+        for (int i = 0; i < slots; ++i) {
+            probabilities[i] = static_cast<float>(1 + (i * 7) % 17) / 128.F;
+            permutation[i] = (i * 13) % slots;
+        }
+        const auto down = qwen38::MlxArray::from_float32(data,
+            std::array<int, 2>{slots, hidden}).astype(MLX_BFLOAT16);
+        const auto weights = qwen38::MlxArray::from_float32(probabilities,
+            std::array<int, 3>{1, rows, topk}).astype(MLX_BFLOAT16);
+        const auto order = qwen38::MlxArray::from_int32(permutation,
+            std::array<int, 1>{slots});
+        const auto reference = qwen38::MlxArray::multiply(
+            qwen38::MlxArray::take_axis(down, order, 0).reshape(
+                std::array<int, 4>{1, rows, topk, hidden}),
+            weights.reshape(std::array<int, 4>{1, rows, topk, 1})).sum_axis(2);
+        const auto candidate = qwen38::pp_route_reduce(down, weights, order, rows, topk, hidden);
+        if (reference.astype(MLX_FLOAT32).to_float32() !=
+            candidate.astype(MLX_FLOAT32).to_float32()) {
+            std::cerr << "PP route reduction differs from stock BF16 output\n";
+            return 1;
+        }
+    }
     const std::array<int, 2> shape{2, 2};
     const std::array<float, 4> left_values{1.0F, 2.0F, 3.0F, 4.0F};
     const std::array<float, 4> right_values{5.0F, 6.0F, 7.0F, 8.0F};

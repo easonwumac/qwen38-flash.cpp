@@ -11,6 +11,10 @@ independent C++ implementation in this project.
 The Q4 down-projection unpacking pattern is adapted from MLX
 (Copyright Apple Inc.), licensed under the MIT License.
 
+The experimental PP route-reduction rounding order follows MLX's
+col_reduce_small (Copyright Apple Inc.), under the MIT license retained in
+licenses/mlx-MIT.txt. The gather-fused implementation is specific to this project.
+
 The fused GatedDeltaNet prefill recurrence is adapted from oMLX
 (Copyright 2026 oMLX contributors), licensed under the Apache License,
 Version 2.0. oMLX's implementation follows MLX-LM.

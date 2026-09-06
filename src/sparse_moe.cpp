@@ -1,4 +1,5 @@
 #include "qwen38/sparse_moe.hpp"
+#include "pp_route_reduce.hpp"
 
 #include "qwen38/quantization_geometry.hpp"
 
@@ -1338,11 +1339,19 @@ MlxArray SparseMoe::forward_prefill_impl(
         timings->down_qmm_ms = elapsed_ms(down_started);
     }
     const auto route_reduce_started = Clock::now();
-    MlxArray unsorted = MlxArray::take_axis(down, inverse_order, 0).reshape(
-        std::vector<int>{1, rows, top_k, hidden_size});
-    MlxArray weighted = MlxArray::multiply(
-        unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
-    MlxArray routed = weighted.sum_axis(2);
+    MlxArray routed;
+    const char* reduce_candidate = std::getenv("QWEN38_PP_ROUTE_REDUCE");
+    if (reduce_candidate != nullptr && std::string_view(reduce_candidate) == "1" &&
+        top_k == 10 && hidden_size == 2560 && down.dtype() == MLX_BFLOAT16 &&
+        weights.dtype() == MLX_BFLOAT16) {
+        routed = pp_route_reduce(down, weights, inverse_order, rows, top_k, hidden_size);
+    } else {
+        MlxArray unsorted = MlxArray::take_axis(down, inverse_order, 0).reshape(
+            std::vector<int>{1, rows, top_k, hidden_size});
+        MlxArray weighted = MlxArray::multiply(
+            unsorted, weights.reshape(std::vector<int>{1, rows, top_k, 1}));
+        routed = weighted.sum_axis(2);
+    }
     const bool defer_cached_qmeta_reduce =
         cache_qmeta && qmeta_prefill_defer_reduce_enabled();
     const bool defer_temporary_qmeta_reduce =
