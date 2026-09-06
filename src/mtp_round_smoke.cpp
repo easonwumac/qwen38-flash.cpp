@@ -1,6 +1,7 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/mtp_runner.hpp"
+#include "qwen38/runtime_profile.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,8 +22,8 @@ std::uint32_t argmax_token(const qwen38::MlxArray& logits) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY\n";
+    if (argc != 2 && argc != 3) {
+        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY [PROFILE]\n";
         return EXIT_FAILURE;
     }
     try {
@@ -30,6 +31,13 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "full-model MTP round tests must run through devtools/memory_guard.py");
         }
+        // Allocation-time cap complements the polling process guard. Enforced
+        // strictly only when using the private strict MLX runtime.
+        std::size_t previous_limit{};
+        if (mlx_set_memory_limit(&previous_limit, 40ULL * 1024 * 1024 * 1024) != 0)
+            throw std::runtime_error("could not set full-model allocation cap");
+        if (argc == 3) qwen38::apply_runtime_profile(argv[2]);
+        std::cerr << "[phase] loading target and MTP head\n";
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         constexpr std::size_t cache_limit = 256ULL * 1024ULL * 1024ULL;
         static_cast<void>(qwen38::MlxArray::set_cache_limit(cache_limit));
@@ -38,6 +46,7 @@ int main(int argc, char** argv) {
         qwen38::ModelDecodeState target_state = target.make_state();
         qwen38::MtpDecodeState head_state = head.make_state();
 
+        std::cerr << "[phase] bootstrap decode\n";
         qwen38::TargetDecodeStep bootstrap =
             target.forward_decode_capture(9419, target_state);
         std::uint32_t current = argmax_token(bootstrap.logits);
@@ -49,6 +58,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> serial_tokens;
         serial_tokens.reserve(token_goal);
         std::uint32_t serial_current = current;
+        std::cerr << "[phase] serial greedy oracle\n";
         const auto serial_started = std::chrono::steady_clock::now();
         for (std::size_t index = 0; index < token_goal; ++index) {
             qwen38::GreedyStep step = target.greedy_decode(serial_current, serial_state);
@@ -62,6 +72,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> mtp_tokens;
         std::size_t accepted = 0;
         std::size_t rounds = 0;
+        std::cerr << "[phase] MTP rounds\n";
         const auto mtp_started = std::chrono::steady_clock::now();
         while (mtp_tokens.size() < token_goal && rounds < token_goal) {
             qwen38::MtpRoundStep step = qwen38::run_greedy_mtp_round_reference(
