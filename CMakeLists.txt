@@ -251,6 +251,8 @@ if(QWEN38_BUILD_TESTS)
 
     add_executable(qwen38-tests
         tests/api_test.cpp
+        tests/expert_cache_test.cpp
+        tests/memory_budget_test.cpp
         tests/chat_template_test.cpp
         tests/history_draft_test.cpp
         tests/json_test.cpp

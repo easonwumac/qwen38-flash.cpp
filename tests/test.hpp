@@ -22,6 +22,8 @@ inline void check(const bool condition, std::string_view expression, std::string
     ::qwen38::test::check(static_cast<bool>(expression), #expression, __FILE__, __LINE__)
 
 void run_api_tests();
+void run_expert_cache_tests();
+void run_memory_budget_tests();
 void run_chat_template_tests();
 void run_history_draft_tests();
 void run_json_tests();

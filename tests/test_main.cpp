@@ -1,6 +1,8 @@
 #include "test.hpp"
 
 int main() {
+    run_expert_cache_tests();
+    run_memory_budget_tests();
     run_json_tests();
     run_chat_template_tests();
     run_tool_call_tests();

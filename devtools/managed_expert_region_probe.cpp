@@ -1,5 +1,6 @@
 #include "qwen38/safetensors.hpp"
 #include "qwen38/mlx_backend.hpp"
+#include "qwen38/expert_cache.hpp"
 
 #include <mlx/c/mlx.h>
 #include <libproc.h>
@@ -615,6 +616,190 @@ void verify_selected_moe(
     }
 }
 
+struct CachedProjection {
+    qwen38::MlxArray weight;
+    qwen38::MlxArray scales;
+    qwen38::MlxArray biases;
+};
+
+struct CachedExpert {
+    std::array<CachedProjection, 3> projections;
+};
+
+std::size_t expert_resident_bytes(const std::vector<Projection>& projections) {
+    const long raw_page = ::sysconf(_SC_PAGESIZE);
+    if (raw_page <= 0) throw std::runtime_error("cannot query allocator page size");
+    const auto page = static_cast<std::size_t>(raw_page);
+    if (page > 16 * mib || (page & (page - 1)) != 0) {
+        throw std::runtime_error("unsupported replay allocator page size");
+    }
+    std::size_t total = 0;
+    for (const auto& p : projections) {
+        for (const auto* tensor : {&p.weight, &p.scales, &p.biases}) {
+            validate_tensor(*tensor, "cached expert");
+            const auto bytes = tensor->bytes.size() / tensor->shape[0];
+            if (bytes > 16 * mib || bytes == 0) throw std::runtime_error("cache replay tensor too large");
+            // Match the pinned allocator's page rounding, not just tensor nbytes.
+            if (bytes > std::numeric_limits<std::size_t>::max() - (page - 1)) {
+                throw std::runtime_error("expert page rounding overflow");
+            }
+            const auto rounded = bytes > page ? ((bytes + page - 1) / page) * page : bytes;
+            if (rounded > 16 * mib - total) throw std::runtime_error("cache replay expert too large");
+            total += rounded;
+        }
+    }
+    if (total > 16 * mib) throw std::runtime_error("cache replay expert too large");
+    return total;
+}
+
+std::shared_ptr<const CachedExpert> load_cached_expert(
+    const std::vector<Projection>& projections, const std::size_t id, const bool copied) {
+    auto result = std::make_shared<CachedExpert>();
+    std::vector<std::shared_ptr<CleanupState>> cleanup_states;
+    for (std::size_t p = 0; p < projections.size(); ++p) {
+        const auto& projection = projections[p];
+        const std::array<const qwen38::TensorView*, 3> tensors{
+            &projection.weight, &projection.scales, &projection.biases};
+        std::array<qwen38::MlxArray*, 3> outputs{&result->projections[p].weight,
+            &result->projections[p].scales, &result->projections[p].biases};
+        for (std::size_t t = 0; t < tensors.size(); ++t) {
+            const Window geometry = page_window(*tensors[t], id, *projection.owner);
+            const auto cleanup = std::make_shared<CleanupState>();
+            auto imported = managed_import(projection.name, geometry.begin, geometry.bytes,
+                {mlx_dimension(geometry.bytes, "cache window")}, MLX_UINT8,
+                projection.owner, cleanup, cleanup_states, geometry.backing);
+            imported.delta = geometry.delta;
+            *outputs[t] = typed_expert(imported, *tensors[t], id, copied);
+        }
+    }
+    synchronize_gpu();
+    for (const auto& state : cleanup_states) {
+        if (state->callbacks != 1 || state->manual != 0) {
+            throw std::runtime_error("cache loader retained a mapped window after staging");
+        }
+    }
+    return result;
+}
+
+using ResidentExpertCache = qwen38::ExpertCache<CachedExpert>;
+
+qwen38::MlxArray replay_selected_moe(
+    const qwen38::MlxArray& input, const std::vector<Projection>& projections,
+    const std::span<const std::size_t> ids, const int rows,
+    ResidentExpertCache* cache, const std::size_t bytes, std::size_t& loads) {
+    qwen38::MlxArray sum;
+    for (std::size_t slot = 0; slot < ids.size(); ++slot) {
+        const auto loader = [&] {
+            ++loads;
+            const auto before = memory(mlx_get_active_memory);
+            auto value = load_cached_expert(projections, ids[slot], cache == nullptr);
+            synchronize_gpu();
+            const auto after = memory(mlx_get_active_memory);
+            if (after < before || after - before != bytes) {
+                throw std::runtime_error("expert residency differs from reserved allocator bytes");
+            }
+            return value;
+        };
+        // Retain this lease until every GPU consumer below has completed.
+        auto lease = cache ? cache->acquire("layer0/expert" + std::to_string(ids[slot]), bytes, loader)
+                           : loader();
+        const auto project = [&](const qwen38::MlxArray& x, const std::size_t p) {
+            const auto& w = lease->projections[p];
+            return qwen38::MlxArray::quantized_matmul(x, w.weight, w.scales, w.biases, 64, 4);
+        };
+        auto gate = project(input, 0).silu();
+        auto up = project(input, 1);
+        auto hidden = qwen38::MlxArray::multiply(gate, up);
+        auto output = project(hidden, 2);
+        const float probability = static_cast<float>(slot + 1) /
+            static_cast<float>(ids.size() * (ids.size() + 1) / 2);
+        auto weight = qwen38::MlxArray::from_float32(
+            std::vector<float>{probability}, std::vector<int>{}).astype(MLX_BFLOAT16);
+        auto weighted = qwen38::MlxArray::multiply(output, weight);
+        sum = slot == 0 ? std::move(weighted) : qwen38::MlxArray::add(sum, weighted);
+        check_moe_stage(sum, rows, 2560); // Includes GPU completion before lease release.
+    }
+    return sum;
+}
+
+void verify_cache_replay(const std::vector<Projection>& projections) {
+    // Disable allocator block reuse for this accounting proof: a reused oversized
+    // Metal buffer could otherwise cost more than its requested tensor bytes.
+    std::size_t previous = 0;
+    check(mlx_set_cache_limit(&previous, 0), "disable replay allocator cache");
+    check(mlx_clear_cache(), "clear replay allocator cache");
+    const auto bytes = expert_resident_bytes(projections);
+    ResidentExpertCache cache(8 * mib);
+    std::size_t loads = 0;
+    const auto get = [&](const std::size_t id) {
+        return cache.acquire("layer0/expert" + std::to_string(id), bytes, [&] {
+            ++loads;
+            const auto before = memory(mlx_get_active_memory);
+            auto value = load_cached_expert(projections, id, false);
+            const auto after = memory(mlx_get_active_memory);
+            if (after < before || after - before != bytes) {
+                throw std::runtime_error("initial cache residency reservation mismatch");
+            }
+            return value;
+        });
+    };
+    {
+        auto first = get(0);
+        auto second = get(287);
+        for (int i = 0; i < 4; ++i) {
+            auto hit = get(0);
+            if (hit.get() != first.get()) throw std::runtime_error("cache hit changed owner");
+        }
+        const auto before = loads;
+        bool refused = false;
+        try { static_cast<void>(get(31)); } catch (const std::runtime_error&) { refused = true; }
+        if (!refused || before != loads) throw std::runtime_error("pinned cache admission was not refused early");
+        if (cache.set_budget(4 * mib)) throw std::runtime_error("pinned shrink falsely reported success");
+        second.reset();
+        synchronize_gpu();
+        if (!cache.trim() || cache.stats().resident_bytes > 4 * mib) {
+            throw std::runtime_error("cache did not shrink after lease release");
+        }
+    }
+    std::cout << "cache_pinned_refusal=true shrink_after_release=true bytes_per_expert=" << bytes << '\n';
+    std::size_t cases = 0;
+    constexpr std::array<std::size_t, 10> ids{0, 287, 31, 129, 7, 256, 63, 17, 201, 95};
+    for (const int rows : {1, 4, 32}) {
+        if (rows == 4 && !cache.set_budget(8 * mib)) throw std::runtime_error("cache growth failed");
+        for (const std::size_t count : {std::size_t{1}, std::size_t{8}, std::size_t{10}}) {
+            std::vector<float> values(static_cast<std::size_t>(rows) * 2560);
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                values[i] = static_cast<float>(static_cast<int>((i * 23 + rows) % 127) - 63) / 64.0F;
+            }
+            const auto input = qwen38::MlxArray::from_float32(
+                values, std::vector<int>{1, rows, 2560}).astype(MLX_BFLOAT16);
+            const auto selected = std::span<const std::size_t>(ids).first(count);
+            auto cached = replay_selected_moe(input, projections, selected, rows, &cache, bytes, loads);
+            std::size_t oracle_loads = 0;
+            auto oracle = replay_selected_moe(input, projections, selected, rows, nullptr, bytes, oracle_loads);
+            if (std::memcmp(array_data(cached.get(), MLX_BFLOAT16), array_data(oracle.get(), MLX_BFLOAT16),
+                            static_cast<std::size_t>(rows) * 2560 * 2) != 0) {
+                throw std::runtime_error("evicted/reloaded selected MoE output differs");
+            }
+            ++cases;
+        }
+    }
+    const auto stats = cache.stats();
+    if (stats.hits == 0 || stats.evictions == 0 || stats.peak_bytes > 8 * mib) {
+        throw std::runtime_error("cache replay did not cover hits/eviction within budget");
+    }
+    std::cout << "cache_replay cases=" << cases << " hits=" << stats.hits << " misses=" << stats.misses
+              << " evictions=" << stats.evictions << " loads=" << loads
+              << " peak_bytes=" << stats.peak_bytes << " exact=true\n";
+    cache.clear();
+    synchronize_gpu();
+    print_memory("cache_cleared");
+    if (cache.stats().resident_bytes != 0 || cache.stats().entries != 0 ||
+        memory(mlx_get_active_memory) != 0 || memory(mlx_get_cache_memory) != 0) {
+        throw std::runtime_error("cache replay did not reclaim tracked arrays");
+    }
+}
+
 void check_cleanup(
     const std::vector<std::shared_ptr<CleanupState>>& states,
     const std::size_t expected_successes,
@@ -693,10 +878,10 @@ std::shared_ptr<CleanupState> run_failure_probe(
 
 } // namespace
 
-int run_probe(int argc, char** argv) {
+int run_probe(int argc, char** argv, const bool cache_replay = false) {
     mlx_set_error_handler([](const char*, void*) {}, nullptr, nullptr);
     if (argc > 1 && std::string_view(argv[1]) == "--help") {
-        std::cout << "usage: qwen38-managed-expert-region-probe MODEL_DIRECTORY [--rounds 1..10]\n";
+        std::cout << "usage: qwen38-managed-expert-region-probe MODEL_DIRECTORY [--rounds 1..10 | --cache-replay]\n";
         return 0;
     }
     if (argc != 2 || std::getenv("MLX_STRICT_MEMORY_LIMIT") == nullptr ||
@@ -744,6 +929,10 @@ int run_probe(int argc, char** argv) {
                   << " down_weight_bytes_per_expert="
                   << projections.back().weight.bytes.size() / expert_count
                   << "\n";
+        if (cache_replay) {
+            verify_cache_replay(projections);
+            return 0;
+        }
 
         std::vector<Imported> imports;
         std::vector<std::shared_ptr<CleanupState>> cleanup_states;
@@ -869,6 +1058,9 @@ int run_probe(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string_view(argv[2]) == "--cache-replay") {
+        return run_probe(2, argv, true);
+    }
     int rounds = 1;
     if (argc == 4 && std::string_view(argv[2]) == "--rounds") {
         const std::string_view raw(argv[3]);
