@@ -1,0 +1,19 @@
+[phase] loading target and MTP head
+[memory] constructed active=12801513256 cache=6 peak=12801513256 footprint=12886599160
+[phase] bootstrap decode
+[qmeta] compact 16-bit routed MoE engaged: rows=1 topk=10
+[memory] bootstrap_before_release active=38995589480 cache=16559068 peak=39006801784 footprint=39149039528
+[memory] bootstrap_after_release active=38995081572 cache=17066976 peak=39006801784 footprint=39149039528
+[phase] serial greedy oracle
+[memory] serial_before_release active=39066987248 cache=22924876 peak=39088807834 footprint=39228583896
+[memory] serial_after_release active=39006554726 cache=83357398 peak=39088807834 footprint=39228583896
+[memory] serial_after_cache_clear active=39006554726 cache=0 peak=39088807834 footprint=39226224600
+[phase] MTP rounds
+[memory] mtp_before_round active=39006554726 cache=0 peak=39088807834 footprint=39226159064
+[memory] mtp_after_round active=40614199910 cache=67167162 peak=40678076324 footprint=40822879320
+[memory] mtp_before_round active=40614167142 cache=0 peak=40678076324 footprint=40820864088
+[memory] mtp_after_round active=40614225300 cache=74654700 peak=40685455356 footprint=40830563416
+[memory] mtp_before_round active=40614225300 cache=0 peak=40685455356 footprint=40827237464
+[memory] mtp_after_round active=40614347972 cache=74657724 peak=40685455356 footprint=40830891096
+{"tokens_checked":4,"rounds":3,"accepted":2,"serial_ms":1545.53,"serial_tps":2.58812,"mtp_ms":461.003,"mtp_emitted":5,"mtp_tps":10.8459,"tokens":[271,40,599,264],"serial_parity":true}
+memory_guard: peak_footprint=38.0 GiB peak_rss=34.5 GiB minimum_available=10.5 GiB

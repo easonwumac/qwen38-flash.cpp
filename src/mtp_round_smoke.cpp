@@ -10,8 +10,21 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+#include <libproc.h>
+#include <unistd.h>
 
 namespace {
+
+void report_memory(const char* phase) {
+    std::size_t active{}, cache{}, peak{};
+    rusage_info_v4 usage{};
+    if (mlx_get_active_memory(&active) || mlx_get_cache_memory(&cache) ||
+        mlx_get_peak_memory(&peak) || proc_pid_rusage(getpid(), RUSAGE_INFO_V4,
+            reinterpret_cast<rusage_info_t*>(&usage)))
+        throw std::runtime_error("memory accounting failed");
+    std::cerr << "[memory] " << phase << " active=" << active << " cache=" << cache
+              << " peak=" << peak << " footprint=" << usage.ri_phys_footprint << '\n';
+}
 
 std::uint32_t argmax_token(const qwen38::MlxArray& logits) {
     qwen38::MlxArray token = logits.argmax_all();
@@ -43,6 +56,7 @@ int main(int argc, char** argv) {
         static_cast<void>(qwen38::MlxArray::set_cache_limit(cache_limit));
         qwen38::QwenModel target(tensors);
         qwen38::QwenMtpHead head(tensors);
+        report_memory("constructed");
         qwen38::ModelDecodeState target_state = target.make_state();
         qwen38::MtpDecodeState head_state = head.make_state();
 
@@ -52,6 +66,9 @@ int main(int argc, char** argv) {
         std::uint32_t current = argmax_token(bootstrap.logits);
         qwen38::MlxArray previous_stream = std::move(bootstrap.pre_mixer_stream);
         std::size_t query_position = target_state.token_count;
+        report_memory("bootstrap_before_release");
+        bootstrap.logits = {};
+        report_memory("bootstrap_after_release");
         qwen38::ModelDecodeState serial_state = target.snapshot_state(target_state);
 
         constexpr std::size_t token_goal = 4;
@@ -67,7 +84,11 @@ int main(int argc, char** argv) {
         }
         const double serial_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - serial_started).count();
+        report_memory("serial_before_release");
+        serial_state = qwen38::ModelDecodeState(0);
+        report_memory("serial_after_release");
         qwen38::MlxArray::clear_cache();
+        report_memory("serial_after_cache_clear");
 
         std::vector<std::uint32_t> mtp_tokens;
         std::size_t accepted = 0;
@@ -75,6 +96,7 @@ int main(int argc, char** argv) {
         std::cerr << "[phase] MTP rounds\n";
         const auto mtp_started = std::chrono::steady_clock::now();
         while (mtp_tokens.size() < token_goal && rounds < token_goal) {
+            report_memory("mtp_before_round");
             qwen38::MtpRoundStep step = qwen38::run_greedy_mtp_round_reference(
                 target,
                 head,
@@ -84,6 +106,7 @@ int main(int argc, char** argv) {
                 2,
                 target_state,
                 head_state);
+            report_memory("mtp_after_round");
             mtp_tokens.insert(
                 mtp_tokens.end(), step.emitted_tokens.begin(), step.emitted_tokens.end());
             accepted += step.accepted;
