@@ -48,3 +48,33 @@ turn the aborted full-model run into a parity pass.
 A safer next step is reducing baseline working-set overlap or
 testing when fewer unrelated applications occupy memory, not reducing the
 12 GiB available floor.
+
+## User-approved 8 GiB floor follow-up
+
+The user subsequently approved an experimental 8 GiB available-memory floor
+with automatic termination, not alert-only behavior. Reused the verified
+binary and identical model/profile/allocator settings above; start threshold
+40 GiB and process ceilings 42 GiB remained unchanged. This was a separate
+short-context smoke, not a long-context escalation.
+
+```
+[phase] loading target and MTP head
+[phase] bootstrap decode
+[qmeta] compact 16-bit routed MoE engaged: rows=1 topk=10
+[phase] serial greedy oracle
+[phase] MTP rounds
+memory_guard: stopping: footprint=38.0 GiB, rss=26.2 GiB, available=7.8 GiB
+```
+
+Exit 76 again. The process reached MTP but did not emit completed parity or
+throughput results. Its absence was checked after termination. No further
+floor reduction or longer-context run was attempted. These are stopping
+samples, not exact lifetime peaks; polling may overshoot a threshold.
+
+Before/after swap use remained 2806.94 MiB and swapouts stayed 3,813,310.
+Compressor occupancy increased from 205,257 to 312,906 pages, approximately
+3.13 to 4.77 GiB. These system-wide measurements show additional compression,
+not zero memory pressure. Initial available heuristic was about 46.53 GiB,
+so merely passing a 40 GiB startup check clearly does not certify this workload.
+The post-exit available heuristic recovered to about 49.40 GiB, with more
+compressed system state. No persistent service/guard defaults were changed.
