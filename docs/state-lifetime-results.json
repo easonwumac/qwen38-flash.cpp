@@ -1,0 +1,23 @@
+{
+  "description": "Synthetic ownership and KV append experiments; not full-model throughput",
+  "mtp_retain": "{\"mode\":\"retain\",\"accepted\":0,\"before_bytes\":167772164,\"after_bytes\":167772160}\n{\"mode\":\"retain\",\"accepted\":1,\"before_bytes\":167772164,\"after_bytes\":167772160}\n{\"mode\":\"retain\",\"accepted\":2,\"before_bytes\":167772164,\"after_bytes\":167772160}\n{\"mode\":\"retain\",\"accepted\":3,\"before_bytes\":167772164,\"after_bytes\":167772160}\n{\"mode\":\"retain\",\"accepted\":4,\"before_bytes\":167772164,\"after_bytes\":167772160}\nmemory_guard: peak_footprint=0.0 GiB peak_rss=0.0 GiB minimum_available=39.8 GiB\n",
+  "mtp_release": "{\"mode\":\"release\",\"accepted\":0,\"before_bytes\":167772164,\"after_bytes\":33554432}\n{\"mode\":\"release\",\"accepted\":1,\"before_bytes\":167772164,\"after_bytes\":33554432}\n{\"mode\":\"release\",\"accepted\":2,\"before_bytes\":167772164,\"after_bytes\":33554432}\n{\"mode\":\"release\",\"accepted\":3,\"before_bytes\":167772164,\"after_bytes\":33554432}\n{\"mode\":\"release\",\"accepted\":4,\"before_bytes\":167772164,\"after_bytes\":33554432}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.0 GiB minimum_available=39.6 GiB\n",
+  "kv_abba": [
+    {
+      "mode": "concat",
+      "output": "{\"mode\":\"concat\",\"repeat\":0,\"ms\":37.5748,\"peak_bytes\":71303168,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":1,\"ms\":27.048,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":2,\"ms\":24.493,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":3,\"ms\":31.8013,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":4,\"ms\":34.2467,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":5,\"ms\":23.8855,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":6,\"ms\":25.2325,\"peak_bytes\":67108864,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=39.7 GiB\n"
+    },
+    {
+      "mode": "reserve",
+      "output": "{\"mode\":\"reserve\",\"repeat\":0,\"ms\":21.3326,\"peak_bytes\":100925440,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":1,\"ms\":24.9086,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":2,\"ms\":27.3068,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":3,\"ms\":27.0302,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":4,\"ms\":29.494,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":5,\"ms\":29.5203,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":6,\"ms\":19.5657,\"peak_bytes\":75759616,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=39.6 GiB\n"
+    },
+    {
+      "mode": "reserve",
+      "output": "{\"mode\":\"reserve\",\"repeat\":0,\"ms\":24.7265,\"peak_bytes\":100925440,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":1,\"ms\":22.4357,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":2,\"ms\":25.2277,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":3,\"ms\":24.1798,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":4,\"ms\":30.3596,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":5,\"ms\":23.4168,\"peak_bytes\":75759616,\"parity\":true}\n{\"mode\":\"reserve\",\"repeat\":6,\"ms\":26.9632,\"peak_bytes\":75759616,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=39.6 GiB\n"
+    },
+    {
+      "mode": "concat",
+      "output": "{\"mode\":\"concat\",\"repeat\":0,\"ms\":38.0027,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":1,\"ms\":25.5338,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":2,\"ms\":22.9937,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":3,\"ms\":24.6803,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":4,\"ms\":31.942,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":5,\"ms\":28.5602,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":6,\"ms\":24.2311,\"peak_bytes\":67108864,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=39.7 GiB\n"
+    }
+  ]
+}

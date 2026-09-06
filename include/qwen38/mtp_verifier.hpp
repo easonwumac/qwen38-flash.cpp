@@ -39,6 +39,8 @@ struct MtpTargetVerification {
 // accepted=N keeps the checkpoint after current_token plus N accepted drafts.
 // The correction/bonus token remains unconsumed and becomes the next round's
 // current token.
+// Consumes all verification rows on success. Share any required output streams
+// before committing. Validation failures leave verification/destination intact.
 void commit_mtp_target_verification(
     MtpTargetVerification&& verification,
     std::size_t accepted,

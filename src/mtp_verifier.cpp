@@ -137,6 +137,11 @@ void commit_mtp_target_verification(
         throw std::runtime_error("MTP accepted count exceeds verified draft count");
     }
     destination = std::move(verification.rows[accepted].state_after);
+    // An rvalue-reference parameter does not consume the caller's object.
+    // Release rejected checkpoints before the caller materializes rollback
+    // state; otherwise both remain alive until the entire round returns.
+    verification.rows.clear();
+    verification.draft_count = 0;
 }
 
 } // namespace qwen38

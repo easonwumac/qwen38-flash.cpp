@@ -655,6 +655,37 @@ int main() {
         std::cerr << "MTP verifier committed the wrong checkpoint\n";
         return 1;
     }
+    if (!verification.rows.empty() || verification.draft_count != 0) {
+        std::cerr << "MTP verifier retained consumed checkpoints\n";
+        return 1;
+    }
+    for (std::size_t accepted = 0; accepted <= 4; ++accepted) {
+        qwen38::MtpTargetVerification candidate{.draft_count = 4, .rows = {}};
+        for (std::size_t row = 0; row <= 4; ++row) {
+            qwen38::ModelDecodeState checkpoint(0);
+            checkpoint.token_count = 100 + row;
+            candidate.rows.push_back({
+                .greedy = {},
+                .final_mixed = {},
+                .pre_mixer_stream = qwen38::MlxArray::from_float32(
+                    std::array<float, 1>{static_cast<float>(row)},
+                    std::array<int, 1>{1}),
+                .state_after = std::move(checkpoint),
+            });
+        }
+        auto stream = candidate.rows[accepted].pre_mixer_stream.share();
+        bool rejected = false;
+        try {
+            qwen38::commit_mtp_target_verification(std::move(candidate), 5, committed);
+        } catch (const std::runtime_error&) { rejected = true; }
+        if (!rejected || candidate.rows.size() != 5) return 1;
+        qwen38::commit_mtp_target_verification(std::move(candidate), accepted, committed);
+        if (committed.token_count != 100 + accepted || !candidate.rows.empty() ||
+            stream.to_float32() != std::vector<float>{static_cast<float>(accepted)}) {
+            std::cerr << "MTP checkpoint consumption/share parity failed\n";
+            return 1;
+        }
+    }
 
     bool rejected_invalid_commit = false;
     try {

@@ -128,6 +128,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     set_target_properties(qwen38-w8a8-gdn-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-prefix-memory-probe devtools/prefix_memory_probe.cpp)
+    add_executable(qwen38-state-lifetime-probe devtools/state_lifetime_probe.cpp)
+    target_link_libraries(qwen38-state-lifetime-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-state-lifetime-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     target_link_libraries(qwen38-prefix-memory-probe PRIVATE qwen38_mlx)
     add_executable(qwen38-pp-reduce-layer-ab devtools/pp_reduce_layer_ab.cpp)
     add_executable(qwen38-pp-reduce-group-probe devtools/pp_reduce_group_probe.cpp)
