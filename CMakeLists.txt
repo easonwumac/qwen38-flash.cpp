@@ -185,6 +185,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     add_executable(qwen38-model-bench src/model_bench.cpp)
     add_executable(qwen38-paged-model-probe devtools/paged_model_probe.cpp)
     target_link_libraries(qwen38-paged-model-probe PRIVATE qwen38_mlx)
+    add_executable(qwen38-slot-pool-probe devtools/slot_pool_probe.cpp)
+    target_link_libraries(qwen38-slot-pool-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-slot-pool-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     target_link_libraries(qwen38-model-bench PRIVATE qwen38_mlx)
     set_target_properties(qwen38-model-bench PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
 
