@@ -1,4 +1,7 @@
 #include "qwen38/self_attention.hpp"
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+#include "qsa_score_reduce.hpp"
+#endif
 
 #include "qwen38/quantization_geometry.hpp"
 
@@ -415,9 +418,31 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
                                          1, 1, dimension(block_count, "QSA blocks"),
                                          index_dimension})
                                      .swapaxes(2, 3);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    const char* tiled_scores = std::getenv("QWEN38_QSA_TILED_SCORES");
+    const bool use_tiled_scores = rows >= 256 && index_heads == 4 && index_dimension == 128 &&
+        tiled_scores != nullptr && std::string_view(tiled_scores) != "0";
+    MlxArray scores;
+    if (use_tiled_scores) {
+        const std::string_view mode(tiled_scores);
+        if (mode != "1" && mode != "128" && mode != "256" && mode != "async")
+            throw std::runtime_error("invalid research QSA tile mode");
+        scores = qsa_tiled_scores(queries, pooled_transposed, mode == "128" ? 128 : 256,
+                                  mode == "1" || mode == "async");
+    } else {
+        scores = MlxArray::matmul(
+            queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
+        const char* score_reduce = std::getenv("QWEN38_QSA_SCORE_REDUCE");
+        scores = rows > 8 && index_heads == 4 && block_count <= 65536 &&
+            score_reduce != nullptr && std::string_view(score_reduce) == "1"
+            ? qsa_score_reduce(scores)
+            : MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
+    }
+#else
     MlxArray scores = MlxArray::matmul(
         queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
     scores = MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
+#endif
 
     MlxArray positions = MlxArray::arange(
         static_cast<double>(state.token_count),

@@ -16,6 +16,8 @@ col_reduce_small (Copyright Apple Inc.), under the MIT license retained in
 licenses/mlx-MIT.txt. The gather-fused implementation is specific to this project.
 The experimental PP SwiGLU kernel follows MLX's Sigmoid formula under the same
 license, preserving BF16 intermediate rounding while fusing the operations.
+The experimental QSA score-ReLU/head-sum fusion also follows MLX's small-column
+head reduction order under that MIT license.
 
 The fused GatedDeltaNet prefill recurrence is adapted from oMLX
 (Copyright 2026 oMLX contributors), licensed under the Apache License,

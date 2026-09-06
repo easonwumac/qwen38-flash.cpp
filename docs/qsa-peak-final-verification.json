@@ -1,0 +1,42 @@
+[
+  {
+    "mode": 0,
+    "chunk_id": "346a21",
+    "wall_time_seconds": 1.291946208,
+    "exit_code": 0,
+    "original_token_count": 86,
+    "output": "{\"synthetic_history\":true,\"context\":65536,\"rows\":512,\"mode\":0,\"samples_ms\":[44.1142,43.3402,42.8644,43.155,43.447,44.7602,43.4849,42.7617,42.8058,42.9016,43.4137],\"median_ms\":43.3402,\"median_peak_mlx_bytes\":1183861904,\"output_state_hash\":\"16268721739017159555\"}\nmemory_guard: peak_footprint=1.4 GiB peak_rss=0.8 GiB minimum_available=38.9 GiB\n"
+  },
+  {
+    "mode": 1,
+    "chunk_id": "9be140",
+    "wall_time_seconds": 0.832606292,
+    "exit_code": 0,
+    "original_token_count": 86,
+    "output": "{\"synthetic_history\":true,\"context\":65536,\"rows\":512,\"mode\":1,\"samples_ms\":[42.4204,42.0595,42.1972,41.7085,43.2467,42.0724,42.139,42.0779,42.6762,41.8438,42.8507],\"median_ms\":42.139,\"median_peak_mlx_bytes\":1183878284,\"output_state_hash\":\"16268721739017159555\"}\nmemory_guard: peak_footprint=1.4 GiB peak_rss=0.8 GiB minimum_available=38.9 GiB\n"
+  },
+  {
+    "mode": 2,
+    "chunk_id": "5d4cfe",
+    "wall_time_seconds": 0.839384167,
+    "exit_code": 0,
+    "original_token_count": 87,
+    "output": "{\"synthetic_history\":true,\"context\":65536,\"rows\":512,\"mode\":2,\"samples_ms\":[42.7444,45.5712,45.2701,45.2391,43.4045,44.1569,45.1664,46.0552,44.7768,45.1635,46.0787],\"median_ms\":45.1664,\"median_peak_mlx_bytes\":1069788296,\"output_state_hash\":\"16268721739017159555\"}\nmemory_guard: peak_footprint=1.2 GiB peak_rss=0.8 GiB minimum_available=39.0 GiB\n"
+  },
+  {
+    "mode": 3,
+    "chunk_id": "da4649",
+    "wall_time_seconds": 0.838530708,
+    "exit_code": 0,
+    "original_token_count": 86,
+    "output": "{\"synthetic_history\":true,\"context\":65536,\"rows\":512,\"mode\":3,\"samples_ms\":[47.4365,47.8594,47.934,48.242,47.9364,47.6487,47.5772,47.8144,47.9977,47.1812,47.3707],\"median_ms\":47.8144,\"median_peak_mlx_bytes\":1069771912,\"output_state_hash\":\"16268721739017159555\"}\nmemory_guard: peak_footprint=1.2 GiB peak_rss=0.6 GiB minimum_available=39.0 GiB\n"
+  },
+  {
+    "mode": 4,
+    "chunk_id": "3a930a",
+    "wall_time_seconds": 0.846384791,
+    "exit_code": 0,
+    "original_token_count": 86,
+    "output": "{\"synthetic_history\":true,\"context\":65536,\"rows\":512,\"mode\":4,\"samples_ms\":[45.9334,47.3584,46.5065,47.2018,46.168,47.3901,47.2556,46.9562,46.8568,47.3377,46.4524],\"median_ms\":46.9562,\"median_peak_mlx_bytes\":1352944784,\"output_state_hash\":\"16268721739017159555\"}\nmemory_guard: peak_footprint=1.2 GiB peak_rss=0.8 GiB minimum_available=39.1 GiB\n"
+  }
+]

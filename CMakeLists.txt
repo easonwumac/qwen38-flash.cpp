@@ -131,6 +131,11 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     target_link_libraries(qwen38-prefix-memory-probe PRIVATE qwen38_mlx)
     add_executable(qwen38-pp-reduce-layer-ab devtools/pp_reduce_layer_ab.cpp)
     add_executable(qwen38-pp-reduce-group-probe devtools/pp_reduce_group_probe.cpp)
+    add_executable(qwen38-qsa-peak-probe devtools/qsa_peak_probe.cpp src/self_attention.cpp)
+    target_compile_definitions(qwen38-qsa-peak-probe PRIVATE QWEN38_QSA_PEAK_RESEARCH=1)
+    target_link_libraries(qwen38-qsa-peak-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-qsa-peak-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     target_link_libraries(qwen38-pp-reduce-group-probe PRIVATE qwen38_mlx)
     set_target_properties(qwen38-pp-reduce-group-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")

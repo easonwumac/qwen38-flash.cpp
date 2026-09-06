@@ -8,6 +8,7 @@
 
 #include "../src/gdn_metal_kernels.hpp"
 #include "../src/pp_route_reduce.hpp"
+#include "../src/qsa_score_reduce.hpp"
 
 #include <array>
 #include <chrono>
@@ -21,6 +22,21 @@
 #include <vector>
 
 int main() {
+    for (const int blocks : {32, 1024, 16384}) {
+        std::vector<float> values(4 * 16 * blocks);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            values[i] = std::ldexp(static_cast<float>(static_cast<int>((i * 13) % 257) - 128),
+                                   static_cast<int>(i % 31) - 15);
+        const auto scores = qwen38::MlxArray::from_float32(values,
+            std::array<int, 4>{1, 4, 16, blocks});
+        const auto zero = qwen38::MlxArray::from_float32(std::array<float, 1>{0},
+            std::array<int, 1>{1});
+        if (qwen38::MlxArray::maximum(scores, zero).sum_axis(1).to_float32() !=
+            qwen38::qsa_score_reduce(scores).to_float32()) {
+            std::cerr << "QSA score reduction differs from stock FP32 output\n";
+            return 1;
+        }
+    }
     // Fused PP gather/reduce must preserve BF16 rounding and the stock
     // eight-partial reduction ordering, including cancellation cases.
     for (const int rows : {1, 16, 128}) {
