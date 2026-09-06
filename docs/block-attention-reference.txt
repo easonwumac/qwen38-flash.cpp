@@ -1,0 +1,17 @@
+{"repeat":0,"blocks":0,"ms":0.973958,"max_abs_error":0}
+{"repeat":0,"blocks":1,"ms":6.23517,"max_abs_error":1.04308e-06}
+{"repeat":1,"blocks":1,"ms":5.13304,"max_abs_error":1.04308e-06}
+{"repeat":1,"blocks":0,"ms":1.48129,"max_abs_error":0}
+{"repeat":2,"blocks":0,"ms":1.11567,"max_abs_error":0}
+{"repeat":2,"blocks":1,"ms":5.40113,"max_abs_error":1.04308e-06}
+{"repeat":3,"blocks":1,"ms":5.14608,"max_abs_error":1.04308e-06}
+{"repeat":3,"blocks":0,"ms":1.18596,"max_abs_error":0}
+{"repeat":4,"blocks":0,"ms":1.07996,"max_abs_error":0}
+{"repeat":4,"blocks":1,"ms":4.99317,"max_abs_error":1.04308e-06}
+{"repeat":5,"blocks":1,"ms":4.36104,"max_abs_error":1.04308e-06}
+{"repeat":5,"blocks":0,"ms":0.762292,"max_abs_error":0}
+{"repeat":6,"blocks":0,"ms":0.750791,"max_abs_error":0}
+{"repeat":6,"blocks":1,"ms":2.70292,"max_abs_error":1.04308e-06}
+{"repeat":7,"blocks":1,"ms":2.71375,"max_abs_error":1.04308e-06}
+{"repeat":7,"blocks":0,"ms":0.746292,"max_abs_error":0}
+memory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=43.4 GiB

@@ -887,7 +887,11 @@ GenerationResult NativeEngine::complete_impl(
     if (prefix_cache_changed && ssd_prefix_cache_ != nullptr) {
         try {
             if (prompt_cache_state.has_value()) {
-                ssd_prefix_cache_->save(prompt_cache_tokens, *prompt_cache_state);
+                if (prefix_cache_ != nullptr && prefix_cache_->tokens == prompt_cache_tokens)
+                    prefix_cache_->ssd_backed = false;
+                const bool saved = ssd_prefix_cache_->save(prompt_cache_tokens, *prompt_cache_state);
+                if (prefix_cache_ != nullptr && prefix_cache_->tokens == prompt_cache_tokens)
+                    prefix_cache_->ssd_backed = saved;
             }
             if (prefix_cache_ != nullptr &&
                 (!prompt_cache_state.has_value() ||
@@ -899,6 +903,11 @@ GenerationResult NativeEngine::complete_impl(
             std::cerr << "SSD prefix cache write failed: " << error.what() << '\n';
         }
     }
+    // SSD is the between-request cache tier. Only discard a RAM checkpoint
+    // after confirmed persistence; capacity refusals/write failures keep the
+    // existing RAM fallback. Live request state owns its own shared handles.
+    if (ssd_prefix_cache_ != nullptr && prefix_cache_ != nullptr && prefix_cache_->ssd_backed)
+        prefix_cache_.reset();
     return result;
 }
 

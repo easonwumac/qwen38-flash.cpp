@@ -129,6 +129,10 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-prefix-memory-probe devtools/prefix_memory_probe.cpp)
     add_executable(qwen38-state-lifetime-probe devtools/state_lifetime_probe.cpp)
+    add_executable(qwen38-block-attention-probe devtools/block_attention_probe.cpp)
+    target_link_libraries(qwen38-block-attention-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-block-attention-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     target_link_libraries(qwen38-state-lifetime-probe PRIVATE qwen38_mlx)
     set_target_properties(qwen38-state-lifetime-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
