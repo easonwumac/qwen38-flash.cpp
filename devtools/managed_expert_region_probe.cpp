@@ -41,6 +41,7 @@ struct CleanupState {
 struct Payload {
     std::shared_ptr<const qwen38::SafetensorsFile> owner;
     std::shared_ptr<CleanupState> state;
+    std::shared_ptr<void> backing;
 };
 
 void release_payload(void* opaque) noexcept {
@@ -53,6 +54,7 @@ struct Imported {
     mlx_array value{};
     std::string label;
     std::size_t bytes{0};
+    std::size_t delta{0};
     mlx_dtype type{MLX_UINT8};
     std::vector<int> shape;
     std::vector<std::byte> oracle;
@@ -66,6 +68,7 @@ struct Imported {
         : value(std::exchange(other.value, mlx_array{})),
           label(std::move(other.label)),
           bytes(other.bytes),
+          delta(other.delta),
           type(other.type),
           shape(std::move(other.shape)),
           oracle(std::move(other.oracle)),
@@ -77,6 +80,7 @@ struct Imported {
             value = std::exchange(other.value, mlx_array{});
             label = std::move(other.label);
             bytes = other.bytes;
+            delta = other.delta;
             type = other.type;
             shape = std::move(other.shape);
             oracle = std::move(other.oracle);
@@ -184,9 +188,11 @@ struct Window {
     const std::byte* begin{nullptr};
     std::size_t bytes{0};
     std::size_t delta{0};
+    std::shared_ptr<void> backing;
 };
 
-Window page_window(const qwen38::TensorView& view, const std::size_t expert) {
+Window page_window(const qwen38::TensorView& view, const std::size_t expert,
+                   const qwen38::SafetensorsFile& owner) {
     validate_tensor(view, "page-window tensor");
     const std::size_t expert_bytes = view.bytes.size() / view.shape[0];
     if (expert >= view.shape[0]) {
@@ -194,7 +200,6 @@ Window page_window(const qwen38::TensorView& view, const std::size_t expert) {
     }
     const std::size_t offset = expert * expert_bytes;
     const auto* view_begin = view.bytes.data();
-    const auto* view_end = view_begin + view.bytes.size();
     const auto* source_begin = view_begin + offset;
     const auto* source_end = source_begin + expert_bytes;
     const std::size_t page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
@@ -210,17 +215,35 @@ Window page_window(const qwen38::TensorView& view, const std::size_t expert) {
     const auto aligned_end =
         (end_address + static_cast<std::uintptr_t>(page) - 1U) &
         ~(static_cast<std::uintptr_t>(page) - 1U);
-    const auto* begin = reinterpret_cast<const std::byte*>(aligned_begin);
-    const auto* end = reinterpret_cast<const std::byte*>(aligned_end);
-    if (begin < view_begin || end > view_end || begin > source_begin ||
-        end < source_end || aligned_begin % page != 0 || aligned_end % page != 0) {
-        throw std::runtime_error("expert page window exceeds tensor view; refusing out-of-file bytes");
+    const auto mapping = owner.mapped_view();
+    const auto file_begin = reinterpret_cast<std::uintptr_t>(mapping.data());
+    if (mapping.data() == nullptr || mapping.empty() ||
+        mapping.size() > std::numeric_limits<std::uintptr_t>::max() - file_begin) {
+        throw std::runtime_error("invalid mapped file address extent");
     }
-    return {
+    const auto file_end = file_begin + mapping.size();
+    if (aligned_begin < file_begin || end_address > file_end ||
+        aligned_begin > source_address || aligned_end < end_address ||
+        aligned_begin % page != 0 || aligned_end % page != 0) {
+        throw std::runtime_error("expert page window exceeds its mapped file");
+    }
+    const auto* begin = mapping.data() + (aligned_begin - file_begin);
+    Window result{
         .begin = begin,
-        .bytes = static_cast<std::size_t>(end - begin),
-        .delta = static_cast<std::size_t>(source_begin - begin),
+        .bytes = static_cast<std::size_t>(aligned_end - aligned_begin),
+        .delta = static_cast<std::size_t>(source_address - aligned_begin),
     };
+    if (aligned_end > file_end) {
+        // A partial EOF page cannot be used as an oracle span beyond file size.
+        // Pad a bounded owned window instead; never access bytes past EOF.
+        void* storage = std::aligned_alloc(page, result.bytes);
+        if (storage == nullptr) throw std::runtime_error("EOF window allocation failed");
+        result.backing = std::shared_ptr<void>(storage, std::free);
+        std::memset(storage, 0, result.bytes);
+        std::memcpy(storage, begin, static_cast<std::size_t>(file_end - aligned_begin));
+        result.begin = static_cast<const std::byte*>(storage);
+    }
+    return result;
 }
 
 Imported managed_import(
@@ -231,12 +254,13 @@ Imported managed_import(
     const mlx_dtype type,
     const std::shared_ptr<const qwen38::SafetensorsFile>& owner,
     const std::shared_ptr<CleanupState>& cleanup,
-    std::vector<std::shared_ptr<CleanupState>>& cleanup_states) {
+    std::vector<std::shared_ptr<CleanupState>>& cleanup_states,
+    std::shared_ptr<void> backing = {}) {
     if (source == nullptr || bytes == 0 || shape.empty() || shape.size() > 3) {
         throw std::runtime_error("invalid managed import request: " + label);
     }
     cleanup_states.push_back(cleanup);
-    auto* payload = new Payload{owner, cleanup};
+    auto* payload = new Payload{owner, cleanup, std::move(backing)};
     mlx_array value = mlx_array_new_data_managed_payload(
         const_cast<std::byte*>(source), shape.data(), static_cast<int>(shape.size()), type,
         payload, release_payload);
@@ -354,18 +378,24 @@ qwen38::MlxArray typed_expert(
     const std::size_t expert,
     const bool copied,
     TypedStats* stats = nullptr) {
-    const Window geometry = page_window(tensor, expert);
+    if (expert >= tensor.shape[0]) throw std::runtime_error("typed expert ID out of range");
     const std::size_t bytes = tensor.bytes.size() / tensor.shape[0];
     const std::vector<int> shape{
         mlx_dimension(tensor.shape[1], "expert rows"),
         mlx_dimension(tensor.shape[2], "expert columns"),
     };
-    if (geometry.delta > window.oracle.size() ||
-        bytes > window.oracle.size() - geometry.delta) {
+    if (window.delta > window.oracle.size() ||
+        bytes > window.oracle.size() - window.delta) {
         throw std::runtime_error("typed expert exceeds independent oracle");
     }
-    const int start = mlx_dimension(geometry.delta, "typed slice start");
-    const int stop = mlx_dimension(geometry.delta + bytes, "typed slice end");
+    // Independently bind the selected ID to the original tensor row; otherwise
+    // staging and oracle paths could agree while both used the wrong expert.
+    if (std::memcmp(window.oracle.data() + window.delta,
+                    tensor.bytes.data() + expert * bytes, bytes) != 0) {
+        throw std::runtime_error("selected expert does not match original tensor row");
+    }
+    const int start = mlx_dimension(window.delta, "typed slice start");
+    const int stop = mlx_dimension(window.delta + bytes, "typed slice end");
     const int stride = 1;
     StreamHandle stream;
     ArrayHandle sliced;
@@ -373,7 +403,7 @@ qwen38::MlxArray typed_expert(
     ArrayHandle typed;
     const auto* base = static_cast<const std::byte*>(array_data(window.value, MLX_UINT8));
     if (base == nullptr) throw std::runtime_error("typed expert source data unavailable");
-    const auto* source = base + geometry.delta;
+    const auto* source = base + window.delta;
     // Raw safetensors payloads need not be naturally aligned. Byte reads are
     // valid there, but stock typed QMM kernels are not. Stage exact U8 bytes
     // BEFORE viewing them as U32/BF16, never cast an odd host pointer either.
@@ -381,7 +411,7 @@ qwen38::MlxArray typed_expert(
     if (copied) {
         const int byte_count = mlx_dimension(bytes, "oracle byte count");
         aligned.value = mlx_array_new_data(
-            window.oracle.data() + geometry.delta, &byte_count, 1, MLX_UINT8);
+            window.oracle.data() + window.delta, &byte_count, 1, MLX_UINT8);
         if (aligned.value.ctx == nullptr) throw std::runtime_error("copied QMM oracle allocation failed");
     } else {
         check(mlx_slice(&sliced.value, window.value, &start, 1, &stop, 1, &stride, 1,
@@ -403,7 +433,8 @@ qwen38::MlxArray typed_expert(
     const void* actual = array_data(result.get(), dtype(tensor.dtype));
     if (reinterpret_cast<std::uintptr_t>(actual) % 16 != 0 ||
         (!copied && !needs_staging && actual != source) ||
-        ((copied || needs_staging) && actual == source)) {
+        ((copied || needs_staging) && actual == source) ||
+        (copied && actual == window.oracle.data() + window.delta)) {
         throw std::runtime_error("typed expert alignment/ownership assertion failed");
     }
     if (!copied && stats != nullptr) {
@@ -504,6 +535,82 @@ void verify_projection_qmm(
             }
             throw std::runtime_error("mapped/copy QMM mismatch: " + projection.name +
                 " expert=" + std::to_string(expert) + " rows=" + std::to_string(rows));
+        }
+    }
+}
+
+void check_moe_stage(const qwen38::MlxArray& value, const int rows, const int width) {
+    if (value.dtype() != MLX_BFLOAT16 || value.shape() != std::vector<int>{1, rows, width}) {
+        throw std::runtime_error("selected MoE intermediate shape/dtype mismatch");
+    }
+    const auto values = value.astype(MLX_FLOAT32).to_float32();
+    synchronize_gpu();
+    if (!std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); })) {
+        throw std::runtime_error("nonfinite selected MoE intermediate");
+    }
+}
+
+qwen38::MlxArray selected_moe(
+    const qwen38::MlxArray& input,
+    const std::vector<Projection>& projections,
+    const std::span<const Imported> imports,
+    const std::span<const std::size_t> ids,
+    const bool copied,
+    const int rows) {
+    if (projections.size() != 3 || ids.empty() || imports.size() != ids.size() * 9) {
+        throw std::runtime_error("invalid selected MoE projection batch");
+    }
+    qwen38::MlxArray sum;
+    for (std::size_t slot = 0; slot < ids.size(); ++slot) {
+        const auto project = [&](const qwen38::MlxArray& x, const std::size_t p) {
+            const auto& projection = projections[p];
+            const std::size_t base = (p * ids.size() + slot) * 3;
+            auto w = typed_expert(imports[base], projection.weight, ids[slot], copied);
+            auto s = typed_expert(imports[base + 1], projection.scales, ids[slot], copied);
+            auto b = typed_expert(imports[base + 2], projection.biases, ids[slot], copied);
+            return qwen38::MlxArray::quantized_matmul(x, w, s, b, 64, 4);
+        };
+        auto gate = project(input, 0).silu();
+        auto up = project(input, 1);
+        check_moe_stage(gate, rows, 640);
+        check_moe_stage(up, rows, 640);
+        auto hidden = qwen38::MlxArray::multiply(gate, up);
+        check_moe_stage(hidden, rows, 640);
+        auto output = project(hidden, 2);
+        check_moe_stage(output, rows, 2560);
+        const float probability = static_cast<float>(slot + 1) /
+            static_cast<float>(ids.size() * (ids.size() + 1) / 2);
+        auto weight = qwen38::MlxArray::from_float32(
+            std::vector<float>{probability}, std::vector<int>{}).astype(output.dtype());
+        auto weighted = qwen38::MlxArray::multiply(output, weight);
+        // Preserve the production reference's BF16 scalar cast and ordered
+        // add, not a different reduction tree or accumulation precision.
+        sum = slot == 0 ? std::move(weighted) : qwen38::MlxArray::add(sum, weighted);
+        check_moe_stage(sum, rows, 2560);
+    }
+    return sum;
+}
+
+void verify_selected_moe(
+    const std::vector<Projection>& projections,
+    const std::span<const Imported> imports,
+    const std::span<const std::size_t> ids) {
+    for (const int rows : {1, 4, 32}) {
+        std::vector<float> values(static_cast<std::size_t>(rows) * 2560);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = static_cast<float>(static_cast<int>((i * 23 + rows) % 127) - 63) / 64.0F;
+        }
+        const auto input = qwen38::MlxArray::from_float32(
+            values, std::vector<int>{1, rows, 2560}).astype(MLX_BFLOAT16);
+        auto staged = selected_moe(input, projections, imports, ids, false, rows);
+        auto copied = selected_moe(input, projections, imports, ids, true, rows);
+        check_moe_stage(staged, rows, 2560);
+        check_moe_stage(copied, rows, 2560);
+        const std::size_t bytes = static_cast<std::size_t>(rows) * 2560 * 2;
+        if (std::memcmp(array_data(staged.get(), MLX_BFLOAT16),
+                        array_data(copied.get(), MLX_BFLOAT16), bytes) != 0) {
+            throw std::runtime_error("selected MoE exact parity failed: rows=" +
+                std::to_string(rows) + " experts=" + std::to_string(ids.size()));
         }
     }
 }
@@ -644,23 +751,31 @@ int run_probe(int argc, char** argv) {
         std::size_t copy_count = 0;
         TypedStats typed_stats;
         std::size_t qmm_cases = 0;
+        std::size_t padded_windows = 0;
+        std::size_t moe_cases = 0;
+        std::vector<std::weak_ptr<void>> padded_owners;
+        constexpr std::array<std::size_t, 10> selected_ids{0, 287, 31, 129, 7, 256, 63, 17, 201, 95};
         for (const std::size_t count : {std::size_t{1}, std::size_t{8}, std::size_t{10}}) {
-            const std::size_t first_expert = 1;
-            if (count + first_expert > expert_count) throw std::runtime_error("fixture lacks requested experts");
+            const std::size_t batch_begin = imports.size();
             for (const Projection& projection : projections) {
-                for (std::size_t expert = first_expert; expert < first_expert + count; ++expert) {
+                for (std::size_t slot = 0; slot < count; ++slot) {
+                    const std::size_t expert = selected_ids[slot];
+                    if (expert >= expert_count) throw std::runtime_error("fixture lacks requested expert");
                     const std::string prefix = projection.name + ".expert" + std::to_string(expert) + ".U" + std::to_string(count);
                     for (const auto [suffix, view] : {
                              std::pair<std::string_view, const qwen38::TensorView&>{"weight", projection.weight},
                              {"scales", projection.scales},
                              {"biases", projection.biases}}) {
-                        const Window window = page_window(view, expert);
+                        const Window window = page_window(view, expert, *projection.owner);
+                        padded_windows += window.backing ? 1 : 0;
+                        if (window.backing) padded_owners.push_back(window.backing);
                         const auto window_cleanup = std::make_shared<CleanupState>();
                         Imported imported_window = managed_import(
                             prefix + "." + std::string(suffix) + ".window", window.begin, window.bytes,
                             {mlx_dimension(window.bytes, prefix + "." + std::string(suffix))},
                             MLX_UINT8, projection.owner, window_cleanup,
-                            cleanup_states);
+                            cleanup_states, window.backing);
+                        imported_window.delta = window.delta;
                         imported_window.alias = array_data(imported_window.value, MLX_UINT8) == window.begin;
                         verify_gpu_bytes(
                             imported_window.value, imported_window.oracle.data(), window.bytes,
@@ -696,6 +811,10 @@ int run_probe(int argc, char** argv) {
                     qmm_cases += 3;
                 }
             }
+            verify_selected_moe(projections,
+                std::span<const Imported>(imports).subspan(batch_begin),
+                std::span<const std::size_t>(selected_ids).first(count));
+            moe_cases += 3;
             print_memory(std::string("U") + std::to_string(count) + "_loaded");
         }
         std::cout << "imports=" << imports.size() << " alias=" << alias_count
@@ -704,6 +823,10 @@ int run_probe(int argc, char** argv) {
                   << " rows=1,4,32 finite=true exact=true\n";
         std::cout << "typed_aliased=" << typed_stats.aliased
                   << " typed_staged=" << typed_stats.staged << '\n';
+        std::cout << "padded_eof_windows=" << padded_windows << '\n';
+        std::cout << "file_backed_windows=" << imports.size() - padded_windows << '\n';
+        std::cout << "selected_moe_parity_cases=" << moe_cases
+                  << " rows=1,4,32 experts=1,8,10 finite=true exact=true\n";
         if (process_usage().ri_lifetime_max_phys_footprint > 1024ULL * mib) {
             throw std::runtime_error("probe exceeded 1 GiB lifetime footprint guard");
         }
@@ -726,6 +849,10 @@ int run_probe(int argc, char** argv) {
         synchronize_gpu();
         if (!gate_weak.expired() || !down_weak.expired()) {
             throw std::runtime_error("safetensors mapping owner survived final array release");
+        }
+        if (!std::all_of(padded_owners.begin(), padded_owners.end(),
+                         [](const auto& owner) { return owner.expired(); })) {
+            throw std::runtime_error("EOF padding backing survived array release");
         }
         check_cleanup(cleanup_states, expected_successes, failure_state);
         print_memory("arrays_released");

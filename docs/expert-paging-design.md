@@ -82,6 +82,13 @@ address requirement and exact BF16 projection outputs; see
 window and staging buffer while their GPU work overlaps. Do not equate the raw
 window alias counter with zero-copy inference.
 
+Boundary and selected-branch gate now passes for deterministic nonconsecutive
+expert IDs including 0 and 287. Valid header/adjacent-tensor bytes can be included
+inside the explicit full-file span; EOF tails use owned zero-padded windows.
+Selected gate/SiLU/up/down/weighted ordered sums agree exactly with copied
+oracles. The router/shared/fused path and byte-budgeted eviction remain separate
+integration gates, not implied by these arithmetic checks.
+
 No full-model launch is justified by the import probe alone. The 30 GiB process
 budget needs a measured reserve outside MLX; polling guards are a secondary
 stop mechanism, not an allocation-time guarantee.

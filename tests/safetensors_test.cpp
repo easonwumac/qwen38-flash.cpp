@@ -45,6 +45,12 @@ void run_safetensors_tests() {
         QWEN38_CHECK(tensor.shape[0] == 4);
         QWEN38_CHECK(tensor.bytes.size() == 4);
         QWEN38_CHECK(std::to_integer<unsigned char>(tensor.bytes[2]) == 3);
+        const auto mapping = file.mapped_view();
+        QWEN38_CHECK(mapping.size() == file.mapped_bytes());
+        QWEN38_CHECK(mapping.size() == std::filesystem::file_size(path));
+        QWEN38_CHECK(tensor.bytes.data() >= mapping.data());
+        QWEN38_CHECK(tensor.bytes.data() + tensor.bytes.size() ==
+                     mapping.data() + mapping.size());
     }
     std::filesystem::remove(path);
 }

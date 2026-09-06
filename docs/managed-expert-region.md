@@ -5,7 +5,7 @@ It does not change model loading or production MoE execution and never asks
 MLX to load a complete projection or a complete shard tensor.
 
 The probe opens only the layer-0 safetensors header and obtains CPU views from
-`SafetensorsFile`. For cumulative expert ranges U1, U8 and U10 it imports a page-aligned U8
+`SafetensorsFile`. For cumulative selections U1, U8 and U10 it imports a page-aligned U8
 window around each selected gate/up/down weight, scale, and bias range, then
 uses an MLX U8 slice for the exact expert bytes. This keeps every managed raw
 pointer page-aligned while still exercising the real byte geometry. The probe
@@ -45,8 +45,10 @@ before creating any MLX arrays. Host mmap pages and host backing for the
 intentional refusal test are outside that allocator limit, so the output's
 physical footprint remains a separate safety measurement.
 
-The page-aligned window is rejected if alignment would extend past the
-tensor's logical `TensorView` bytes; the probe never relies on bytes past EOF.
+The page-aligned window is bounded by the owner's full read-only mapped span,
+so it can include adjacent tensor/header bytes. If its final page extends past
+EOF, it uses an owned, zero-padded aligned buffer and copies only valid file
+bytes; it never reads past EOF.
 An alias result is evidence only for the tested pointer/length/MLX build and
 hardware. A copy result is a supported fallback, not a failed correctness
 case. No conclusion about production zero-copy paging follows without this
@@ -77,10 +79,10 @@ reports macOS's lifetime maximum physical footprint. Internal measurement
 failure is fatal rather than silently treated as zero.
 
 Limitations: the two layer-0 shard filenames are specific to the retained
-131-shard pack. Alignment windows at tensor boundaries are deliberately
-rejected. The managed-import copy fallback was not exercised on this hardware.
-There is no routed MoE computation, real routing, cold-SSD benchmark or full-model
-run yet. This validates a managed GPU-readable region primitive, not 30 GiB
+131-shard pack. The managed-import copy fallback was not exercised on this hardware.
+There is no real routing, shared-expert/fused execution, cold-SSD benchmark or
+full-model run yet. Deterministic selected-expert arithmetic is now tested below.
+This validates a managed GPU-readable region primitive, not 30 GiB
 inference or preservation of decode/PP performance.
 
 ## Typed Q4 computation and alignment correction
@@ -125,3 +127,39 @@ the tokenizer fixture-dependent test was skipped. Existing dylib deployment
 target warnings (26.0 executable versus 26.2 libraries) remain. These are
 correctness/memory probes, with no prompt corpus or thermal-controlled timing
 measurement and no MTP execution.
+
+## Boundary experts and selected-expert composition
+
+The current selections take the first 1, 8 or 10 entries from
+`[0, 287, 31, 129, 7, 256, 63, 17, 201, 95]`. This includes both boundary experts
+and nonconsecutive interior IDs. Each typed input's oracle is also compared to
+the original tensor row for that ID, preventing a shared indexing mistake in
+the staged and copied paths from giving false parity.
+
+`SafetensorsFile::mapped_view()` exposes the read-only full file extent while
+retaining the existing ownership requirement. A unit test checks its size and
+tensor containment. Page windows use checked address extents. Leading windows
+can include valid header bytes; trailing partial EOF pages use aligned owned
+storage, zero-filled beyond the actual file. Managed payloads retain that storage,
+and weak-owner assertions verify it is released after final GPU completion.
+Each current round has 169 file-backed windows and 2 padded owned windows.
+`alias=171` means MLX aliases all supplied window buffers, **not** that all 171
+still alias the file itself.
+
+For each U/row combination, the probe computes the full selected-expert branch:
+gate QMM + SiLU, up QMM, hidden multiply, down QMM, BF16 scalar probability
+multiply, then ordered BF16 additions. This matches the non-fused reference's
+arithmetic order, not a new reduction tree. Inputs are `[1, rows, 2560]` BF16;
+every intermediate is checked for shape, dtype and finite values. Fixed positive
+weights `(slot+1) / (U*(U+1)/2)` are synthetic selections, not router outputs.
+
+Three rounds pass 27 selected-expert output comparisons and 513 projection
+comparisons with exact BF16 bits. With the added original-row identity checks,
+the same-machine lifetime footprint peak is about 168–169 MiB, MLX active peak
+about 56 MiB, and final MLX active/cache 0/0 each round. Footprint settles near
+135–136 MiB. A fresh full Release build and its repeated probe passed; CTest
+passed core, memory guard and MLX tests, with the tokenizer fixture test skipped.
+This includes diagnostic oracles and repeated imports; it is not an optimized
+runtime memory figure. No weights were changed. Real GPU routing, shared expert,
+fused kernels, bounded cache eviction and full-model inference remain untested
+on this staging route.

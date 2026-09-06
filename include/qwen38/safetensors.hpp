@@ -35,6 +35,11 @@ public:
     [[nodiscard]] bool contains(std::string_view name) const;
     [[nodiscard]] TensorView tensor(std::string_view name) const;
     [[nodiscard]] std::size_t mapped_bytes() const noexcept { return file_.size(); }
+    // Read-only file extent for bounded region imports. The span cannot outlive
+    // this owner; consumers must not read beyond it to round up GPU pages.
+    [[nodiscard]] std::span<const std::byte> mapped_view() const noexcept {
+        return file_.bytes();
+    }
 
 private:
     MappedFile file_;
