@@ -1,0 +1,91 @@
+# Managed expert-region probe
+
+`qwen38-managed-expert-region-probe` is a developer-only, bounded experiment.
+It does not change model loading or production MoE execution and never asks
+MLX to load a complete projection or a complete shard tensor.
+
+The probe opens only the layer-0 safetensors header and obtains CPU views from
+`SafetensorsFile`. For expert ID 1, IDs 1–8 and IDs 1–10 it imports a page-aligned U8
+window around each selected gate/up/down weight, scale, and bias range, then
+uses an MLX U8 slice for the exact expert bytes. This keeps every managed raw
+pointer page-aligned while still exercising the real byte geometry. The probe
+records whether MLX's managed raw-pointer constructor aliases the source
+pointer or falls back to a copy, then compares every window and exact slice
+with a separately copied bounded CPU oracle through `mlx_array_equal` on the
+GPU stream. It drops the catalog owner and repeats fresh GPU comparisons to
+prove the managed payload retains the mmap.
+
+Each managed payload has an independent shared mapping owner and cleanup
+counter. The probe also lowers the strict allocator limit to the currently
+active amount and verifies a 1 MiB managed import is refused without a double
+cleanup. The MLX-C error handler is installed as a no-op because the default
+handler terminates the process on allocator errors.
+
+## Run
+
+Use the private strict MLX build first in the dynamic-library path. The
+workflow's external guard should wrap the one GPU process with a 16 GiB start,
+12 GiB available, and 1 GiB footprint/RSS ceiling:
+
+```sh
+# Run from the project capsule (the parent of source/).
+python3 source/devtools/memory_guard.py \
+  --min-start-gib 16 --min-available-gib 12 \
+  --max-rss-gib 1 --max-footprint-gib 1 --interval 0.1 -- \
+  env DYLD_LIBRARY_PATH="$PWD/experiments/strict-mlx/stage/lib" \
+  MLX_STRICT_MEMORY_LIMIT=1 \
+  "$PWD/source/build-all/qwen38-managed-expert-region-probe" \
+  /path/to/Qwen3.8-Flash-Next-REAP-288-MLX-4bit-repacked-MTP-Q8-REAP288-L47 \
+  --rounds 3
+```
+
+Configure/build with at most two jobs and the pinned MLX-C include/library
+paths. The probe sets a 512 MiB MLX memory limit and 16 MiB MLX cache limit
+before creating any MLX arrays. Host mmap pages and host backing for the
+intentional refusal test are outside that allocator limit, so the output's
+physical footprint remains a separate safety measurement.
+
+The page-aligned window is rejected if alignment would extend past the
+tensor's logical `TensorView` bytes; the probe never relies on bytes past EOF.
+An alias result is evidence only for the tested pointer/length/MLX build and
+hardware. A copy result is a supported fallback, not a failed correctness
+case. No conclusion about production zero-copy paging follows without this
+probe's result on the target machine.
+
+## Verified result
+
+The retained layer-0 Q4/group-64 geometry has 819,200 weight bytes per expert
+per projection, plus BF16 scales/biases. On Apple M5 Pro / 64 GiB / macOS 26.5
+(25F71), with the pinned private strict allocator, all 171 windows aliased their mmap
+source; none used the copy fallback. All window/exact-slice GPU byte comparisons
+passed, including fresh comparisons after catalog owners were dropped. Weak
+mapping owners expired after final GPU completion and array release. Every
+successful payload callback ran once. The intentional 1 MiB import was refused
+and its untransferred payload was cleaned manually once.
+
+U1, U8 and U10 are **cumulative** within a round: 9 * (1 + 8 + 10) = 171
+windows remain live, including overlapping/repeated experts. They are not 171
+distinct experts or a cache eviction test. Three rounds in the same process
+passed with MLX active peak about 54 MiB each, lifetime physical-footprint peak
+about 153 MiB, and final active/cache 0/0 after each round. Physical footprint
+settled near 130 MiB and RSS near 76 MiB each time: allocator zero does **not**
+mean the process returned all physical memory. No monotonic growth appeared
+in these three rounds; this is not a long-duration leak proof.
+
+The short run can finish between external monitor samples, so the probe also
+reports macOS's lifetime maximum physical footprint. Internal measurement
+failure is fatal rather than silently treated as zero.
+
+Limitations: the two layer-0 shard filenames are specific to the retained
+131-shard pack. Alignment windows at tensor boundaries are deliberately
+rejected. The copy fallback was not exercised on this hardware. There is no
+quantized MoE computation, real routing, cold-SSD benchmark or full-model run
+yet. This validates a managed GPU-readable region primitive, not 30 GiB
+inference or preservation of decode/PP performance.
+
+Verification: fresh developer-target build and coordinator full build passed
+with two compiler jobs. CTest: core, memory guard and MLX tests passed;
+the tokenizer fixture-dependent test was skipped. Existing dylib deployment
+target warnings (26.0 executable versus 26.2 libraries) remain. These are
+correctness/memory probes, with no prompt corpus or thermal-controlled timing
+measurement and no MTP execution.

@@ -131,6 +131,11 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     target_link_libraries(qwen38-prefix-memory-probe PRIVATE qwen38_mlx)
     add_executable(qwen38-strict-allocator-probe devtools/strict_allocator_probe.cpp)
     target_link_libraries(qwen38-strict-allocator-probe PRIVATE qwen38_mlx)
+    add_executable(qwen38-managed-expert-region-probe
+        devtools/managed_expert_region_probe.cpp)
+    target_link_libraries(qwen38-managed-expert-region-probe PRIVATE qwen38_mlx)
+    set_target_properties(qwen38-managed-expert-region-probe PROPERTIES
+        BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     set_target_properties(qwen38-prefix-memory-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
     add_executable(qwen38-direct-q4-probe devtools/direct_q4_probe.cpp)
