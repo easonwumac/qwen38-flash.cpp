@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
         bool unpacked_decode = true;
         bool trace_policy = false;
         bool parallel_reads = false;
+        bool fixed_slots=false, fixed_baseline=false;
         for (int i = 2; i < argc; ++i) {
             const std::string_view flag(argv[i]);
             if (flag == "--layer-parity") layer_only = true;
@@ -92,6 +93,8 @@ int main(int argc, char** argv) {
             else if (flag == "--packed-decode") unpacked_decode = false;
             else if (flag == "--trace-policy") trace_policy = true;
             else if (flag == "--parallel-reads") parallel_reads = true;
+            else if (flag == "--fixed-slots") fixed_slots=true;
+            else if (flag == "--fixed-baseline") { fixed_slots=true; fixed_baseline=true; }
             else throw std::runtime_error("unknown probe flag");
         }
         if (argc < 2 || std::getenv("QWEN38_MEMORY_GUARD") == nullptr ||
@@ -100,12 +103,15 @@ int main(int argc, char** argv) {
             throw std::runtime_error("usage: guarded private-strict probe MODEL_DIRECTORY");
         if (steady_only && !elastic) throw std::runtime_error("--steady-only requires --elastic");
         if (trace_policy && legacy_frequency) throw std::runtime_error("trace validation requires default frequency");
+        if (fixed_slots && (trace_policy || elastic || serial || legacy_frequency || parallel_reads || !unpacked_decode))
+            throw std::runtime_error("fixed slots require an isolated probe configuration");
         // Research-only: leave 4 GiB outside the MLX cap for host staging and
         // framework memory. The external guard independently limits the process.
         mlx_set_error_handler([](const char* message, void*) { std::cerr << message << '\n'; }, nullptr, nullptr);
         std::size_t old = 0;
         process_ceiling = elastic ? elastic_steady + 8 * gib : 24 * gib;
-        check(mlx_set_memory_limit(&old, layer_only ? 3 * gib : process_ceiling - 4 * gib));
+        if (fixed_slots) process_ceiling=42*gib;
+        check(mlx_set_memory_limit(&old, layer_only ? 3 * gib : process_ceiling - (fixed_slots ? 2 : 4) * gib));
         check(mlx_set_cache_limit(&old, 0));
         check(mlx_clear_cache());
         if (layer_only) {
@@ -113,8 +119,23 @@ int main(int argc, char** argv) {
             qwen38::MlxTensorStore paged(qwen38::ModelManifest::load(argv[1]),
                 (serial ? 8 : 64) * 1024 * 1024, !serial, 4096, !rowwise_pp, !unpacked_decode, parallel_reads);
             qwen38::MlxTensorStore reference(qwen38::ModelManifest::load(argv[1]));
+            if (fixed_slots) { paged.enable_fixed_slots(256); reference.enable_fixed_slots(288); }
             const auto& config = paged.manifest().config();
             const std::string prefix = "language_model.model.layers." + std::to_string(layer) + ".mlp";
+            if (fixed_slots) {
+                std::vector<qwen38::MlxTensorStore::ExpertLease> held;
+                for (std::size_t id=256; id<264; ++id) held.push_back(paged.expert(prefix,id));
+                bool refused=false;
+                try { static_cast<void>(paged.expert(prefix,264)); }
+                catch (const std::runtime_error& e) {
+                    if (std::string_view(e.what())!="all fixed cold slots leased") throw;
+                    refused=true;
+                }
+                if (!refused) throw std::runtime_error("fixed slot pin protection failed");
+                held.clear();
+                static_cast<void>(paged.expert(prefix,264));
+                std::cout << "fixed_pinned_refusal_and_reuse=true" << std::endl;
+            }
             qwen38::SparseMoe a(paged, prefix, 288, 10, 4, 64, true);
             qwen38::SparseMoe b(reference, prefix, 288, 10, 4, 64, true);
             for (const int rows : {1, 4, 32, 64}) {
@@ -148,11 +169,16 @@ int main(int argc, char** argv) {
         if (!plan.feasible) throw std::runtime_error("infeasible probe memory plan");
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]), steady_budget, !serial,
             legacy_frequency ? 64 : 4096, !rowwise_pp, !unpacked_decode, parallel_reads);
-        std::cout << "expert_steady_gib=" << double(steady_budget) / gib
+        if (fixed_slots) tensors.enable_fixed_slots(fixed_baseline ? 288 : 256);
+        if (fixed_slots) std::cout << "fixed_hot_per_layer=" << (fixed_baseline ? 288 : 256)
+            << " fixed_cold_slots_per_layer=" << (fixed_baseline ? 0 : 8)
+            << " process_ceiling_gib=" << double(process_ceiling)/gib << std::endl;
+        else std::cout << "expert_steady_gib=" << double(steady_budget) / gib
                   << " expert_burst_limit_gib=" << double(burst_budget) / gib
                   << " process_ceiling_gib=" << double(process_ceiling) / gib
                   << " batch_experts=" << !serial << std::endl;
         qwen38::QwenModel model(tensors);
+        if (fixed_slots) tensors.preload_fixed_slots();
         usage("loaded");
         std::cout << "load_seconds=" << std::chrono::duration<double>(Clock::now() - load_started).count() << std::endl;
         auto state = model.make_state();
@@ -196,7 +222,7 @@ int main(int argc, char** argv) {
             replay_policies(tensors, steady_budget);
         }
         // Return borrowed expert capacity before building the PP workspace.
-        if (!tensors.set_expert_budget(steady_budget)) throw std::runtime_error("PP reserve shrink blocked");
+        if (!fixed_slots && !tensors.set_expert_budget(steady_budget)) throw std::runtime_error("PP reserve shrink blocked");
         usage("pp_reserve");
         std::vector<std::uint32_t> prompt{9419, 11, 358, 1440, 264, 1937, 13, 198};
         if (pp64) {
@@ -244,9 +270,10 @@ int main(int argc, char** argv) {
                   << " load_ms=" << tensors.expert_load_ms() - loads_before << std::endl;
         usage("prefill");
         }
-        if (!tensors.set_expert_budget(steady_budget)) throw std::runtime_error("steady shrink blocked");
-        std::cout << "expert_shrunk_gib=" << double(tensors.expert_stats().resident_bytes) / gib << std::endl;
-        const auto restored = usage("steady_restored");
+        if (!fixed_slots && !tensors.set_expert_budget(steady_budget)) throw std::runtime_error("steady shrink blocked");
+        std::cout << (fixed_slots ? "fixed_expert_gib=" : "expert_shrunk_gib=")
+            << double(tensors.expert_stats().resident_bytes) / gib << std::endl;
+        const auto restored = usage(fixed_slots ? "fixed_final" : "steady_restored");
         if (elastic && restored > elastic_steady)
             throw std::runtime_error("process failed to return below steady target");
         return 0;

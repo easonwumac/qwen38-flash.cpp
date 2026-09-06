@@ -737,6 +737,22 @@ MlxArray SparseMoe::forward_paged_packed(const MlxArray& input) const {
     const int topk = checked_int(selection.experts.size(), "packed topk");
     std::vector<MlxTensorStore::ExpertLease> leases;
     for (const auto id : selection.experts) leases.push_back(paged_store_->expert(prefix_, id));
+    if (paged_store_->fixed_slots()) {
+        const auto& f=paged_store_->fixed_fields(prefix_);
+        auto ids=MlxArray::from_int32(paged_store_->fixed_ids(prefix_,selection.experts),std::vector<int>{topk});
+        auto weights=MlxArray::from_float32(selection.weights,std::vector<int>{topk});
+        const MlxArray* g[]{&input,&f[0],&f[1],&f[2],&f[3],&f[4],&f[5],&ids};
+        auto h=fused_gate_up_kernel()->apply(g,std::vector<int>{10,640},input.dtype(),
+            std::array<int,3>{200*1024,1,1},std::array<int,3>{1024,1,1});
+        const MlxArray* d[]{&h,&f[6],&f[7],&f[8],&ids,&weights};
+        auto sum=fused_down_kernel()->apply(d,std::vector<int>{1,1,2560},input.dtype(),
+            std::array<int,3>{320*64,1,1},std::array<int,3>{64,1,1});
+        sum.eval();
+        const auto stream=mlx_default_gpu_stream_new();
+        const int status=mlx_synchronize(stream); static_cast<void>(mlx_stream_free(stream));
+        if (status) throw std::runtime_error("fixed fused completion failed");
+        return MlxArray::add(sum,forward_shared(input));
+    }
     std::vector<MlxArray> packed;
     for (std::size_t field = 0; field < 9; ++field) {
         std::vector<MlxArray> parts;
@@ -869,22 +885,26 @@ MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
         throw std::runtime_error("paged MoE requires [1,S,hidden], S=1..1024");
     if (paged_store_->batch_experts() && paged_store_->grouped_prefill() && shape[1] > 1)
         return forward_paged_grouped(input);
-    if (paged_store_->batch_experts() && paged_store_->packed_decode() && shape[1] == 1)
+    if (paged_store_->fixed_slots() && shape[1]==1 &&
+        paged_store_->fixed_batch_fits(route_decode(input).experts))
+        return forward_paged_packed(input);
+    if (!paged_store_->fixed_slots() && paged_store_->batch_experts() && paged_store_->packed_decode() && shape[1] == 1)
         return forward_paged_packed(input);
     std::vector<MlxArray> rows;
     rows.reserve(static_cast<std::size_t>(shape[1]));
     for (int row = 0; row < shape[1]; ++row) {
         const MlxArray x = slice_sequence_row(input, static_cast<std::size_t>(row));
         const auto selection = route_decode(x);
+        const bool batch=paged_store_->batch_experts() && paged_store_->fixed_batch_fits(selection.experts);
         MlxArray sum;
         std::vector<MlxTensorStore::ExpertLease> leases;
-        if (paged_store_->batch_experts()) {
+        if (batch) {
             leases.reserve(selection.experts.size());
             for (const auto expert : selection.experts)
                 leases.push_back(paged_store_->expert(prefix_, expert));
         }
         for (std::size_t i = 0; i < selection.experts.size(); ++i) {
-            const auto lease = paged_store_->batch_experts() ? leases[i] :
+            const auto lease = batch ? leases[i] :
                 paged_store_->expert(prefix_, selection.experts[i]);
             const auto project_one = [&](const MlxArray& value, const std::size_t p) {
                 const auto& w = (*lease)[p];
@@ -902,7 +922,7 @@ MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
                 std::vector<float>{selection.weights[i]}, std::vector<int>{}).astype(output.dtype());
             MlxArray weighted = MlxArray::multiply(output, weight);
             sum = i == 0 ? std::move(weighted) : MlxArray::add(sum, weighted);
-            if (!paged_store_->batch_experts() || i + 1 == selection.experts.size()) {
+            if (!batch || i + 1 == selection.experts.size()) {
               sum.eval();
             const auto stream = mlx_default_gpu_stream_new();
             const int status = mlx_synchronize(stream);

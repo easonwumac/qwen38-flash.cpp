@@ -287,9 +287,19 @@ public:
     [[nodiscard]] bool batch_experts() const noexcept { return batch_experts_; }
     [[nodiscard]] bool grouped_prefill() const noexcept { return grouped_prefill_; }
     [[nodiscard]] bool packed_decode() const noexcept { return packed_decode_; }
+    // Guarded developer probe only: synchronous fixed-slot ownership.
+    void enable_fixed_slots(std::size_t hot_count);
+    void preload_fixed_slots();
+    [[nodiscard]] bool fixed_slots() const noexcept { return fixed_hot_ != 0; }
+    [[nodiscard]] bool fixed_batch_fits(std::span<const std::size_t> ids) const;
+    [[nodiscard]] const ExpertArrays& fixed_fields(std::string_view prefix) const;
+    [[nodiscard]] std::vector<std::int32_t> fixed_ids(std::string_view prefix,
+        std::span<const std::size_t> ids) const;
     bool set_expert_budget(std::size_t bytes);
     [[nodiscard]] ExpertLease expert(std::string_view prefix, std::size_t id);
-    [[nodiscard]] const ExpertCache<ExpertArrays>::Stats& expert_stats() const { return experts_.stats(); }
+    [[nodiscard]] const ExpertCache<ExpertArrays>::Stats& expert_stats() const {
+        return fixed_slots() ? fixed_stats_ : experts_.stats();
+    }
     [[nodiscard]] double expert_load_ms() const noexcept { return expert_load_ms_; }
 
     [[nodiscard]] MlxArray tensor(std::string_view name);
@@ -297,6 +307,12 @@ public:
     [[nodiscard]] const ModelManifest& manifest() const noexcept { return manifest_; }
 
 private:
+    struct FixedLayer;
+    std::size_t fixed_hot_{0};
+    std::unordered_map<std::string, std::shared_ptr<FixedLayer>> fixed_layers_;
+    ExpertCache<ExpertArrays>::Stats fixed_stats_;
+    FixedLayer& fixed_layer(const std::string& prefix);
+    ExpertLease fixed_expert(const std::string& prefix, std::size_t id);
     ModelManifest manifest_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<MlxSafetensors>> shards_;

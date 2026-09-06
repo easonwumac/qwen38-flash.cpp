@@ -1114,9 +1114,155 @@ MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optiona
     return result;
 }
 
+struct MlxTensorStore::FixedLayer {
+    struct Field {
+        std::shared_ptr<void> storage;
+        std::filesystem::path path;
+        std::size_t offset{}, bytes{};
+    };
+    std::array<Field,9> disk;
+    ExpertArrays arrays;
+    std::vector<ExpertLease> views;
+    std::vector<int> ids;
+    std::vector<std::uint64_t> touches;
+    std::uint64_t clock{};
+    bool failed{false};
+    void fill(std::size_t slot, std::size_t expert) {
+        check(mlx_synchronize(default_gpu_stream()), "fixed slot write fence");
+        // On partial I/O failure this layer becomes unusable; abort the probe.
+        failed = true;
+        for (auto& f : disk) {
+            std::ifstream file(f.path,std::ios::binary);
+            file.seekg(static_cast<std::streamoff>(f.offset+expert*f.bytes));
+            file.read(static_cast<char*>(f.storage.get())+slot*f.bytes,
+                static_cast<std::streamsize>(f.bytes));
+            if (!file) throw std::runtime_error("fixed slot read failed");
+        }
+        ids[slot] = static_cast<int>(expert); // publish only after all nine reads
+        failed = false;
+    }
+};
+
+void MlxTensorStore::enable_fixed_slots(std::size_t hot_count) {
+    const char* strict=std::getenv("MLX_STRICT_MEMORY_LIMIT");
+    if (!std::getenv("QWEN38_MEMORY_GUARD") || !strict || std::string_view(strict)!="1")
+        throw std::runtime_error("fixed slots require guarded strict research runtime");
+    if ((hot_count != 256 && hot_count != 288) || !catalogs_.empty() || !shards_.empty() || fixed_slots())
+        throw std::runtime_error("fixed slots must be configured before model load");
+    fixed_hot_ = hot_count;
+    paged_ = true;
+    batch_experts_ = true;
+}
+
+MlxTensorStore::FixedLayer& MlxTensorStore::fixed_layer(const std::string& prefix) {
+    if (auto it = fixed_layers_.find(prefix); it != fixed_layers_.end()) return *it->second;
+    auto layer = std::make_shared<FixedLayer>();
+    const std::size_t capacity = fixed_hot_ + (fixed_hot_ == 256 ? 8 : 0);
+    layer->ids.assign(capacity,-1); layer->touches.resize(capacity);
+    std::size_t index = 0, charged = 0;
+    for (const char* projection : {"gate_proj","up_proj","down_proj"}) {
+        for (const char* field : {"weight","scales","biases"}) {
+            const auto name = prefix+".switch_mlp."+projection+"."+field;
+            const auto view = disk_view(name);
+            const std::size_t rows = index < 6 ? 640 : 2560;
+            const std::size_t cols = (index < 6 ? 2560 : 640)/(index%3 == 0 ? 8 : 64);
+            if (view.shape.size()!=3 || view.shape[0]!=288 || view.shape[1]!=rows ||
+                view.shape[2]!=cols || view.dtype != (index%3==0 ? "U32" : "BF16"))
+                throw std::runtime_error("fixed slots require Q4/group64 BF16 experts");
+            auto& f = layer->disk[index];
+            const auto& shard = manifest_.weight_map().at(name);
+            f.path = manifest_.directory()/shard;
+            f.offset = static_cast<std::size_t>(view.bytes.data()-catalogs_.at(shard)->mapped_view().data());
+            f.bytes = view.bytes.size()/288;
+            const auto bytes = capacity*f.bytes;
+            const auto padded = (bytes+16383)/16384*16384;
+            f.storage = std::shared_ptr<void>(std::aligned_alloc(16384,padded),std::free);
+            if (!f.storage) throw std::bad_alloc();
+            std::memset(f.storage.get(),0,padded);
+            // Managed-array ownership outlives the layer if a view is leased.
+            struct Owner { std::shared_ptr<void> bytes; std::shared_ptr<bool> released; };
+            auto released = std::make_shared<bool>(false);
+            auto* owner = new Owner{f.storage,released};
+            const std::vector<int> shape{static_cast<int>(capacity),static_cast<int>(rows),static_cast<int>(cols)};
+            auto raw = mlx_array_new_data_managed_payload(f.storage.get(),shape.data(),3,
+                index%3==0 ? MLX_UINT32 : MLX_BFLOAT16,owner,[](void* p) {
+                    auto* o=static_cast<Owner*>(p); *o->released=true; delete o;
+                });
+            if (!raw.ctx) {
+                if (!*released) delete owner;
+                throw std::runtime_error("fixed pool managed import refused");
+            }
+            layer->arrays.emplace_back(raw); charged += padded; ++index;
+        }
+    }
+    for (std::size_t slot=0; slot<capacity; ++slot) {
+        auto views=std::make_shared<ExpertArrays>();
+        for (auto& a : layer->arrays) {
+            auto end=a.shape(); end[0]=static_cast<int>(slot+1);
+            views->push_back(a.slice(std::vector<int>{static_cast<int>(slot),0,0},end,
+                std::vector<int>{1,1,1}).reshape(std::vector<int>{end[1],end[2]}));
+            views->back().eval();
+        }
+        layer->views.push_back(std::move(views));
+    }
+    for (std::size_t expert=0; expert<fixed_hot_; ++expert) layer->fill(expert,expert);
+    fixed_stats_.resident_bytes += charged;
+    fixed_stats_.peak_bytes = fixed_stats_.resident_bytes;
+    return *fixed_layers_.emplace(prefix,std::move(layer)).first->second;
+}
+
+void MlxTensorStore::preload_fixed_slots() {
+    if (!fixed_slots()) throw std::runtime_error("fixed slots disabled");
+    for (int layer=0; layer<48; ++layer)
+        fixed_layer("language_model.model.layers."+std::to_string(layer)+".mlp");
+}
+
+bool MlxTensorStore::fixed_batch_fits(std::span<const std::size_t> ids) const {
+    // Apply the same overflow arithmetic to the all-resident control.
+    return !fixed_slots() || std::count_if(ids.begin(),ids.end(),[](auto id) { return id>=256; })<=8;
+}
+
+MlxTensorStore::ExpertLease MlxTensorStore::fixed_expert(const std::string& prefix,std::size_t id) {
+    if (id>=288) throw std::runtime_error("fixed expert outside range");
+    auto& layer=fixed_layer(prefix);
+    if (layer.failed) throw std::runtime_error("fixed layer invalid after I/O error");
+    auto found=std::find(layer.ids.begin(),layer.ids.end(),static_cast<int>(id));
+    std::size_t slot=static_cast<std::size_t>(found-layer.ids.begin());
+    if (found==layer.ids.end()) {
+        slot=layer.ids.size();
+        for (std::size_t s=fixed_hot_; s<layer.ids.size(); ++s) {
+            if (layer.views[s].use_count()!=1) continue;
+            if (slot==layer.ids.size() || layer.touches[s]<layer.touches[slot]) slot=s;
+        }
+        if (slot==layer.ids.size()) throw std::runtime_error("all fixed cold slots leased");
+        const auto start=std::chrono::steady_clock::now();
+        if (layer.ids[slot]>=0) ++fixed_stats_.evictions;
+        layer.fill(slot,id);
+        expert_load_ms_+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+        ++fixed_stats_.misses;
+    } else ++fixed_stats_.hits;
+    layer.touches[slot]=++layer.clock;
+    return layer.views[slot];
+}
+
+const MlxTensorStore::ExpertArrays& MlxTensorStore::fixed_fields(std::string_view prefix) const {
+    return fixed_layers_.at(std::string(prefix))->arrays;
+}
+std::vector<std::int32_t> MlxTensorStore::fixed_ids(std::string_view prefix,std::span<const std::size_t> ids) const {
+    const auto& layer=*fixed_layers_.at(std::string(prefix));
+    std::vector<std::int32_t> result;
+    for (auto id:ids) {
+        auto it=std::find(layer.ids.begin(),layer.ids.end(),static_cast<int>(id));
+        if (it==layer.ids.end()) throw std::runtime_error("unleased fixed expert");
+        result.push_back(static_cast<std::int32_t>(it-layer.ids.begin()));
+    }
+    return result;
+}
+
 MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix, const std::size_t id) {
     std::scoped_lock lock(mutex_);
     if (!paged_) throw std::runtime_error("expert paging is disabled");
+    if (fixed_slots()) return fixed_expert(std::string(prefix),id);
     std::vector<std::string> names;
     std::size_t bytes = 0;
     for (const auto* projection : {"gate_proj", "up_proj", "down_proj"}) {
@@ -1207,6 +1353,7 @@ void MlxTensorStore::finish_expert_batch() {
 bool MlxTensorStore::set_expert_budget(const std::size_t bytes) {
     std::scoped_lock lock(mutex_);
     if (!paged_) throw std::runtime_error("expert paging is disabled");
+    if (fixed_slots()) throw std::runtime_error("fixed slot budget is immutable");
     check(mlx_synchronize(default_gpu_stream()), "paged resize fence");
     const bool result = experts_.set_budget(bytes);
     trace_expert(ExpertTraceKind::budget, {}, bytes);
