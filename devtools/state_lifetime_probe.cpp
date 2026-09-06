@@ -10,9 +10,9 @@ using namespace qwen38;
 
 int main(int argc, char** argv) try {
     if (argc != 2 || !std::getenv("QWEN38_MEMORY_GUARD"))
-        throw std::runtime_error("usage: guarded state-lifetime-probe retain|release|concat|reserve");
+        throw std::runtime_error("usage: guarded state-lifetime-probe retain|release|concat|reserve|blocks");
     const std::string_view mode(argv[1]);
-    if (mode != "retain" && mode != "release" && mode != "concat" && mode != "reserve")
+    if (mode != "retain" && mode != "release" && mode != "concat" && mode != "reserve" && mode != "blocks")
         throw std::runtime_error("invalid mode");
     std::size_t old{};
     if (mlx_set_memory_limit(&old, 1024ULL * 1024 * 1024))
@@ -55,14 +55,22 @@ int main(int argc, char** argv) try {
         constexpr int start_rows = 32768, chunks = 32, chunk = 512, width = 256;
         auto state = MlxArray::zeros(std::array<int, 2>{
             mode == "reserve" ? start_rows + chunks * chunk : start_rows, width}, MLX_BFLOAT16);
-        auto update = MlxArray::from_float32(std::vector<float>(chunk * width, 1.F),
-            std::array<int, 2>{chunk, width}).astype(MLX_BFLOAT16);
-        state.eval(); update.eval();
+        state.eval();
         auto origin = state.share();
+        std::vector<MlxArray> blocks;
+        blocks.reserve(chunks);
         mlx_reset_peak_memory();
         const auto started = std::chrono::steady_clock::now();
         for (int i = 0; i < chunks; ++i) {
-            if (mode == "concat") state = MlxArray::concatenate(state, update, 0);
+            auto update = MlxArray::from_float32(std::vector<float>(chunk * width, 1.F),
+                std::array<int, 2>{chunk, width}).astype(MLX_BFLOAT16);
+            update.eval();
+            if (mode == "blocks") {
+                // Independent output buffer per chunk, not 32 aliases of one
+                // update. A future attention kernel must consume these blocks
+                // directly; concatenating them would restore the copy cost.
+                blocks.push_back(std::move(update));
+            } else if (mode == "concat") state = MlxArray::concatenate(state, update, 0);
             else {
                 mlx_array output = mlx_array_new();
                 const std::array<int, 2> begin{start_rows + i * chunk, 0};
@@ -83,6 +91,12 @@ int main(int argc, char** argv) try {
         for (std::size_t i = 0; i < values.size(); ++i)
             if (values[i] != (i < start_rows * width ? 0.F : 1.F))
                 throw std::runtime_error("append parity failed");
+        if (mode == "blocks") {
+            if (blocks.size() != chunks) throw std::runtime_error("missing blocks");
+            for (const auto& block : blocks)
+                for (float value : block.astype(MLX_FLOAT32).to_float32())
+                    if (value != 1.F) throw std::runtime_error("block parity failed");
+        }
         for (float value : origin.astype(MLX_FLOAT32).to_float32())
             if (value != 0.F) throw std::runtime_error("origin was mutated");
         std::cout << "{\"mode\":\"" << mode << "\",\"repeat\":" << repeat

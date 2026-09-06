@@ -732,5 +732,21 @@ int main() {
         std::cerr << "MTP decode-state snapshot mismatch\n";
         return 1;
     }
+    // Restoring the pre-draft head must not invalidate independently owned
+    // calibration/output streams or change the origin KV/QSA values.
+    mtp_state = std::move(mtp_snapshot);
+    auto origin = qwen38::snapshot_mtp_decode_state(mtp_state);
+    mtp_state.row_count += 4;
+    mtp_state.layer.full_attention.keys =
+        qwen38::MlxArray::from_float32(right_values, shape);
+    auto calibration_stream = mtp_state.layer.full_attention.keys.share();
+    mtp_state = std::move(origin);
+    if (mtp_state.row_count != 19 || mtp_state.position_base != 41 ||
+        mtp_state.layer.full_attention.keys.to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+        mtp_state.layer.full_attention.qsa_raw_keys.to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+        calibration_stream.to_float32() != std::vector<float>({5, 6, 7, 8})) {
+        std::cerr << "MTP pre-verification head restore ownership mismatch\n";
+        return 1;
+    }
     return 0;
 }

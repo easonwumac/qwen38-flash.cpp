@@ -1,0 +1,18 @@
+[
+  {
+    "mode": "concat",
+    "output": "{\"mode\":\"concat\",\"repeat\":0,\"ms\":46.6311,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":1,\"ms\":41.6904,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":2,\"ms\":38.7521,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":3,\"ms\":36.4401,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":4,\"ms\":31.2589,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":5,\"ms\":34.1837,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":6,\"ms\":39.3595,\"peak_bytes\":67108864,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=41.0 GiB\n"
+  },
+  {
+    "mode": "blocks",
+    "output": "{\"mode\":\"blocks\",\"repeat\":0,\"ms\":11.5455,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":1,\"ms\":8.85675,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":2,\"ms\":7.11154,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":3,\"ms\":7.37292,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":4,\"ms\":7.0765,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":5,\"ms\":6.38429,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":6,\"ms\":6.31358,\"peak_bytes\":25952256,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=41.0 GiB\n"
+  },
+  {
+    "mode": "blocks",
+    "output": "{\"mode\":\"blocks\",\"repeat\":0,\"ms\":13.3989,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":1,\"ms\":6.80533,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":2,\"ms\":6.46142,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":3,\"ms\":6.35208,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":4,\"ms\":7.07467,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":5,\"ms\":6.21246,\"peak_bytes\":25952256,\"parity\":true}\n{\"mode\":\"blocks\",\"repeat\":6,\"ms\":6.19671,\"peak_bytes\":25952256,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=40.8 GiB\n"
+  },
+  {
+    "mode": "concat",
+    "output": "{\"mode\":\"concat\",\"repeat\":0,\"ms\":44.3749,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":1,\"ms\":40.8384,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":2,\"ms\":35.794,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":3,\"ms\":36.4852,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":4,\"ms\":31.2916,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":5,\"ms\":31.032,\"peak_bytes\":67108864,\"parity\":true}\n{\"mode\":\"concat\",\"repeat\":6,\"ms\":38.4805,\"peak_bytes\":67108864,\"parity\":true}\nmemory_guard: peak_footprint=0.2 GiB peak_rss=0.1 GiB minimum_available=41.0 GiB\n"
+  }
+]

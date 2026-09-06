@@ -227,7 +227,14 @@ MtpRoundStep finish_greedy_mtp_round(
         throw std::runtime_error("MTP query position overflow");
     }
 
+    // Draft tokens have already been evaluated. The speculative head state is
+    // never committed, and target verification does not read it. Restore the
+    // origin now so rejected head KV/QSA buffers do not overlap target verify.
+    // Calibration streams own their arrays independently. If verification
+    // throws, the head now remains at its pre-draft origin rather than at an
+    // uncommitted speculative position.
     const auto verify_started = std::chrono::steady_clock::now();
+    head_state = std::move(head_origin);
     MtpTargetVerification verification = verify_mtp_target_layer_major_reference(
         target, current_token, drafts, target_state);
     const double verify_ms = std::chrono::duration<double, std::milli>(
@@ -268,7 +275,6 @@ MtpRoundStep finish_greedy_mtp_round(
     // Speculative head rows are never committed. Rebuild only the current row
     // and accepted draft rows from target-captured hidden streams.
     const auto commit_started = std::chrono::steady_clock::now();
-    head_state = std::move(head_origin);
     const char* batch_commit = std::getenv("QWEN38_BATCH_MTP_COMMIT");
     const bool batch_commit_enabled =
         batch_commit == nullptr || std::string_view(batch_commit) != "0";
