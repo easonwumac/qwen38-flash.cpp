@@ -1,6 +1,9 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <fstream>
+#include <limits>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -1022,6 +1025,7 @@ void MlxSafetensors::save(
 
 MlxArray MlxTensorStore::tensor(const std::string_view name) {
     std::scoped_lock lock(mutex_);
+    if (paged_) return read_tensor(std::string(name), std::nullopt);
     const auto mapping = manifest_.weight_map().find(std::string(name));
     if (mapping == manifest_.weight_map().end()) {
         throw std::out_of_range("tensor is not present in model index: " + std::string(name));
@@ -1032,6 +1036,95 @@ MlxArray MlxTensorStore::tensor(const std::string_view name) {
         shard = shards_.emplace(mapping->second, std::move(file)).first;
     }
     return shard->second->tensor(name);
+}
+
+TensorView MlxTensorStore::disk_view(const std::string& name) {
+    const auto mapping = manifest_.weight_map().find(name);
+    if (mapping == manifest_.weight_map().end()) throw std::runtime_error("missing tensor: " + name);
+    auto& catalog = catalogs_[mapping->second];
+    if (!catalog) catalog = std::make_unique<SafetensorsFile>(manifest_.directory() / mapping->second);
+    return catalog->tensor(name);
+}
+
+MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optional<std::size_t> row) {
+    const TensorView view = disk_view(name);
+    const auto& shard = manifest_.weight_map().at(name);
+    const auto mapping = catalogs_.at(shard)->mapped_view();
+    std::size_t offset = static_cast<std::size_t>(view.bytes.data() - mapping.data());
+    std::size_t bytes = view.bytes.size();
+    std::vector<int> shape;
+    for (std::size_t i = row ? 1 : 0; i < view.shape.size(); ++i) {
+        if (view.shape[i] > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+            throw std::runtime_error("paged tensor dimension exceeds int");
+        shape.push_back(static_cast<int>(view.shape[i]));
+    }
+    if (row) {
+        if (view.shape.size() != 3 || *row >= view.shape[0] || bytes % view.shape[0] != 0)
+            throw std::runtime_error("invalid paged expert row");
+        bytes /= view.shape[0];
+        offset += *row * bytes;
+    }
+    // Bound staging independently of allocator/process limits. No complete
+    // expert tensor is loaded through this path.
+    if (bytes == 0 || bytes > 1024ULL * 1024ULL * 1024ULL)
+        throw std::runtime_error("paged tensor exceeds staging bound");
+    mlx_dtype dtype;
+    if (view.dtype == "U32") dtype = MLX_UINT32;
+    else if (view.dtype == "BF16") dtype = MLX_BFLOAT16;
+    else if (view.dtype == "F32") dtype = MLX_FLOAT32;
+    else if (view.dtype == "F16") dtype = MLX_FLOAT16;
+    else throw std::runtime_error("unsupported paged tensor dtype");
+    std::vector<std::byte> staging(bytes);
+    std::ifstream file(manifest_.directory() / shard, std::ios::binary);
+    file.seekg(static_cast<std::streamoff>(offset));
+    file.read(reinterpret_cast<char*>(staging.data()), static_cast<std::streamsize>(bytes));
+    if (!file) throw std::runtime_error("paged tensor read failed");
+    MlxArray result(mlx_array_new_data(staging.data(), shape.data(), static_cast<int>(shape.size()), dtype));
+    if (result.get().ctx == nullptr) throw std::runtime_error("paged tensor allocation failed");
+    if (mlx_array_nbytes(result.get()) != bytes)
+        throw std::runtime_error("paged tensor byte geometry mismatch");
+    result.eval();
+    check(mlx_synchronize(default_gpu_stream()), "paged tensor completion");
+    return result;
+}
+
+MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix, const std::size_t id) {
+    std::scoped_lock lock(mutex_);
+    if (!paged_) throw std::runtime_error("expert paging is disabled");
+    std::vector<std::string> names;
+    std::size_t bytes = 0;
+    for (const auto* projection : {"gate_proj", "up_proj", "down_proj"}) {
+        for (const auto* field : {"weight", "scales", "biases"}) {
+            names.push_back(std::string(prefix) + ".switch_mlp." + projection + "." + field);
+            const auto view = disk_view(names.back());
+            if (view.shape.size() != 3 || id >= view.shape[0] || view.bytes.size() % view.shape[0] != 0)
+                throw std::runtime_error("invalid paged expert geometry");
+            const std::size_t raw = view.bytes.size() / view.shape[0];
+            // This experimental runtime disables the MLX free-block cache.
+            constexpr std::size_t page = 16384;
+            if (raw > 16 * 1024 * 1024) throw std::runtime_error("expert field too large");
+            bytes += (raw + page - 1) / page * page;
+        }
+    }
+    return experts_.acquire(std::string(prefix) + "/" + std::to_string(id), bytes, [&] {
+        const auto started = std::chrono::steady_clock::now();
+        // Retire prior asynchronous work before taking a global allocator
+        // snapshot; otherwise old graph releases can make the delta negative.
+        check(mlx_synchronize(default_gpu_stream()), "paged pre-load accounting fence");
+        std::size_t before = 0;
+        check(mlx_get_active_memory(&before), "paged memory before load");
+        auto arrays = std::make_shared<ExpertArrays>();
+        arrays->reserve(names.size());
+        for (const auto& name : names) arrays->push_back(read_tensor(name, id));
+        std::size_t after = 0;
+        check(mlx_get_active_memory(&after), "paged memory after load");
+        if (after < before || after - before > bytes)
+            throw std::runtime_error("paged expert accounting mismatch before=" + std::to_string(before) +
+                " after=" + std::to_string(after) + " charge=" + std::to_string(bytes));
+        expert_load_ms_ += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return arrays;
+    });
 }
 
 std::size_t MlxTensorStore::open_shard_count() const {

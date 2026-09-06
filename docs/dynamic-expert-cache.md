@@ -1,5 +1,10 @@
 # Dynamic expert cache: configurable steady target and ceiling
 
+Follow-up: [24 GiB full-model probe](paged-24g-probe.md) now tests a fixed expert
+allowance in a separate research executable. The configurable adaptive controller
+and production server integration remain unfinished. The prerequisite results
+below describe the earlier bounded-cache milestone.
+
 The target applies to **total process memory**, not just expert tensors. Requested
 steady/ceiling pairs include 8/16, 12/20, 16/24, 20/30 and 24/32 GiB. A steady
 target is not a mandatory minimum allocation. None is currently a verified

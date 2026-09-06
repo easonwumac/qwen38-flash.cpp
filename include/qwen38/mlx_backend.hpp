@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "qwen38/model_manifest.hpp"
+#include "qwen38/expert_cache.hpp"
+#include "qwen38/safetensors.hpp"
 
 namespace qwen38 {
 
@@ -262,7 +264,15 @@ private:
 
 class MlxTensorStore final {
 public:
-    explicit MlxTensorStore(ModelManifest manifest) : manifest_(std::move(manifest)) {}
+    explicit MlxTensorStore(ModelManifest manifest, std::size_t expert_budget = 0)
+        : manifest_(std::move(manifest)), paged_(expert_budget != 0), experts_(expert_budget) {}
+
+    using ExpertArrays = std::vector<MlxArray>;
+    using ExpertLease = ExpertCache<ExpertArrays>::Handle;
+    [[nodiscard]] bool paged() const noexcept { return paged_; }
+    [[nodiscard]] ExpertLease expert(std::string_view prefix, std::size_t id);
+    [[nodiscard]] const ExpertCache<ExpertArrays>::Stats& expert_stats() const { return experts_.stats(); }
+    [[nodiscard]] double expert_load_ms() const noexcept { return expert_load_ms_; }
 
     [[nodiscard]] MlxArray tensor(std::string_view name);
     [[nodiscard]] std::size_t open_shard_count() const;
@@ -272,6 +282,12 @@ private:
     ModelManifest manifest_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<MlxSafetensors>> shards_;
+    bool paged_{false};
+    ExpertCache<ExpertArrays> experts_;
+    double expert_load_ms_{0};
+    std::unordered_map<std::string, std::unique_ptr<SafetensorsFile>> catalogs_;
+    [[nodiscard]] TensorView disk_view(const std::string& name);
+    [[nodiscard]] MlxArray read_tensor(const std::string& name, std::optional<std::size_t> row);
 };
 
 [[nodiscard]] std::string mlx_backend_description();

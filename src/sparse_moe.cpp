@@ -300,12 +300,14 @@ SparseMoe::SparseMoe(
       experts_per_token_(effective_experts_per_token(prefix, experts_per_token)),
       group_size_(checked_int(quantization_group_size, "quantization_group_size")),
       normalize_topk_probability_(normalize_topk_probability),
+      paged_store_(tensors.paged() ? &tensors : nullptr),
+      prefix_(prefix),
       router_weight_(tensors.tensor(std::string(prefix) + ".gate.weight")),
-      expert_gate_(load_projection(
+      expert_gate_(tensors.paged() ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.gate_proj", quantization_group_size)),
-      expert_up_(load_projection(
+      expert_up_(tensors.paged() ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.up_proj", quantization_group_size)),
-      expert_down_(load_projection(
+      expert_down_(tensors.paged() ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.down_proj", quantization_group_size)),
       shared_gate_(load_projection(
           tensors, std::string(prefix) + ".shared_expert.gate_proj", quantization_group_size)),
@@ -318,6 +320,11 @@ SparseMoe::SparseMoe(
     static_cast<void>(checked_int(expert_count_, "expert_count"));
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
+    }
+    if (paged_store_) {
+        if (experts_per_token_ != experts_per_token || compact_qmeta_requested_bits() != 0)
+            throw std::runtime_error("paged probe preserves original experts and affine metadata");
+        return;
     }
     compact_qmeta_ =
         expert_gate_.qmeta.present() && expert_up_.qmeta.present() &&
@@ -725,7 +732,49 @@ MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
     return MlxArray::multiply(shared_output, shared_router);
 }
 
+MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
+    const auto shape = input.shape();
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024)
+        throw std::runtime_error("paged MoE requires [1,S,hidden], S=1..1024");
+    std::vector<MlxArray> rows;
+    rows.reserve(static_cast<std::size_t>(shape[1]));
+    for (int row = 0; row < shape[1]; ++row) {
+        const MlxArray x = slice_sequence_row(input, static_cast<std::size_t>(row));
+        const auto selection = route_decode(x);
+        MlxArray sum;
+        for (std::size_t i = 0; i < selection.experts.size(); ++i) {
+            const auto lease = paged_store_->expert(prefix_, selection.experts[i]);
+            const auto project_one = [&](const MlxArray& value, const std::size_t p) {
+                const auto& w = (*lease)[p];
+                const auto& s = (*lease)[p + 1];
+                const auto& b = (*lease)[p + 2];
+                const int bits = infer_affine_quantization_bits(w.shape(), s.shape(),
+                    static_cast<std::size_t>(group_size_), "paged MoE");
+                return MlxArray::quantized_matmul(value, w, s, b, group_size_, bits);
+            };
+            const MlxArray gate = project_one(x, 0).silu();
+            const MlxArray up = project_one(x, 3);
+            const MlxArray hidden = MlxArray::multiply(gate, up);
+            const MlxArray output = project_one(hidden, 6);
+            const MlxArray weight = MlxArray::from_float32(
+                std::vector<float>{selection.weights[i]}, std::vector<int>{}).astype(output.dtype());
+            MlxArray weighted = MlxArray::multiply(output, weight);
+            sum = i == 0 ? std::move(weighted) : MlxArray::add(sum, weighted);
+            sum.eval();
+            const auto stream = mlx_default_gpu_stream_new();
+            const int status = mlx_synchronize(stream);
+            static_cast<void>(mlx_stream_free(stream));
+            if (status != 0) throw std::runtime_error("paged expert GPU fence failed");
+            // All graph consumers complete before the lease can be evicted.
+        }
+        rows.push_back(std::move(sum));
+        rows.back().eval();
+    }
+    return MlxArray::add(concatenate_sequence_rows(rows), forward_shared(input));
+}
+
 MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
+    if (paged_store_) return forward_paged(input);
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     if (!compact_qmeta_ && (!fused_gate_up_ || !fused_down_) &&
@@ -751,6 +800,7 @@ MlxArray SparseMoe::forward_verify_profiled(
 MlxArray SparseMoe::forward_verify_impl(
     const MlxArray& input,
     MoeVerifyTimings* timings) const {
+    if (paged_store_) return forward_paged(input);
     using Clock = std::chrono::steady_clock;
     const auto elapsed_ms = [](const Clock::time_point started) {
         return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
@@ -967,6 +1017,7 @@ MlxArray SparseMoe::forward_prefill_profiled(
 MlxArray SparseMoe::forward_prefill_impl(
     const MlxArray& input,
     MoePrefillTimings* timings) const {
+    if (paged_store_) return forward_paged(input);
     using Clock = std::chrono::steady_clock;
     const auto elapsed_ms = [](const Clock::time_point started) {
         return std::chrono::duration<double, std::milli>(Clock::now() - started).count();

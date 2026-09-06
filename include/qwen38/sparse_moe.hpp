@@ -98,6 +98,7 @@ private:
         const QuantizedProjection& projection,
         std::size_t expert) const;
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_compact_routed(
         const MlxArray& input,
         const MlxArray& experts,
@@ -116,6 +117,8 @@ private:
     std::size_t experts_per_token_;
     int group_size_;
     bool normalize_topk_probability_;
+    MlxTensorStore* paged_store_;
+    std::string prefix_;
     MlxArray router_weight_;
     QuantizedProjection expert_gate_;
     QuantizedProjection expert_up_;
