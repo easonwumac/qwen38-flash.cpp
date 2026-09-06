@@ -9,9 +9,9 @@ void run_memory_budget_tests() {
     using namespace qwen38;
     constexpr std::size_t gib = 1024ULL * 1024ULL * 1024ULL;
     // Arithmetic tests only: these do not instantiate a model at these sizes.
-    for (const auto range : std::array<ProcessMemoryRange, 5>{
+    for (const auto range : std::array<ProcessMemoryRange, 6>{
              {{8 * gib, 16 * gib}, {12 * gib, 20 * gib}, {16 * gib, 24 * gib},
-              {20 * gib, 30 * gib}, {24 * gib, 32 * gib}}}) {
+              {20 * gib, 30 * gib}, {24 * gib, 32 * gib}, {28 * gib, 36 * gib}}}) {
         ExpertBudgetRequest request{.non_expert_bytes = 4 * gib,
             .transient_bytes = gib, .safety_reserve_bytes = 2 * gib,
             .minimum_expert_bytes = gib};

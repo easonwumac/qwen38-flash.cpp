@@ -17,6 +17,7 @@ namespace {
 constexpr std::size_t gib = 1024ULL * 1024ULL * 1024ULL;
 using Clock = std::chrono::steady_clock;
 std::size_t process_ceiling = 24 * gib;
+std::size_t elastic_steady = 24 * gib;
 void check(int code) { if (code != 0) throw std::runtime_error("MLX budget operation failed"); }
 std::size_t usage(const char* phase) {
     task_vm_info_data_t info{};
@@ -39,6 +40,7 @@ int main(int argc, char** argv) {
             if (flag == "--layer-parity") layer_only = true;
             else if (flag == "--extended") extended = true;
             else if (flag == "--elastic") elastic = true;
+            else if (flag == "--elastic-28-36") { elastic = true; elastic_steady = 28 * gib; }
             else if (flag == "--serial") serial = true;
             else if (flag == "--long") long_run = true;
             else if (flag == "--steady-only") steady_only = true;
@@ -53,7 +55,7 @@ int main(int argc, char** argv) {
         // framework memory. The external guard independently limits the process.
         mlx_set_error_handler([](const char* message, void*) { std::cerr << message << '\n'; }, nullptr, nullptr);
         std::size_t old = 0;
-        process_ceiling = (elastic ? 32 : 24) * gib;
+        process_ceiling = elastic ? elastic_steady + 8 * gib : 24 * gib;
         check(mlx_set_memory_limit(&old, layer_only ? 3 * gib : process_ceiling - 4 * gib));
         check(mlx_set_cache_limit(&old, 0));
         check(mlx_clear_cache());
@@ -89,7 +91,7 @@ int main(int argc, char** argv) {
         // 4 GiB measured conservative allowance for this SHORT probe's base and
         // states. Do not reuse this estimate for arbitrary context lengths.
         const auto plan = qwen38::plan_expert_budget(
-            {(elastic ? 24 : 20) * gib, process_ceiling}, {.non_expert_bytes = 4 * gib,
+            {elastic ? elastic_steady : 20 * gib, process_ceiling}, {.non_expert_bytes = 4 * gib,
              .minimum_expert_bytes = 64 * 1024 * 1024});
         const std::size_t steady_budget = plan.steady_expert_bytes;
         // Independently leave 4 GiB in the MLX pool for non-expert allocations.
@@ -156,8 +158,8 @@ int main(int argc, char** argv) {
         if (!tensors.set_expert_budget(steady_budget)) throw std::runtime_error("steady shrink blocked");
         std::cout << "expert_shrunk_gib=" << double(tensors.expert_stats().resident_bytes) / gib << std::endl;
         const auto restored = usage("steady_restored");
-        if (elastic && restored > 24 * gib)
-            throw std::runtime_error("process failed to return below 24 GiB steady target");
+        if (elastic && restored > elastic_steady)
+            throw std::runtime_error("process failed to return below steady target");
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "paged probe: " << e.what() << std::endl;
