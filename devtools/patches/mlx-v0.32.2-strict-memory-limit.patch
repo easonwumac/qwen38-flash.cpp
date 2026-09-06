@@ -1,0 +1,246 @@
+diff --git a/mlx/backend/metal/CMakeLists.txt b/mlx/backend/metal/CMakeLists.txt
+index ea4a995ad..0450bbe15 100644
+--- a/mlx/backend/metal/CMakeLists.txt
++++ b/mlx/backend/metal/CMakeLists.txt
+@@ -9,6 +9,14 @@ function(make_jit_source SRC_FILE)
+   # Additional arguments to this function are treated as dependencies in the
+   # Cmake build system.
+   get_filename_component(SRC_NAME ${SRC_FILE} NAME)
++  if(DEFINED MLX_PREBUILT_JIT_DIR)
++    configure_file(${MLX_PREBUILT_JIT_DIR}/${SRC_NAME}.cpp
++                   ${CMAKE_CURRENT_BINARY_DIR}/jit/${SRC_NAME}.cpp COPYONLY)
++    add_custom_target(${SRC_NAME} DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/jit/${SRC_NAME}.cpp)
++    add_dependencies(mlx ${SRC_NAME})
++    target_sources(mlx PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/jit/${SRC_NAME}.cpp)
++    return()
++  endif()
+   add_custom_command(
+     OUTPUT jit/${SRC_NAME}.cpp
+     COMMAND
+diff --git a/mlx/backend/metal/allocator.cpp b/mlx/backend/metal/allocator.cpp
+index 903cce218..e536ec38c 100644
+--- a/mlx/backend/metal/allocator.cpp
++++ b/mlx/backend/metal/allocator.cpp
+@@ -9,6 +9,7 @@
+ #include <unistd.h>
+ #include <cassert>
+ #include <cstdlib>
++#include <limits>
+ 
+ namespace mlx::core {
+ 
+@@ -63,6 +64,9 @@ MetalAllocator::MetalAllocator(Device& d)
+   block_limit_ = std::min(1.5 * max_rec_size, 0.95 * memsize);
+   gc_limit_ = std::min(static_cast<size_t>(0.95 * max_rec_size), block_limit_);
+   max_pool_size_ = block_limit_;
++  const char* strict_limit = std::getenv("MLX_STRICT_MEMORY_LIMIT");
++  strict_memory_limit_ = strict_limit != nullptr &&
++      std::string_view(strict_limit) == "1";
+   bool is_vm = std::get<std::string>(info.at("device_name")) ==
+       "Apple Paravirtual device";
+   if (is_vm) {
+@@ -90,6 +94,16 @@ size_t MetalAllocator::set_memory_limit(size_t limit) {
+   gc_limit_ = std::min(
+       block_limit_,
+       static_cast<size_t>(0.95 * device_->recommendedMaxWorkingSetSize()));
++  if (strict_memory_limit_) {
++    const size_t committed = active_memory_ + pending_memory_;
++    const size_t allowed_cache = committed < block_limit_
++        ? block_limit_ - committed
++        : 0;
++    if (get_cache_memory() > allowed_cache) {
++      num_resources_ -= buffer_cache_.release_cached_buffers(
++          get_cache_memory() - allowed_cache);
++    }
++  }
+   return limit;
+ };
+ 
+@@ -122,6 +136,9 @@ Buffer MetalAllocator::malloc(size_t size) {
+ 
+   // Align up memory
+   if (size > vm_page_size) {
++    if (size > std::numeric_limits<size_t>::max() - (vm_page_size - 1)) {
++      throw std::runtime_error("[metal::malloc] Allocation size overflow.");
++    }
+     size = vm_page_size * ((size + vm_page_size - 1) / vm_page_size);
+   }
+ 
+@@ -129,7 +146,26 @@ Buffer MetalAllocator::malloc(size_t size) {
+   std::unique_lock lk(mutex_);
+   MTL::Buffer* buf = buffer_cache_.reuse_from_cache(size);
+   if (!buf) {
+-    size_t mem_required = get_active_memory() + get_cache_memory() + size;
++    if (strict_memory_limit_) {
++      const auto exceeds_limit = [&] {
++        return active_memory_ > block_limit_ ||
++            pending_memory_ > block_limit_ - active_memory_ ||
++            get_cache_memory() >
++                block_limit_ - active_memory_ - pending_memory_ ||
++            size > block_limit_ - active_memory_ - pending_memory_ -
++                get_cache_memory();
++      };
++      if (exceeds_limit() && get_cache_memory() != 0) {
++        num_resources_ -= buffer_cache_.clear();
++      }
++      if (exceeds_limit()) {
++        throw std::runtime_error(
++            "[metal::malloc] Strict memory limit exceeded before allocation.");
++      }
++      pending_memory_ += size;
++    }
++    size_t mem_required = get_active_memory() + get_cache_memory() +
++        pending_memory_ + (strict_memory_limit_ ? 0 : size);
+ 
+     // If we have a lot of memory pressure try to reclaim memory from the cache
+     if (mem_required >= gc_limit_ || num_resources_ >= resource_limit_) {
+@@ -139,6 +175,7 @@ Buffer MetalAllocator::malloc(size_t size) {
+ 
+     // Allocate new buffer if needed
+     if (num_resources_ >= resource_limit_) {
++      if (strict_memory_limit_) pending_memory_ -= size;
+       std::ostringstream msg;
+       msg << "[metal::malloc] Resource limit (" << resource_limit_
+           << ") exceeded.";
+@@ -152,11 +189,36 @@ Buffer MetalAllocator::malloc(size_t size) {
+       buf = device_->newBuffer(size, resource_options);
+     }
+     if (!buf) {
++      if (strict_memory_limit_) {
++        lk.lock();
++        pending_memory_ -= size;
++        lk.unlock();
++      }
+       std::ostringstream msg;
+       msg << "[malloc] Unable to allocate " << size << " bytes.";
+       throw std::runtime_error(msg.str());
+     }
+     lk.lock();
++    if (strict_memory_limit_) {
++      pending_memory_ -= size;
++      const size_t length = buf->length();
++      const bool exceeds = active_memory_ > block_limit_ ||
++          pending_memory_ > block_limit_ - active_memory_ ||
++          get_cache_memory() > block_limit_ - active_memory_ - pending_memory_ ||
++          length > block_limit_ - active_memory_ - pending_memory_ -
++              get_cache_memory();
++      if (exceeds) {
++        std::ostringstream msg;
++        msg << "[metal::malloc] Strict memory limit exceeded by allocated buffer: active="
++            << active_memory_ << " cache=" << get_cache_memory()
++            << " pending=" << pending_memory_ << " length=" << length
++            << " limit=" << block_limit_ << ".";
++        lk.unlock();
++        auto pool = metal::new_scoped_memory_pool();
++        buf->release();
++        throw std::runtime_error(msg.str());
++      }
++    }
+     num_resources_++;
+     if (!buf->heap()) {
+       residency_sets_.insert(buf);
+@@ -187,7 +249,12 @@ void MetalAllocator::free(Buffer buffer) {
+   }
+   std::unique_lock lk(mutex_);
+   active_memory_ -= buf->length();
+-  if (get_cache_memory() < max_pool_size_) {
++  const bool strict_cache_fits = !strict_memory_limit_ ||
++      (active_memory_ <= block_limit_ && pending_memory_ <= block_limit_ - active_memory_ &&
++       get_cache_memory() <= block_limit_ - active_memory_ - pending_memory_ &&
++       buf->length() <= block_limit_ - active_memory_ - pending_memory_ -
++           get_cache_memory());
++  if (get_cache_memory() < max_pool_size_ && strict_cache_fits) {
+     buffer_cache_.recycle_to_cache(buf);
+   } else {
+     num_resources_--;
+@@ -205,11 +272,58 @@ size_t MetalAllocator::size(Buffer buffer) const {
+ }
+ 
+ Buffer MetalAllocator::make_buffer(void* ptr, size_t size) {
++  size_t reserved = size;
++  if (strict_memory_limit_) {
++    if (reserved > vm_page_size) {
++      if (reserved > std::numeric_limits<size_t>::max() - (vm_page_size - 1)) {
++        throw std::runtime_error("[metal::make_buffer] Allocation size overflow.");
++      }
++      reserved = vm_page_size *
++          ((reserved + vm_page_size - 1) / vm_page_size);
++    }
++    std::unique_lock lk(mutex_);
++    const auto exceeds_limit = [&] {
++      return active_memory_ > block_limit_ ||
++          pending_memory_ > block_limit_ - active_memory_ ||
++          get_cache_memory() >
++              block_limit_ - active_memory_ - pending_memory_ ||
++          reserved > block_limit_ - active_memory_ - pending_memory_ -
++              get_cache_memory();
++    };
++    if (exceeds_limit() && get_cache_memory() != 0) {
++      num_resources_ -= buffer_cache_.clear();
++    }
++    if (exceeds_limit()) {
++      throw std::runtime_error(
++          "[metal::make_buffer] Strict memory limit exceeded before allocation.");
++    }
++    pending_memory_ += reserved;
++  }
+   auto buf = device_->newBuffer(ptr, size, resource_options, nullptr);
+   if (!buf) {
++    if (strict_memory_limit_) {
++      std::unique_lock lk(mutex_);
++      pending_memory_ -= reserved;
++    }
+     return Buffer{nullptr};
+   }
+   std::unique_lock lk(mutex_);
++  if (strict_memory_limit_) {
++    pending_memory_ -= reserved;
++    const size_t length = buf->length();
++    const bool exceeds = active_memory_ > block_limit_ ||
++        pending_memory_ > block_limit_ - active_memory_ ||
++        get_cache_memory() > block_limit_ - active_memory_ - pending_memory_ ||
++        length > block_limit_ - active_memory_ - pending_memory_ -
++            get_cache_memory();
++    if (exceeds) {
++      lk.unlock();
++      auto pool = metal::new_scoped_memory_pool();
++      buf->release();
++      throw std::runtime_error(
++          "[metal::make_buffer] Strict memory limit exceeded by imported buffer.");
++    }
++  }
+   residency_sets_.insert(buf);
+   active_memory_ += buf->length();
+   peak_memory_ = std::max(peak_memory_, active_memory_);
+diff --git a/mlx/backend/metal/allocator.h b/mlx/backend/metal/allocator.h
+index 885951364..575f3b959 100644
+--- a/mlx/backend/metal/allocator.h
++++ b/mlx/backend/metal/allocator.h
+@@ -71,6 +71,8 @@ class MetalAllocator : public allocator::Allocator {
+   size_t wired_limit_{0};
+   size_t num_resources_{0};
+   size_t resource_limit_{0};
++  size_t pending_memory_{0};
++  bool strict_memory_limit_{false};
+ 
+   std::mutex mutex_;
+ };
+diff --git a/mlx/backend/metal/kernels/CMakeLists.txt b/mlx/backend/metal/kernels/CMakeLists.txt
+index ecabbda55..6966e663e 100644
+--- a/mlx/backend/metal/kernels/CMakeLists.txt
++++ b/mlx/backend/metal/kernels/CMakeLists.txt
+@@ -1,3 +1,13 @@
++if(DEFINED MLX_PREBUILT_METALLIB)
++  configure_file(${MLX_PREBUILT_METALLIB} ${MLX_METAL_PATH}/mlx.metallib COPYONLY)
++  add_custom_target(mlx-metallib DEPENDS ${MLX_METAL_PATH}/mlx.metallib)
++  add_dependencies(mlx mlx-metallib)
++  include(GNUInstallDirs)
++  install(FILES ${MLX_METAL_PATH}/mlx.metallib
++          DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT metallib)
++  return()
++endif()
++
+ set(BASE_HEADERS
+     bf16.h
+     bf16_math.h
+

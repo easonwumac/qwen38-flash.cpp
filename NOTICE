@@ -39,3 +39,7 @@ contributors), licensed under MIT. The complete license is retained in
 
 The developer direct affine-Q4 probe adapts Cider's per-group INT8 MPP kernel
 under the same MIT license, retained in `devtools/direct_q4_kernels.hpp`.
+The experimental strict-memory patch in
+`devtools/patches/mlx-v0.32.2-strict-memory-limit.patch` modifies MLX v0.32.2
+(Copyright Apple Inc.), licensed under the MIT License. The unmodified upstream
+license is retained in the pinned private experiment checkout.
