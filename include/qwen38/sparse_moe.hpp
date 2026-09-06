@@ -99,6 +99,8 @@ private:
         std::size_t expert) const;
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged_grouped(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged_packed(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_compact_routed(
         const MlxArray& input,
         const MlxArray& experts,

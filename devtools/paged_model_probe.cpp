@@ -1,6 +1,9 @@
 #include "qwen38/model.hpp"
 #include "qwen38/sparse_moe.hpp"
 #include "qwen38/memory_budget.hpp"
+#ifdef QWEN38_PROBE_TOKENIZER
+#include "qwen38/tokenizer.hpp"
+#endif
 
 #include <chrono>
 #include <algorithm>
@@ -29,12 +32,49 @@ std::size_t usage(const char* phase) {
         throw std::runtime_error("probe reached early process safety threshold");
     return static_cast<std::size_t>(info.phys_footprint);
 }
+
+void replay_policies(const qwen38::MlxTensorStore& tensors, const std::size_t initial_budget) {
+    // Fixed-cap counterfactuals reuse routing, not measured elapsed time. They
+    // cannot predict storage throughput, workspace pressure, or MTP acceptance.
+    for (const std::size_t fixed_budget : {std::size_t{0}, 16 * gib, 24 * gib}) {
+    for (const std::uint64_t period : {64ULL, 4096ULL, 8192ULL, 16384ULL}) {
+        qwen38::ExpertCache<int> cache(fixed_budget == 0 ? initial_budget : fixed_budget,
+            period, period == 64 ? 0 : 16384);
+        std::vector<qwen38::ExpertCache<int>::Handle> leases;
+        for (const auto& event : tensors.expert_trace()) {
+            using Kind = qwen38::MlxTensorStore::ExpertTraceKind;
+            if (event.kind == Kind::boundary) leases.clear();
+            else if (event.kind == Kind::budget) {
+                if (fixed_budget == 0 && !cache.set_budget(event.bytes))
+                    throw std::runtime_error("trace budget blocked");
+            } else {
+                leases.push_back(cache.acquire(event.key, event.bytes,
+                    [] { return std::make_shared<const int>(0); }));
+            }
+        }
+        const auto& stats = cache.stats();
+        if (fixed_budget == 0 && period == 4096 && (stats.misses != tensors.expert_stats().misses ||
+                              stats.evictions != tensors.expert_stats().evictions))
+            throw std::runtime_error("trace replay differs from live cache");
+        std::cout << "policy_replay fixed_expert_gib=" << fixed_budget / gib
+                  << " decay=" << period << " hits=" << stats.hits
+                  << " misses=" << stats.misses << " evictions=" << stats.evictions
+                  << " history_hits=" << stats.history_hits << std::endl;
+    }
+    }
+}
 }
 
 int main(int argc, char** argv) {
     try {
         bool layer_only = false, extended = false, elastic = false, serial = false, long_run = false;
         bool steady_only = false;
+        bool legacy_frequency = false;
+        bool pp64 = false;
+        bool rowwise_pp = false, prompt_suite = false;
+        bool unpacked_decode = true;
+        bool trace_policy = false;
+        bool parallel_reads = false;
         for (int i = 2; i < argc; ++i) {
             const std::string_view flag(argv[i]);
             if (flag == "--layer-parity") layer_only = true;
@@ -44,6 +84,14 @@ int main(int argc, char** argv) {
             else if (flag == "--serial") serial = true;
             else if (flag == "--long") long_run = true;
             else if (flag == "--steady-only") steady_only = true;
+            else if (flag == "--legacy-frequency") legacy_frequency = true;
+            else if (flag == "--pp64") pp64 = true;
+            else if (flag == "--rowwise-pp") rowwise_pp = true;
+            else if (flag == "--prompt-suite") prompt_suite = true;
+            else if (flag == "--unpacked-decode") unpacked_decode = true;
+            else if (flag == "--packed-decode") unpacked_decode = false;
+            else if (flag == "--trace-policy") trace_policy = true;
+            else if (flag == "--parallel-reads") parallel_reads = true;
             else throw std::runtime_error("unknown probe flag");
         }
         if (argc < 2 || std::getenv("QWEN38_MEMORY_GUARD") == nullptr ||
@@ -51,6 +99,7 @@ int main(int argc, char** argv) {
             std::string_view(std::getenv("MLX_STRICT_MEMORY_LIMIT")) != "1")
             throw std::runtime_error("usage: guarded private-strict probe MODEL_DIRECTORY");
         if (steady_only && !elastic) throw std::runtime_error("--steady-only requires --elastic");
+        if (trace_policy && legacy_frequency) throw std::runtime_error("trace validation requires default frequency");
         // Research-only: leave 4 GiB outside the MLX cap for host staging and
         // framework memory. The external guard independently limits the process.
         mlx_set_error_handler([](const char* message, void*) { std::cerr << message << '\n'; }, nullptr, nullptr);
@@ -62,13 +111,13 @@ int main(int argc, char** argv) {
         if (layer_only) {
           for (const int layer : {0, 47}) {
             qwen38::MlxTensorStore paged(qwen38::ModelManifest::load(argv[1]),
-                (serial ? 8 : 64) * 1024 * 1024, !serial);
+                (serial ? 8 : 64) * 1024 * 1024, !serial, 4096, !rowwise_pp, !unpacked_decode, parallel_reads);
             qwen38::MlxTensorStore reference(qwen38::ModelManifest::load(argv[1]));
             const auto& config = paged.manifest().config();
             const std::string prefix = "language_model.model.layers." + std::to_string(layer) + ".mlp";
             qwen38::SparseMoe a(paged, prefix, 288, 10, 4, 64, true);
             qwen38::SparseMoe b(reference, prefix, 288, 10, 4, 64, true);
-            for (const int rows : {1, 4}) {
+            for (const int rows : {1, 4, 32, 64}) {
                 std::vector<float> values(static_cast<std::size_t>(rows) * config.hidden_size);
                 for (std::size_t i = 0; i < values.size(); ++i)
                     values[i] = std::sin(static_cast<float>(i) * 0.031F);
@@ -97,7 +146,8 @@ int main(int argc, char** argv) {
         // Independently leave 4 GiB in the MLX pool for non-expert allocations.
         const std::size_t burst_budget = std::min(plan.burst_expert_bytes, process_ceiling - 8 * gib);
         if (!plan.feasible) throw std::runtime_error("infeasible probe memory plan");
-        qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]), steady_budget, !serial);
+        qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]), steady_budget, !serial,
+            legacy_frequency ? 64 : 4096, !rowwise_pp, !unpacked_decode, parallel_reads);
         std::cout << "expert_steady_gib=" << double(steady_budget) / gib
                   << " expert_burst_limit_gib=" << double(burst_budget) / gib
                   << " process_ceiling_gib=" << double(process_ceiling) / gib
@@ -106,6 +156,7 @@ int main(int argc, char** argv) {
         usage("loaded");
         std::cout << "load_seconds=" << std::chrono::duration<double>(Clock::now() - load_started).count() << std::endl;
         auto state = model.make_state();
+        if (trace_policy) tensors.start_expert_trace();
         std::uint32_t token = 9419;
         std::vector<double> seconds;
         std::uint64_t token_hash = 14695981039346656037ULL;
@@ -140,21 +191,59 @@ int main(int argc, char** argv) {
                   << " step_median_seconds=" << sorted[sorted.size() / 2]
                   << " step_p95_seconds=" << sorted[(sorted.size() - 1) * 95 / 100] << std::endl;
         std::cout << "token_hash=" << token_hash << std::endl;
-        const auto start = Clock::now();
-        const std::vector<std::uint32_t> prompt{9419, 11, 358, 1440, 264, 1937, 13, 198};
-        auto prefill_state = model.make_state();
-        auto output = model.prefill_chunk_batch(prompt, prefill_state);
-        const auto logits = output.astype(MLX_FLOAT32).to_float32();
-        const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
-        std::cout << "pp_tokens=" << prompt.size() << " pp_seconds=" << elapsed
-                  << " pp_tps=" << double(prompt.size()) / elapsed << std::endl;
-        std::uint64_t pp_hash = 14695981039346656037ULL;
-        for (const float value : logits) {
-            if (!std::isfinite(value)) throw std::runtime_error("non-finite prefill logits");
-            pp_hash = (pp_hash ^ std::bit_cast<std::uint32_t>(value)) * 1099511628211ULL;
+        if (trace_policy) {
+            tensors.stop_expert_trace();
+            replay_policies(tensors, steady_budget);
         }
-        std::cout << "pp_hash=" << pp_hash << std::endl;
+        // Return borrowed expert capacity before building the PP workspace.
+        if (!tensors.set_expert_budget(steady_budget)) throw std::runtime_error("PP reserve shrink blocked");
+        usage("pp_reserve");
+        std::vector<std::uint32_t> prompt{9419, 11, 358, 1440, 264, 1937, 13, 198};
+        if (pp64) {
+            const auto seed = prompt;
+            for (int i = 1; i < 8; ++i) prompt.insert(prompt.end(), seed.begin(), seed.end());
+        }
+        std::vector<std::vector<std::uint32_t>> prompts{prompt};
+        if (prompt_suite) {
+#ifdef QWEN38_PROBE_TOKENIZER
+            const auto tokenizer = qwen38::Tokenizer::load(argv[1]);
+            prompts.clear();
+            for (const auto text : {
+                "Explain how an operating system decides which file pages to keep in memory. Compare recent access with frequent access, describe how a large sequential scan can displace useful data, and propose a bounded cache policy that adapts when the workload changes. State how you would measure latency and memory pressure without confusing a warm cache with faster storage.",
+                "Review this Python function for correctness and explain edge cases: def average(xs): return sum(xs) / len(xs). Discuss empty input, iterators, missing values, floating point precision, and invalid types. Then propose a small test suite and an implementation whose behavior is explicit rather than silently ignoring errors. Keep the explanation suitable for a new programmer.",
+                "請整理以下會議紀錄：工程團隊希望降低推論伺服器的記憶體用量，產品團隊要求回應速度不能明顯退步。測試需涵蓋短對話、程式碼與長文件，並分開記錄首次載入、快取命中及連續使用。請列出待確認的問題、驗收條件與下一次會議需要的數據。"})
+                prompts.push_back(tokenizer.encode(text));
+#else
+            throw std::runtime_error("prompt suite requires tokenizer build");
+#endif
+        }
+        for (std::size_t p = 0; p < prompts.size(); ++p) {
+        prompt = prompts[p];
+        if (prompt.empty() || prompt.size() > 1024) throw std::runtime_error("probe prompt outside 1..1024");
+        const auto misses_before = tensors.expert_stats().misses;
+        const auto loads_before = tensors.expert_load_ms();
+        const auto start = Clock::now();
+        auto prefill_state = model.make_state();
+        std::uint64_t pp_hash = 14695981039346656037ULL;
+        std::cout << "prompt_start=" << p << " tokens=" << prompt.size() << std::endl;
+        for (std::size_t offset = 0; offset < prompt.size(); offset += 64) {
+            const auto chunk = std::span<const std::uint32_t>(prompt).subspan(offset,
+                std::min<std::size_t>(64, prompt.size() - offset));
+            auto output = model.prefill_chunk_batch(chunk, prefill_state);
+            const auto logits = output.astype(MLX_FLOAT32).to_float32();
+            for (const float value : logits) {
+                if (!std::isfinite(value)) throw std::runtime_error("non-finite prefill logits");
+                pp_hash = (pp_hash ^ std::bit_cast<std::uint32_t>(value)) * 1099511628211ULL;
+            }
+            usage("pp_chunk");
+        }
+        const double elapsed = std::chrono::duration<double>(Clock::now() - start).count();
+        std::cout << "prompt=" << p << " pp_tokens=" << prompt.size() << " pp_seconds=" << elapsed
+                  << " pp_tps=" << double(prompt.size()) / elapsed << std::endl;
+        std::cout << "pp_hash=" << pp_hash << " misses=" << tensors.expert_stats().misses - misses_before
+                  << " load_ms=" << tensors.expert_load_ms() - loads_before << std::endl;
         usage("prefill");
+        }
         if (!tensors.set_expert_budget(steady_budget)) throw std::runtime_error("steady shrink blocked");
         std::cout << "expert_shrunk_gib=" << double(tensors.expert_stats().resident_bytes) / gib << std::endl;
         const auto restored = usage("steady_restored");

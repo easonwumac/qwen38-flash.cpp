@@ -732,10 +732,145 @@ MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
     return MlxArray::multiply(shared_output, shared_router);
 }
 
+MlxArray SparseMoe::forward_paged_packed(const MlxArray& input) const {
+    const auto selection = route_decode(input);
+    const int topk = checked_int(selection.experts.size(), "packed topk");
+    std::vector<MlxTensorStore::ExpertLease> leases;
+    for (const auto id : selection.experts) leases.push_back(paged_store_->expert(prefix_, id));
+    std::vector<MlxArray> packed;
+    for (std::size_t field = 0; field < 9; ++field) {
+        std::vector<MlxArray> parts;
+        for (const auto& lease : leases) parts.push_back((*lease)[field].expand_dims(0));
+        packed.push_back(MlxArray::concatenate_many(parts, 0));
+    }
+    std::vector<std::int32_t> ids(static_cast<std::size_t>(topk));
+    std::iota(ids.begin(), ids.end(), 0);
+    const auto rhs = MlxArray::from_int32(ids, std::vector<int>{topk});
+    const auto lhs = MlxArray::from_int32(std::vector<std::int32_t>(ids.size(), 0), std::vector<int>{topk});
+    const MlxArray no_indices;
+    const auto project_one = [&](const MlxArray& value, const std::size_t p, bool first) {
+        const int bits = infer_affine_quantization_bits(packed[p].shape(), packed[p+1].shape(),
+            static_cast<std::size_t>(group_size_), "packed MoE");
+        return MlxArray::gather_quantized_matmul(value, packed[p], packed[p+1], packed[p+2],
+            first ? lhs : no_indices, rhs, group_size_, bits, true);
+    };
+    const auto gate = project_one(input, 0, true).silu();
+    const auto up = project_one(input, 3, true);
+    const auto output = project_one(MlxArray::multiply(gate, up), 6, false);
+    const auto weights = MlxArray::from_float32(selection.weights,
+        std::vector<int>{topk,1,1}).astype(input.dtype());
+    const auto weighted = MlxArray::multiply(output, weights);
+    MlxArray sum;
+    for (int rank = 0; rank < topk; ++rank) {
+        auto part = weighted.slice(std::vector<int>{rank,0,0},
+            std::vector<int>{rank+1,1,input.shape()[2]}, std::vector<int>{1,1,1});
+        sum = rank == 0 ? std::move(part) : MlxArray::add(sum, part);
+    }
+    sum.eval();
+    const auto stream = mlx_default_gpu_stream_new();
+    const int status = mlx_synchronize(stream);
+    static_cast<void>(mlx_stream_free(stream));
+    if (status != 0) throw std::runtime_error("packed expert completion failed");
+    paged_store_->finish_expert_batch();
+    return MlxArray::add(sum, forward_shared(input));
+}
+
+MlxArray SparseMoe::forward_paged_grouped(const MlxArray& input) const {
+    const auto shape = input.shape();
+    const int rows = shape[1], hidden = shape[2];
+    const int topk = checked_int(experts_per_token_, "paged topk");
+    const int slots = rows * topk;
+    std::vector<std::vector<std::int32_t>> source_rows(expert_count_);
+    std::vector<std::vector<int>> source_slots(expert_count_);
+    std::vector<float> weights(static_cast<std::size_t>(slots));
+    for (int row = 0; row < rows; ++row) {
+        const auto selection = route_decode(slice_sequence_row(input, static_cast<std::size_t>(row)));
+        for (int rank = 0; rank < topk; ++rank) {
+            const auto expert = selection.experts[static_cast<std::size_t>(rank)];
+            source_rows[expert].push_back(row);
+            source_slots[expert].push_back(row * topk + rank);
+            weights[static_cast<std::size_t>(row * topk + rank)] = selection.weights[static_cast<std::size_t>(rank)];
+        }
+    }
+    const auto flat = input.reshape(std::vector<int>{rows, hidden});
+    std::vector<MlxArray> outputs;
+    std::vector<MlxTensorStore::ExpertLease> group_leases;
+    std::size_t pending_begin = 0;
+    std::vector<std::int32_t> inverse(static_cast<std::size_t>(slots));
+    int offset = 0;
+    for (std::size_t expert = 0; expert < expert_count_; ++expert) {
+        if (source_rows[expert].empty()) continue;
+        const int count = checked_int(source_rows[expert].size(), "expert rows");
+        const auto indices = MlxArray::from_int32(source_rows[expert], std::vector<int>{count});
+        const auto x = MlxArray::take_axis(flat, indices, 0).reshape(std::vector<int>{count, 1, hidden});
+        const auto lease = paged_store_->expert(prefix_, expert);
+        group_leases.push_back(lease);
+        const auto rhs = MlxArray::from_int32(std::vector<std::int32_t>(static_cast<std::size_t>(count), 0),
+            std::vector<int>{count});
+        const MlxArray no_indices;
+        const auto project_one = [&](const MlxArray& value, const std::size_t p) {
+            const auto& w = (*lease)[p];
+            const auto& s = (*lease)[p + 1];
+            const auto& b = (*lease)[p + 2];
+            const int bits = infer_affine_quantization_bits(w.shape(), s.shape(),
+                static_cast<std::size_t>(group_size_), "paged grouped MoE");
+            return MlxArray::gather_quantized_matmul(value, w.expand_dims(0), s.expand_dims(0),
+                // sorted=true switches to a different-precision grouped GEMM
+                // at B>=16 in pinned MLX. Keep the reference QMV arithmetic.
+                b.expand_dims(0), no_indices, rhs, group_size_, bits, false);
+        };
+        const auto gate = project_one(x, 0).silu();
+        const auto up = project_one(x, 3);
+        outputs.push_back(project_one(MlxArray::multiply(gate, up), 6).reshape(std::vector<int>{count, hidden}));
+        if (group_leases.size() == 8) {
+            std::vector<const MlxArray*> pending;
+            for (std::size_t i = pending_begin; i < outputs.size(); ++i) pending.push_back(&outputs[i]);
+            MlxArray::eval_all(pending);
+            const auto stream = mlx_default_gpu_stream_new();
+            const int status = mlx_synchronize(stream);
+            static_cast<void>(mlx_stream_free(stream));
+            if (status != 0) throw std::runtime_error("paged grouped fence failed");
+            paged_store_->finish_expert_batch();
+            group_leases.clear();
+            pending_begin = outputs.size();
+        }
+        for (int i = 0; i < count; ++i)
+            inverse[static_cast<std::size_t>(source_slots[expert][static_cast<std::size_t>(i)])] = offset++;
+        // Only evaluated outputs survive; selected weights may now be evicted.
+    }
+    if (!group_leases.empty()) {
+        std::vector<const MlxArray*> pending;
+        for (std::size_t i = pending_begin; i < outputs.size(); ++i) pending.push_back(&outputs[i]);
+        MlxArray::eval_all(pending);
+        const auto stream = mlx_default_gpu_stream_new();
+        const int status = mlx_synchronize(stream);
+        static_cast<void>(mlx_stream_free(stream));
+        if (status != 0) throw std::runtime_error("paged grouped final fence failed");
+        paged_store_->finish_expert_batch();
+        group_leases.clear();
+    }
+    const auto inverse_index = MlxArray::from_int32(inverse, std::vector<int>{slots});
+    const auto ordered = MlxArray::take_axis(MlxArray::concatenate_many(outputs, 0), inverse_index, 0)
+        .reshape(std::vector<int>{rows, topk, hidden});
+    const auto probabilities = MlxArray::from_float32(weights, std::vector<int>{rows, topk, 1}).astype(input.dtype());
+    const auto weighted = MlxArray::multiply(ordered, probabilities);
+    MlxArray sum;
+    for (int rank = 0; rank < topk; ++rank) {
+        auto part = weighted.slice(std::vector<int>{0, rank, 0},
+            std::vector<int>{rows, rank + 1, hidden}, std::vector<int>{1, 1, 1});
+        sum = rank == 0 ? std::move(part) : MlxArray::add(sum, part);
+    }
+    return MlxArray::add(sum.reshape(std::vector<int>{1, rows, hidden}), forward_shared(input));
+}
+
 MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
     const auto shape = input.shape();
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024)
         throw std::runtime_error("paged MoE requires [1,S,hidden], S=1..1024");
+    if (paged_store_->batch_experts() && paged_store_->grouped_prefill() && shape[1] > 1)
+        return forward_paged_grouped(input);
+    if (paged_store_->batch_experts() && paged_store_->packed_decode() && shape[1] == 1)
+        return forward_paged_packed(input);
     std::vector<MlxArray> rows;
     rows.reserve(static_cast<std::size_t>(shape[1]));
     for (int row = 0; row < shape[1]; ++row) {
@@ -773,6 +908,7 @@ MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
             const int status = mlx_synchronize(stream);
             static_cast<void>(mlx_stream_free(stream));
             if (status != 0) throw std::runtime_error("paged expert GPU fence failed");
+            paged_store_->finish_expert_batch();
             }
             // All graph consumers complete before the lease can be evicted.
         }

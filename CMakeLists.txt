@@ -227,6 +227,8 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
         RUNTIME DESTINATION bin)
 
     if(TARGET qwen38_tokenizer)
+        target_link_libraries(qwen38-paged-model-probe PRIVATE qwen38_tokenizer)
+        target_compile_definitions(qwen38-paged-model-probe PRIVATE QWEN38_PROBE_TOKENIZER=1)
         add_library(qwen38_inference src/native_engine.cpp)
         target_include_directories(qwen38_inference PUBLIC include)
         target_link_libraries(qwen38_inference PUBLIC qwen38_mlx qwen38_tokenizer)

@@ -65,6 +65,7 @@ public:
         const MlxArray& left,
         const MlxArray& right,
         int axis);
+    [[nodiscard]] static MlxArray concatenate_many(std::span<const MlxArray> arrays, int axis);
     [[nodiscard]] static MlxArray matmul(const MlxArray& left, const MlxArray& right);
     [[nodiscard]] static MlxArray scaled_dot_product_attention(
         const MlxArray& queries,
@@ -265,14 +266,27 @@ private:
 class MlxTensorStore final {
 public:
     explicit MlxTensorStore(ModelManifest manifest, std::size_t expert_budget = 0,
-                            bool batch_experts = false)
-        : manifest_(std::move(manifest)), paged_(expert_budget != 0), experts_(expert_budget),
-          batch_experts_(batch_experts) {}
+                            bool batch_experts = false, std::uint64_t decay_period = 4096,
+                            bool grouped_prefill = true, bool packed_decode = false,
+                            bool parallel_reads = false)
+        : manifest_(std::move(manifest)), paged_(expert_budget != 0),
+          experts_(expert_budget, decay_period, expert_budget != 0 && decay_period != 64 ? 16384 : 0),
+          batch_experts_(batch_experts), grouped_prefill_(grouped_prefill), packed_decode_(packed_decode),
+          parallel_reads_(parallel_reads) {}
 
     using ExpertArrays = std::vector<MlxArray>;
     using ExpertLease = ExpertCache<ExpertArrays>::Handle;
+    enum class ExpertTraceKind { access, boundary, budget };
+    struct ExpertTraceEvent { ExpertTraceKind kind; std::string key; std::size_t bytes; };
+    // Developer-only bounded trace; caller uses the single inference thread.
+    void start_expert_trace() { expert_trace_.clear(); trace_enabled_ = true; }
+    void stop_expert_trace() noexcept { trace_enabled_ = false; }
+    [[nodiscard]] const std::vector<ExpertTraceEvent>& expert_trace() const { return expert_trace_; }
+    void finish_expert_batch();
     [[nodiscard]] bool paged() const noexcept { return paged_; }
     [[nodiscard]] bool batch_experts() const noexcept { return batch_experts_; }
+    [[nodiscard]] bool grouped_prefill() const noexcept { return grouped_prefill_; }
+    [[nodiscard]] bool packed_decode() const noexcept { return packed_decode_; }
     bool set_expert_budget(std::size_t bytes);
     [[nodiscard]] ExpertLease expert(std::string_view prefix, std::size_t id);
     [[nodiscard]] const ExpertCache<ExpertArrays>::Stats& expert_stats() const { return experts_.stats(); }
@@ -290,9 +304,16 @@ private:
     ExpertCache<ExpertArrays> experts_;
     double expert_load_ms_{0};
     bool batch_experts_{false};
+    bool grouped_prefill_{true};
+    bool packed_decode_{false};
+    bool parallel_reads_{false};
+    bool trace_enabled_{false};
+    std::vector<ExpertTraceEvent> expert_trace_;
+    void trace_expert(ExpertTraceKind kind, std::string key, std::size_t bytes);
     std::unordered_map<std::string, std::unique_ptr<SafetensorsFile>> catalogs_;
     [[nodiscard]] TensorView disk_view(const std::string& name);
-    [[nodiscard]] MlxArray read_tensor(const std::string& name, std::optional<std::size_t> row);
+    [[nodiscard]] MlxArray read_tensor(const std::string& name, std::optional<std::size_t> row,
+                                     std::span<const std::byte> prefetched = {});
 };
 
 [[nodiscard]] std::string mlx_backend_description();

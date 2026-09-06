@@ -31,6 +31,46 @@ void expects_runtime_error(Function&& function) {
 
 void run_expert_cache_tests() {
     {
+        Cache cache(2, 4096, 4);
+        static_cast<void>(cache.acquire("hot", 1, [] { return value(1); }));
+        static_cast<void>(cache.acquire("hot", 1, [] { return value(1); }));
+        QWEN38_CHECK(cache.set_budget(0));
+        QWEN38_CHECK(cache.stats().resident_bytes == 0 && cache.stats().history_entries == 1);
+        QWEN38_CHECK(cache.set_budget(2));
+        auto hot = cache.acquire("hot", 1, [] { return value(1); });
+        const std::weak_ptr<const int> owner = hot;
+        hot.reset();
+        for (int i = 0; i < 16; ++i)
+            static_cast<void>(cache.acquire("cold" + std::to_string(i), 1, [] { return value(2); }));
+        QWEN38_CHECK(!owner.expired() && cache.stats().history_hits == 1);
+        QWEN38_CHECK(cache.stats().history_entries <= 4);
+        cache.clear();
+        QWEN38_CHECK(owner.expired() && cache.stats().history_entries == 0);
+    }
+    {
+        // A hot entry followed by a long one-off scan. Short aging destroys
+        // the frequency signal before the next inference step can revisit it.
+        for (const auto period : {64ULL, 4096ULL}) {
+            Cache cache(100, period);
+            auto hot = cache.acquire("hot", 1, [] { return std::make_shared<const int>(1); });
+            const std::weak_ptr<const int> owner = hot;
+            hot.reset();
+            static_cast<void>(cache.acquire("hot", 1, [] { return std::make_shared<const int>(1); }));
+            for (int i = 0; i < 480; ++i)
+                static_cast<void>(cache.acquire("scan" + std::to_string(i), 1,
+                    [] { return std::make_shared<const int>(2); }));
+            QWEN38_CHECK(owner.expired() == (period == 64));
+            for (int i = 480; i < 8192; ++i)
+                static_cast<void>(cache.acquire("scan" + std::to_string(i), 1,
+                    [] { return std::make_shared<const int>(2); }));
+            QWEN38_CHECK(owner.expired()); // Old popularity must eventually expire.
+        }
+        bool refused = false;
+        try { Cache invalid(100, 0); }
+        catch (const std::invalid_argument&) { refused = true; }
+        QWEN38_CHECK(refused);
+    }
+    {
         Cache cache(10);
         int loads = 0;
         auto first = cache.acquire("a", 4, [&] { ++loads; return value(7); });

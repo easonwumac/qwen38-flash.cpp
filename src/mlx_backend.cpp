@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <chrono>
 #include <fstream>
+#include <future>
+#include <array>
 #include <limits>
 #include <cstring>
 #include <stdexcept>
@@ -371,6 +373,20 @@ MlxArray MlxArray::concatenate(
     const int status = mlx_concatenate_axis(&result.value_, vector, axis, stream.get());
     static_cast<void>(mlx_vector_array_free(vector));
     check(status, "concatenate_axis");
+    return result;
+}
+
+MlxArray MlxArray::concatenate_many(const std::span<const MlxArray> arrays, const int axis) {
+    if (arrays.empty()) throw std::invalid_argument("empty concatenate inputs");
+    std::vector<mlx_array> values;
+    values.reserve(arrays.size());
+    for (const auto& array : arrays) values.push_back(array.get());
+    const mlx_vector_array vector = mlx_vector_array_new_data(values.data(), values.size());
+    if (vector.ctx == nullptr) throw std::runtime_error("MLX concatenate vector failed");
+    MlxArray result;
+    const int status = mlx_concatenate_axis(&result.value_, vector, axis, default_gpu_stream());
+    static_cast<void>(mlx_vector_array_free(vector));
+    check(status, "concatenate_many");
     return result;
 }
 
@@ -1046,7 +1062,8 @@ TensorView MlxTensorStore::disk_view(const std::string& name) {
     return catalog->tensor(name);
 }
 
-MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optional<std::size_t> row) {
+MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optional<std::size_t> row,
+                                    const std::span<const std::byte> prefetched) {
     const TensorView view = disk_view(name);
     const auto& shard = manifest_.weight_map().at(name);
     const auto mapping = catalogs_.at(shard)->mapped_view();
@@ -1074,12 +1091,16 @@ MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optiona
     else if (view.dtype == "F32") dtype = MLX_FLOAT32;
     else if (view.dtype == "F16") dtype = MLX_FLOAT16;
     else throw std::runtime_error("unsupported paged tensor dtype");
-    std::vector<std::byte> staging(bytes);
-    std::ifstream file(manifest_.directory() / shard, std::ios::binary);
-    file.seekg(static_cast<std::streamoff>(offset));
-    file.read(reinterpret_cast<char*>(staging.data()), static_cast<std::streamsize>(bytes));
-    if (!file) throw std::runtime_error("paged tensor read failed");
-    MlxArray result(mlx_array_new_data(staging.data(), shape.data(), static_cast<int>(shape.size()), dtype));
+    std::vector<std::byte> staging;
+    if (prefetched.empty()) {
+        staging.resize(bytes);
+        std::ifstream file(manifest_.directory() / shard, std::ios::binary);
+        file.seekg(static_cast<std::streamoff>(offset));
+        file.read(reinterpret_cast<char*>(staging.data()), static_cast<std::streamsize>(bytes));
+        if (!file) throw std::runtime_error("paged tensor read failed");
+    } else if (prefetched.size() != bytes) throw std::runtime_error("prefetched byte size mismatch");
+    const auto* data = prefetched.empty() ? staging.data() : prefetched.data();
+    MlxArray result(mlx_array_new_data(data, shape.data(), static_cast<int>(shape.size()), dtype));
     if (result.get().ctx == nullptr) throw std::runtime_error("paged tensor allocation failed");
     if (mlx_array_nbytes(result.get()) != bytes)
         throw std::runtime_error("paged tensor byte geometry mismatch");
@@ -1111,7 +1132,8 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             bytes += (raw + page - 1) / page * page;
         }
     }
-    return experts_.acquire(std::string(prefix) + "/" + std::to_string(id), bytes, [&] {
+    const auto key = std::string(prefix) + "/" + std::to_string(id);
+    auto lease = experts_.acquire(key, bytes, [&] {
         const auto started = std::chrono::steady_clock::now();
         // Retire prior asynchronous work before taking a global allocator
         // snapshot; otherwise old graph releases can make the delta negative.
@@ -1120,7 +1142,44 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
         check(mlx_get_active_memory(&before), "paged memory before load");
         auto arrays = std::make_shared<ExpertArrays>();
         arrays->reserve(names.size());
-        for (const auto& name : names) arrays->push_back(read_tensor(name, id));
+        if (!parallel_reads_) {
+            for (const auto& name : names) arrays->push_back(read_tensor(name, id));
+        } else {
+            struct Request { std::filesystem::path path; std::size_t offset, bytes; };
+            std::array<Request, 9> requests;
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                const auto view = disk_view(names[i]);
+                const auto& shard = manifest_.weight_map().at(names[i]);
+                const auto extent = catalogs_.at(shard)->mapped_view();
+                const auto row_bytes = view.bytes.size() / view.shape[0];
+                requests[i] = {manifest_.directory() / shard,
+                    static_cast<std::size_t>(view.bytes.data() - extent.data()) + id * row_bytes, row_bytes};
+            }
+            // At most three CPU readers, one expert at a time; no MLX calls on
+            // worker threads. Futures join even when a read/copy throws.
+            using Buffers = std::array<std::vector<std::byte>, 3>;
+            std::array<std::future<Buffers>, 3> reads;
+            for (std::size_t p = 0; p < reads.size(); ++p) {
+                reads[p] = std::async(std::launch::async, [&requests, p] {
+                    Buffers buffers;
+                    for (std::size_t f = 0; f < buffers.size(); ++f) {
+                        const auto& request = requests[p * 3 + f];
+                        buffers[f].resize(request.bytes);
+                        std::ifstream file(request.path, std::ios::binary);
+                        file.seekg(static_cast<std::streamoff>(request.offset));
+                        file.read(reinterpret_cast<char*>(buffers[f].data()),
+                            static_cast<std::streamsize>(request.bytes));
+                        if (!file) throw std::runtime_error("parallel expert read failed");
+                    }
+                    return buffers;
+                });
+            }
+            for (std::size_t p = 0; p < reads.size(); ++p) {
+                const auto buffers = reads[p].get();
+                for (std::size_t f = 0; f < buffers.size(); ++f)
+                    arrays->push_back(read_tensor(names[p * 3 + f], id, buffers[f]));
+            }
+        }
         check(mlx_synchronize(default_gpu_stream()), "paged expert bundle completion");
         std::size_t after = 0;
         check(mlx_get_active_memory(&after), "paged memory after load");
@@ -1131,13 +1190,27 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             std::chrono::steady_clock::now() - started).count();
         return arrays;
     });
+    if (trace_enabled_) trace_expert(ExpertTraceKind::access, key, bytes);
+    return lease;
+}
+
+void MlxTensorStore::trace_expert(const ExpertTraceKind kind, std::string key, const std::size_t bytes) {
+    if (!trace_enabled_) return;
+    if (expert_trace_.size() >= 200000) throw std::runtime_error("expert trace reached bounded event limit");
+    expert_trace_.push_back({kind, std::move(key), bytes});
+}
+
+void MlxTensorStore::finish_expert_batch() {
+    trace_expert(ExpertTraceKind::boundary, {}, 0);
 }
 
 bool MlxTensorStore::set_expert_budget(const std::size_t bytes) {
     std::scoped_lock lock(mutex_);
     if (!paged_) throw std::runtime_error("expert paging is disabled");
     check(mlx_synchronize(default_gpu_stream()), "paged resize fence");
-    return experts_.set_budget(bytes);
+    const bool result = experts_.set_budget(bytes);
+    trace_expert(ExpertTraceKind::budget, {}, bytes);
+    return result;
 }
 
 std::size_t MlxTensorStore::open_shard_count() const {

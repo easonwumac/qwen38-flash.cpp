@@ -25,6 +25,21 @@ int main() {
     const std::array<float, 4> right_values{5.0F, 6.0F, 7.0F, 8.0F};
     const auto left = qwen38::MlxArray::from_float32(left_values, shape);
     const auto right = qwen38::MlxArray::from_float32(right_values, shape);
+    {
+        const std::array<qwen38::MlxArray, 3> arrays{left.share(), right.share(), left.share()};
+        const auto joined = qwen38::MlxArray::concatenate_many(arrays, 0);
+        if (joined.shape() != std::vector<int>({6, 2}) ||
+            joined.to_float32() != std::vector<float>({1,2,3,4,5,6,7,8,1,2,3,4}) ||
+            qwen38::MlxArray::concatenate_many(arrays, 1).to_float32() !=
+                std::vector<float>({1,2,5,6,1,2,3,4,7,8,3,4})) {
+            std::cerr << "MLX concatenate_many mismatch\n";
+            return 1;
+        }
+        bool refused = false;
+        try { static_cast<void>(qwen38::MlxArray::concatenate_many({}, 0)); }
+        catch (const std::invalid_argument&) { refused = true; }
+        if (!refused) return 1;
+    }
     const auto sum = qwen38::MlxArray::add(left, right).to_float32();
     const auto product = qwen38::MlxArray::matmul(left, right).to_float32();
     const auto elementwise = qwen38::MlxArray::multiply(left, right).to_float32();
