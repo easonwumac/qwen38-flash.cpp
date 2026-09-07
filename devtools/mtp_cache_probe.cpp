@@ -10,18 +10,24 @@
 #include <unistd.h>
 
 int main(int argc, char** argv) try {
-    if ((argc != 3 && argc != 4) || !std::getenv("QWEN38_MEMORY_GUARD"))
-        throw std::runtime_error("usage: guarded mtp-cache-probe MODEL SSD_DIRECTORY_OR_DASH [8192|32768]");
-    const int long_context = argc == 4 ? std::stoi(argv[3]) : 0;
-    if (argc == 4 && long_context != 8192 && long_context != 32768)
+    if (argc < 3 || argc > 6 || !std::getenv("QWEN38_MEMORY_GUARD"))
+        throw std::runtime_error("usage: guarded mtp-cache-probe MODEL SSD_DIRECTORY_OR_DASH [0|8192|32768] [0|4 depth] [2..5 repeats]");
+    const int long_context = argc >= 4 ? std::stoi(argv[3]) : 0;
+    const int depth = argc >= 5 ? std::stoi(argv[4]) : 4;
+    const int repeats = argc >= 6 ? std::stoi(argv[5]) : 2;
+    if (long_context != 0 && long_context != 8192 && long_context != 32768)
         throw std::runtime_error("unsupported context probe size");
+    if ((depth != 0 && depth != 4) || repeats < 2 || repeats > 5)
+        throw std::runtime_error("unsupported depth or repeat count");
     std::size_t old{};
     if (mlx_set_memory_limit(&old, 40ULL * 1024 * 1024 * 1024))
         throw std::runtime_error("allocation cap failed");
+    if (mlx_set_cache_limit(&old, 256ULL * 1024 * 1024))
+        throw std::runtime_error("allocator cache cap failed");
     qwen38::apply_runtime_profile("speed");
     qwen38::NativeEngineOptions options;
     options.max_generation_tokens = 64;
-    options.mtp_depth = 4;
+    options.mtp_depth = depth;
     options.prefill_chunk_rows = 512;
     options.qmeta_cache_max_prompt_tokens = 0;
     const bool ssd = std::string_view(argv[2]) != "-";
@@ -58,7 +64,7 @@ int main(int argc, char** argv) try {
         auto prompt = long_context ? long_prompt : qwen38::render_chat_prompt({{.role=qwen38::ChatRole::user,
             .content=prompts[i], .reasoning_content={}, .tool_calls={}}}, chat);
         std::vector<std::uint32_t> expected;
-        for (int repeat = 0; repeat < 2; ++repeat) {
+        for (int repeat = 0; repeat < repeats; ++repeat) {
             const auto start = std::chrono::steady_clock::now();
             double first_delta_ms = -1;
             const auto result = engine.complete_stream(prompt, long_context ? 16 : 64,
@@ -97,7 +103,7 @@ int main(int argc, char** argv) try {
                 std::cout << result.tokens[j];
             }
             std::cout << "]}\n";
-            if (long_context && repeat == 1 &&
+            if (long_context && repeat > 0 &&
                 (result.tokens != expected || (ssd && result.cached_prompt_tokens == 0)))
                 throw std::runtime_error("long-context cache reuse/parity check failed");
         }
