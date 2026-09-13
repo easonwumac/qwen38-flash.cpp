@@ -63,6 +63,7 @@ DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
   --profile memory --mtp-depth off --prefix-cache-tokens 0 \
   --kv-cache q8 --kv-q8-min-tokens 65536 \
+  --kv-q8-flush-tokens 8192 \
   --prefill-chunk 512 --prefill-chunk-fixed
 ```
 

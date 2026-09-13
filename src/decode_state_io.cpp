@@ -61,6 +61,8 @@ void append_decoder(
         metadata, prefix + ".attention.qsa_pooled_count",
         state.full_attention.qsa_pooled_count);
     add_metadata(metadata, prefix + ".attention.kv_q8", state.full_attention.kv_q8);
+    add_metadata(metadata, prefix + ".attention.kv_q8_cold_tokens",
+        state.full_attention.kv_q8_cold_tokens);
     if (state.full_attention.token_count != 0) {
         if (state.full_attention.kv_q8) {
             arrays.push_back({prefix + ".attention.key_weights", &state.full_attention.key_weights});
@@ -69,6 +71,11 @@ void append_decoder(
             arrays.push_back({prefix + ".attention.value_weights", &state.full_attention.value_weights});
             arrays.push_back({prefix + ".attention.value_scales", &state.full_attention.value_scales});
             arrays.push_back({prefix + ".attention.value_biases", &state.full_attention.value_biases});
+            if (state.full_attention.token_count >
+                state.full_attention.kv_q8_cold_tokens) {
+                arrays.push_back({prefix + ".attention.keys", &state.full_attention.keys});
+                arrays.push_back({prefix + ".attention.values", &state.full_attention.values});
+            }
         } else {
             arrays.push_back({prefix + ".attention.keys", &state.full_attention.keys});
             arrays.push_back({prefix + ".attention.values", &state.full_attention.values});
@@ -119,6 +126,20 @@ DecoderLayerState load_decoder(const std::string& prefix, const MlxSafetensors& 
             state.full_attention.value_weights = file.tensor(prefix + ".attention.value_weights");
             state.full_attention.value_scales = file.tensor(prefix + ".attention.value_scales");
             state.full_attention.value_biases = file.tensor(prefix + ".attention.value_biases");
+            const auto cold_metadata =
+                file.metadata(prefix + ".attention.kv_q8_cold_tokens");
+            state.full_attention.kv_q8_cold_tokens = cold_metadata.has_value()
+                ? parse_size(file, prefix + ".attention.kv_q8_cold_tokens")
+                : static_cast<std::size_t>(state.full_attention.key_weights.shape()[2]);
+            if (state.full_attention.kv_q8_cold_tokens >
+                state.full_attention.token_count) {
+                throw std::runtime_error("Q8 prefix state cold frontier is out of range");
+            }
+            if (state.full_attention.kv_q8_cold_tokens <
+                state.full_attention.token_count) {
+                state.full_attention.keys = file.tensor(prefix + ".attention.keys");
+                state.full_attention.values = file.tensor(prefix + ".attention.values");
+            }
         } else {
             state.full_attention.keys = file.tensor(prefix + ".attention.keys");
             state.full_attention.values = file.tensor(prefix + ".attention.values");

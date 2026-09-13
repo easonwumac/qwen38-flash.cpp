@@ -129,12 +129,19 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
             const uint slot = local / PACKED_D;
             const uint packed_channel = local % PACKED_D;
             const uint selected_slot = tile_start + slot;
+            const bool selected_valid = selected_slot < uint(S) &&
+                valid[row * uint(S) + selected_slot];
             uint quantized = 0;
             float s = 0.0f;
             float b = 0.0f;
-            if (selected_slot < uint(S) && valid[row * uint(S) + selected_slot]) {
-                const uint token = uint(indices[row * uint(S) + selected_slot]);
-                const size_t vector = (size_t(kv_head) * size_t(TOTAL) + token);
+            uint token = 0;
+            bool cold = false;
+            if (selected_valid) {
+                token = uint(indices[row * uint(S) + selected_slot]);
+                cold = token < uint(COLD);
+            }
+            if (cold) {
+                const size_t vector = size_t(kv_head) * size_t(COLD) + token;
                 const size_t word_index = vector * PACKED_D + packed_channel;
                 quantized = load_value ? vw[word_index] : kw[word_index];
                 const size_t group_index = vector * GROUPS + packed_channel / 16;
@@ -143,7 +150,17 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
             }
             const uint shared_base = slot * uint(D) + packed_channel * 4;
             for (uint component = 0; component < 4; ++component) {
-                const T loaded = T(float((quantized >> (component * 8)) & 255u) * s + b);
+                T loaded = T(0);
+                if (cold) {
+                    loaded = T(float((quantized >> (component * 8)) & 255u) * s + b);
+                } else if (selected_valid) {
+                    const size_t hot_token = size_t(token - uint(COLD));
+                    const size_t hot_vector = size_t(kv_head) *
+                        size_t(TOTAL - COLD) + hot_token;
+                    const size_t hot_index = hot_vector * size_t(D) +
+                        packed_channel * 4 + component;
+                    loaded = load_value ? hot_values[hot_index] : hot_keys[hot_index];
+                }
                 if (load_value) shared_v[shared_base + component] = loaded;
                 else shared_k[shared_base + component] = loaded;
             }

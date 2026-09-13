@@ -18,6 +18,7 @@ struct SelfAttentionState {
     MlxArray value_scales;
     MlxArray value_biases;
     bool kv_q8{false};
+    std::size_t kv_q8_cold_tokens{0};
     MlxArray qsa_raw_keys;
     MlxArray qsa_pooled_keys;
     std::size_t qsa_pooled_count{0};

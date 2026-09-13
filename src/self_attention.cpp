@@ -81,7 +81,7 @@ std::shared_ptr<MlxMetalKernel> packed_qsa_q8_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
             "query", "kw", "ks", "kb", "vw", "vs", "vb",
-            "indices", "valid", "scale"};
+            "hot_keys", "hot_values", "indices", "valid", "scale"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_packed_qsa_attention_q8",
             inputs,
@@ -110,6 +110,17 @@ std::size_t q8_kv_min_tokens() {
     const unsigned long long parsed = std::strtoull(configured, &end, 10);
     if (end == configured || *end != '\0' || parsed < 2049) {
         throw std::runtime_error("QWEN38_KV_Q8_MIN_TOKENS must be an integer above 2048");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
+std::size_t q8_kv_flush_tokens() {
+    const char* configured = std::getenv("QWEN38_KV_Q8_FLUSH_TOKENS");
+    if (configured == nullptr) return 8192;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(configured, &end, 10);
+    if (end == configured || *end != '\0' || parsed < 512) {
+        throw std::runtime_error("QWEN38_KV_Q8_FLUSH_TOKENS must be an integer of at least 512");
     }
     return static_cast<std::size_t>(parsed);
 }
@@ -150,35 +161,47 @@ PackedQ8 pack_q8(const MlxArray& value) {
 
 void append_q8_kv(SelfAttentionState& state, MlxArray key, MlxArray value) {
     if (!state.kv_q8) {
-        if (state.token_count != 0) {
-            key = MlxArray::concatenate(state.keys, key, 2);
-            value = MlxArray::concatenate(state.values, value, 2);
+        if (state.token_count == 0) {
+            throw std::runtime_error("Q8 KV transition requires a BF16 history");
         }
-        PackedQ8 packed_key = pack_q8(key);
-        PackedQ8 packed_value = pack_q8(value);
+        PackedQ8 packed_key = pack_q8(state.keys);
+        PackedQ8 packed_value = pack_q8(state.values);
         state.key_weights = std::move(packed_key.weights);
         state.key_scales = std::move(packed_key.scales);
         state.key_biases = std::move(packed_key.biases);
         state.value_weights = std::move(packed_value.weights);
         state.value_scales = std::move(packed_value.scales);
         state.value_biases = std::move(packed_value.biases);
-        state.keys = MlxArray{};
-        state.values = MlxArray{};
+        state.keys = std::move(key);
+        state.values = std::move(value);
         state.kv_q8 = true;
+        state.kv_q8_cold_tokens = state.token_count;
         static std::once_flag announced;
         std::call_once(announced, [] {
             std::clog << "qwen38: affine Q8 packed KV cache engaged\n";
         });
         return;
     }
-    PackedQ8 packed_key = pack_q8(key);
-    PackedQ8 packed_value = pack_q8(value);
-    state.key_weights = MlxArray::concatenate(state.key_weights, packed_key.weights, 2);
-    state.key_scales = MlxArray::concatenate(state.key_scales, packed_key.scales, 2);
-    state.key_biases = MlxArray::concatenate(state.key_biases, packed_key.biases, 2);
-    state.value_weights = MlxArray::concatenate(state.value_weights, packed_value.weights, 2);
-    state.value_scales = MlxArray::concatenate(state.value_scales, packed_value.scales, 2);
-    state.value_biases = MlxArray::concatenate(state.value_biases, packed_value.biases, 2);
+    const std::size_t hot_tokens = state.token_count - state.kv_q8_cold_tokens;
+    if (hot_tokens == 0) {
+        state.keys = std::move(key);
+        state.values = std::move(value);
+    } else if (hot_tokens >= q8_kv_flush_tokens()) {
+        PackedQ8 packed_key = pack_q8(state.keys);
+        PackedQ8 packed_value = pack_q8(state.values);
+        state.key_weights = MlxArray::concatenate(state.key_weights, packed_key.weights, 2);
+        state.key_scales = MlxArray::concatenate(state.key_scales, packed_key.scales, 2);
+        state.key_biases = MlxArray::concatenate(state.key_biases, packed_key.biases, 2);
+        state.value_weights = MlxArray::concatenate(state.value_weights, packed_value.weights, 2);
+        state.value_scales = MlxArray::concatenate(state.value_scales, packed_value.scales, 2);
+        state.value_biases = MlxArray::concatenate(state.value_biases, packed_value.biases, 2);
+        state.kv_q8_cold_tokens += hot_tokens;
+        state.keys = std::move(key);
+        state.values = std::move(value);
+    } else {
+        state.keys = MlxArray::concatenate(state.keys, key, 2);
+        state.values = MlxArray::concatenate(state.values, value, 2);
+    }
 }
 
 SelfAttentionState share_attention_state(const SelfAttentionState& state) {
@@ -187,6 +210,7 @@ SelfAttentionState share_attention_state(const SelfAttentionState& state) {
     copy.position_base = state.position_base;
     copy.qsa_pooled_count = state.qsa_pooled_count;
     copy.kv_q8 = state.kv_q8;
+    copy.kv_q8_cold_tokens = state.kv_q8_cold_tokens;
     if (state.token_count != 0) {
         if (state.kv_q8) {
             copy.key_weights = state.key_weights.share();
@@ -195,6 +219,10 @@ SelfAttentionState share_attention_state(const SelfAttentionState& state) {
             copy.value_weights = state.value_weights.share();
             copy.value_scales = state.value_scales.share();
             copy.value_biases = state.value_biases.share();
+            if (state.token_count > state.kv_q8_cold_tokens) {
+                copy.keys = state.keys.share();
+                copy.values = state.values.share();
+            }
         } else {
             copy.keys = state.keys.share();
             copy.values = state.values.share();
@@ -774,9 +802,11 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
     const std::vector<int> query_shape = query.shape();
     const std::vector<int> weight_shape = state.key_weights.shape();
     const std::vector<int> scale_shape = state.key_scales.shape();
+    const std::vector<int> hot_shape = state.keys.shape();
     const std::vector<int> index_shape = selection.packed_indices.shape();
     if (!state.kv_q8 || query_shape.size() != 4 || weight_shape.size() != 4 ||
-        scale_shape.size() != 4 || index_shape.size() != 3 || query_shape[0] != 1 ||
+        scale_shape.size() != 4 || hot_shape.size() != 4 || index_shape.size() != 3 ||
+        query_shape[0] != 1 ||
         weight_shape[0] != 1 || index_shape[0] != 1 ||
         query_shape[2] != index_shape[1] || weight_shape[1] != scale_shape[1] ||
         weight_shape[2] != scale_shape[2]) {
@@ -793,12 +823,17 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
         state.value_weights.shape() != weight_shape ||
         state.value_scales.shape() != scale_shape ||
         state.key_biases.shape() != scale_shape ||
-        state.value_biases.shape() != scale_shape) {
+        state.value_biases.shape() != scale_shape ||
+        state.values.shape() != hot_shape || hot_shape[0] != 1 ||
+        hot_shape[1] != kv_heads || hot_shape[3] != head_dimension ||
+        static_cast<std::size_t>(weight_shape[2]) != state.kv_q8_cold_tokens ||
+        state.kv_q8_cold_tokens + static_cast<std::size_t>(hot_shape[2]) !=
+            state.token_count) {
         throw std::runtime_error("packed Q8 QSA kernel contract mismatch");
     }
     MlxArray scale = scalar(
         1.0F / std::sqrt(static_cast<float>(head_dimension_)), MLX_FLOAT32);
-    const std::array<const MlxArray*, 10> inputs{
+    const std::array<const MlxArray*, 12> inputs{
         &query,
         &state.key_weights,
         &state.key_scales,
@@ -806,6 +841,8 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
         &state.value_weights,
         &state.value_scales,
         &state.value_biases,
+        &state.keys,
+        &state.values,
         &selection.packed_indices,
         &selection.packed_mask,
         &scale,
@@ -826,9 +863,10 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
         }
         tile_size = static_cast<int>(parsed);
     }
-    const std::array<MlxMetalIntTemplate, 8> int_templates{{
+    const std::array<MlxMetalIntTemplate, 9> int_templates{{
         {.name = "R", .value = rows},
-        {.name = "TOTAL", .value = weight_shape[2]},
+        {.name = "TOTAL", .value = dimension(state.token_count, "Q8 KV total")},
+        {.name = "COLD", .value = weight_shape[2]},
         {.name = "S", .value = selected},
         {.name = "HQ", .value = query_shape[1]},
         {.name = "HK", .value = kv_heads},

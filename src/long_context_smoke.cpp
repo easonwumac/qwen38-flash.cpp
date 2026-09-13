@@ -90,6 +90,7 @@ int main(int argc, char **argv) {
         std::size_t pooled_blocks = 0;
         std::size_t kv_q8_layers = 0;
         std::size_t kv_storage_bytes = 0;
+        std::size_t kv_q8_cold_tokens = 0;
         const std::size_t selected_block_limit =
             config.indexer_budget / config.indexer_compress_ratio;
         for (std::size_t layer = 0; layer < state.layers.size(); ++layer) {
@@ -99,12 +100,21 @@ int main(int argc, char **argv) {
             ++full_attention_layers;
             if (attention.kv_q8) {
                 ++kv_q8_layers;
+                if (kv_q8_layers == 1) {
+                    kv_q8_cold_tokens = attention.kv_q8_cold_tokens;
+                } else if (attention.kv_q8_cold_tokens != kv_q8_cold_tokens) {
+                    throw std::runtime_error("Q8 KV cold frontiers differ between layers");
+                }
                 kv_storage_bytes += mlx_array_nbytes(attention.key_weights.get()) +
                     mlx_array_nbytes(attention.key_scales.get()) +
                     mlx_array_nbytes(attention.key_biases.get()) +
                     mlx_array_nbytes(attention.value_weights.get()) +
                     mlx_array_nbytes(attention.value_scales.get()) +
                     mlx_array_nbytes(attention.value_biases.get());
+                if (attention.token_count > attention.kv_q8_cold_tokens) {
+                    kv_storage_bytes += mlx_array_nbytes(attention.keys.get()) +
+                        mlx_array_nbytes(attention.values.get());
+                }
             } else {
                 kv_storage_bytes += mlx_array_nbytes(attention.keys.get()) +
                     mlx_array_nbytes(attention.values.get());
@@ -161,6 +171,7 @@ int main(int argc, char **argv) {
                   << ",\"full_attention_layers\":" << full_attention_layers
                   << ",\"qsa_layers\":" << qsa_layers
                   << ",\"kv_q8_layers\":" << kv_q8_layers
+                  << ",\"kv_q8_cold_tokens\":" << kv_q8_cold_tokens
                   << ",\"kv_storage_bytes\":" << kv_storage_bytes
                   << ",\"qsa_engaged\":" << (qsa_layers != 0 ? "true" : "false")
                   << ",\"pooled_blocks\":" << pooled_blocks
