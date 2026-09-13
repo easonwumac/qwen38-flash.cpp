@@ -636,6 +636,35 @@ GenerationResult NativeEngine::complete_impl(
     };
     const std::array<std::uint32_t, 2> stop_tokens{
         tensors_.manifest().config().end_of_sequence_token, chat_end_token_};
+    const char* profile_serial_decode = std::getenv("QWEN38_PROFILE_SERIAL_DECODE");
+    if (profile_serial_decode != nullptr &&
+        std::string_view(profile_serial_decode) == "1") {
+        ModelDecodeState profiled_state = model_.snapshot_state(state);
+        std::vector<double> checksums;
+        std::vector<double> layer_ms;
+        const auto profile_started = std::chrono::steady_clock::now();
+        static_cast<void>(model_.trace_decode(
+            current, profiled_state, checksums, layer_ms)
+            .astype(MLX_FLOAT32).to_float32());
+        const double total_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - profile_started).count();
+        double linear_ms = 0.0;
+        double full_ms = 0.0;
+        for (std::size_t layer = 0; layer < layer_ms.size(); ++layer) {
+            (layer + 1) % 4 == 0 ? full_ms += layer_ms[layer]
+                                 : linear_ms += layer_ms[layer];
+        }
+        std::clog << "qwen38-serial-decode-profile: context=" << state.token_count
+                  << " total_ms=" << total_ms
+                  << " linear_layers_ms=" << linear_ms
+                  << " full_layers_ms=" << full_ms
+                  << " layer_ms=[";
+        for (std::size_t layer = 0; layer < layer_ms.size(); ++layer) {
+            if (layer != 0) std::clog << ',';
+            std::clog << layer_ms[layer];
+        }
+        std::clog << "]\n";
+    }
     const auto generation_started = std::chrono::steady_clock::now();
     while (result.tokens.size() < max_tokens) {
         const std::size_t remaining = max_tokens - result.tokens.size();
