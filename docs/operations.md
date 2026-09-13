@@ -31,6 +31,7 @@ upstream shard payloads to install them.
 | Normal interactive use | `speed`, default MTP off | Exact top-10; 1024-row PP batches through 32K |
 | Lowest memory | `memory`, MTP off | Pageable experts and lossless13; slower cold/decode |
 | 128K+ context | `long-context`, MTP off, RAM cache off | Maximum state headroom |
+| Experimental 128K capacity/PP | `memory --kv-cache q8`, fixed chunk 512 | 46.875% smaller KV; slower decode remains possible |
 | Known favorable speculation | `speed --mtp-depth auto` | Faster only when acceptance repays verification |
 | Explicit quality/speed experiment | `turbo` | Changes target routing/qmeta; not exact parity |
 
@@ -52,6 +53,20 @@ curl -fsS http://127.0.0.1:11438/readyz
 curl -fsS http://127.0.0.1:11438/v1/status
 curl -fsS http://127.0.0.1:11438/metrics
 ```
+
+For a guarded Q8 long-context run, keep MTP and the RAM prefix cache off:
+
+```bash
+DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
+./devtools/memory_guard.py --min-available-gib 6 -- \
+  ./build-release/qwen38-server \
+  --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
+  --profile memory --mtp-depth off --prefix-cache-tokens 0 \
+  --kv-cache q8 --kv-q8-min-tokens 65536 \
+  --prefill-chunk 512 --prefill-chunk-fixed
+```
+
+See [Q8 KV cache](q8-kv-cache.md) for the current validation boundary.
 
 Treat `readyz != 200`, a nonempty `last_error`, a rising cancellation count, or a
 memory-guard exit as an operational signal. The guard exit codes are 75 for

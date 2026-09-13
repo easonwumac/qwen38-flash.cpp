@@ -11,6 +11,13 @@ namespace qwen38 {
 struct SelfAttentionState {
     MlxArray keys;
     MlxArray values;
+    MlxArray key_weights;
+    MlxArray key_scales;
+    MlxArray key_biases;
+    MlxArray value_weights;
+    MlxArray value_scales;
+    MlxArray value_biases;
+    bool kv_q8{false};
     MlxArray qsa_raw_keys;
     MlxArray qsa_pooled_keys;
     std::size_t qsa_pooled_count{0};
@@ -74,6 +81,10 @@ private:
         const MlxArray& query,
         const MlxArray& keys,
         const MlxArray& values,
+        const QsaSelection& selection) const;
+    [[nodiscard]] MlxArray packed_qsa_attention_q8(
+        const MlxArray& query,
+        const SelfAttentionState& state,
         const QsaSelection& selection) const;
     void copy_qsa_checkpoint(
         const SelfAttentionState& complete,

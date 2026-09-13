@@ -530,6 +530,33 @@ int main() {
         std::cerr << "persisted prefix-state roundtrip mismatch\n";
         return 1;
     }
+    qwen38::PersistedPrefixState q8_persisted(1);
+    q8_persisted.target.token_count = 2;
+    auto& q8_attention = q8_persisted.target.layers[0].full_attention;
+    q8_attention.token_count = 2;
+    q8_attention.kv_q8 = true;
+    q8_attention.key_weights = left.share();
+    q8_attention.key_scales = right.share();
+    q8_attention.key_biases = left.share();
+    q8_attention.value_weights = right.share();
+    q8_attention.value_scales = left.share();
+    q8_attention.value_biases = right.share();
+    q8_attention.qsa_raw_keys = left.share();
+    qwen38::save_prefix_state(state_path, q8_persisted);
+    qwen38::PersistedPrefixState q8_restored =
+        qwen38::load_prefix_state(state_path, 1);
+    std::filesystem::remove(state_path);
+    const auto& restored_q8 = q8_restored.target.layers[0].full_attention;
+    if (!restored_q8.kv_q8 ||
+        restored_q8.key_weights.to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+        restored_q8.key_scales.to_float32() != std::vector<float>({5, 6, 7, 8}) ||
+        restored_q8.key_biases.to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+        restored_q8.value_weights.to_float32() != std::vector<float>({5, 6, 7, 8}) ||
+        restored_q8.value_scales.to_float32() != std::vector<float>({1, 2, 3, 4}) ||
+        restored_q8.value_biases.to_float32() != std::vector<float>({5, 6, 7, 8})) {
+        std::cerr << "persisted Q8 KV prefix-state roundtrip mismatch\n";
+        return 1;
+    }
     const std::filesystem::path cache_path =
         std::filesystem::temp_directory_path() /
         ("qwen38-prefix-cache-test-" + std::to_string(

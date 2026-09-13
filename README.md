@@ -87,6 +87,8 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 - Exact serial decode is stable around 41 tok/s; the 45 tok/s target is not met.
 - Exact 8K prefill exceeds 600 PP tok/s, but 32K remains around 572 PP tok/s.
+- Q8 KV storage is opt-in: it cuts logical KV bytes by 46.875% and improved one
+  guarded 128K capacity run to 293.62 PP tok/s, but decode fell to 6.68 tok/s.
 - Auto MTP improves aggregate mixed-workload results but can still lose on an
   individual prompt. It must be enabled deliberately.
 - The Q8 drafter increases admission pressure on a 64 GB machine. Normal daily
@@ -138,6 +140,9 @@ python3 devtools/memory_guard.py --min-available-gib 8 -- \
 
 Use `--mtp-depth auto` only when sufficient memory is reclaimable. Explicit
 depth 4 is reserved for a previously calibrated high-acceptance workload.
+
+`--kv-cache q8` enables the experimental packed long-context KV path after
+65,536 tokens. See the [Q8 KV notes](docs/q8-kv-cache.md) before enabling it.
 
 See the [operations guide](docs/operations.md) for cache persistence, recovery,
 benchmark commands, and guard exit codes.

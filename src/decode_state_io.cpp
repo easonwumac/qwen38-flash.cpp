@@ -60,9 +60,19 @@ void append_decoder(
     add_metadata(
         metadata, prefix + ".attention.qsa_pooled_count",
         state.full_attention.qsa_pooled_count);
+    add_metadata(metadata, prefix + ".attention.kv_q8", state.full_attention.kv_q8);
     if (state.full_attention.token_count != 0) {
-        arrays.push_back({prefix + ".attention.keys", &state.full_attention.keys});
-        arrays.push_back({prefix + ".attention.values", &state.full_attention.values});
+        if (state.full_attention.kv_q8) {
+            arrays.push_back({prefix + ".attention.key_weights", &state.full_attention.key_weights});
+            arrays.push_back({prefix + ".attention.key_scales", &state.full_attention.key_scales});
+            arrays.push_back({prefix + ".attention.key_biases", &state.full_attention.key_biases});
+            arrays.push_back({prefix + ".attention.value_weights", &state.full_attention.value_weights});
+            arrays.push_back({prefix + ".attention.value_scales", &state.full_attention.value_scales});
+            arrays.push_back({prefix + ".attention.value_biases", &state.full_attention.value_biases});
+        } else {
+            arrays.push_back({prefix + ".attention.keys", &state.full_attention.keys});
+            arrays.push_back({prefix + ".attention.values", &state.full_attention.values});
+        }
         arrays.push_back({prefix + ".attention.qsa_raw_keys", &state.full_attention.qsa_raw_keys});
         if (state.full_attention.qsa_pooled_count != 0) {
             arrays.push_back(
@@ -98,9 +108,21 @@ DecoderLayerState load_decoder(const std::string& prefix, const MlxSafetensors& 
     state.full_attention.position_base = parse_size(file, prefix + ".attention.position_base");
     state.full_attention.qsa_pooled_count =
         parse_size(file, prefix + ".attention.qsa_pooled_count");
+    state.full_attention.kv_q8 =
+        file.metadata(prefix + ".attention.kv_q8").has_value() &&
+        parse_bool(file, prefix + ".attention.kv_q8");
     if (state.full_attention.token_count != 0) {
-        state.full_attention.keys = file.tensor(prefix + ".attention.keys");
-        state.full_attention.values = file.tensor(prefix + ".attention.values");
+        if (state.full_attention.kv_q8) {
+            state.full_attention.key_weights = file.tensor(prefix + ".attention.key_weights");
+            state.full_attention.key_scales = file.tensor(prefix + ".attention.key_scales");
+            state.full_attention.key_biases = file.tensor(prefix + ".attention.key_biases");
+            state.full_attention.value_weights = file.tensor(prefix + ".attention.value_weights");
+            state.full_attention.value_scales = file.tensor(prefix + ".attention.value_scales");
+            state.full_attention.value_biases = file.tensor(prefix + ".attention.value_biases");
+        } else {
+            state.full_attention.keys = file.tensor(prefix + ".attention.keys");
+            state.full_attention.values = file.tensor(prefix + ".attention.values");
+        }
         state.full_attention.qsa_raw_keys = file.tensor(prefix + ".attention.qsa_raw_keys");
         if (state.full_attention.qsa_pooled_count != 0) {
             state.full_attention.qsa_pooled_keys =

@@ -88,6 +88,8 @@ int main(int argc, char **argv) {
         std::size_t full_attention_layers = 0;
         std::size_t qsa_layers = 0;
         std::size_t pooled_blocks = 0;
+        std::size_t kv_q8_layers = 0;
+        std::size_t kv_storage_bytes = 0;
         const std::size_t selected_block_limit =
             config.indexer_budget / config.indexer_compress_ratio;
         for (std::size_t layer = 0; layer < state.layers.size(); ++layer) {
@@ -95,6 +97,18 @@ int main(int argc, char **argv) {
             if (attention.token_count == 0)
                 continue;
             ++full_attention_layers;
+            if (attention.kv_q8) {
+                ++kv_q8_layers;
+                kv_storage_bytes += mlx_array_nbytes(attention.key_weights.get()) +
+                    mlx_array_nbytes(attention.key_scales.get()) +
+                    mlx_array_nbytes(attention.key_biases.get()) +
+                    mlx_array_nbytes(attention.value_weights.get()) +
+                    mlx_array_nbytes(attention.value_scales.get()) +
+                    mlx_array_nbytes(attention.value_biases.get());
+            } else {
+                kv_storage_bytes += mlx_array_nbytes(attention.keys.get()) +
+                    mlx_array_nbytes(attention.values.get());
+            }
             if (full_attention_layers == 1) {
                 pooled_blocks = attention.qsa_pooled_count;
             } else if (attention.qsa_pooled_count != pooled_blocks) {
@@ -146,6 +160,8 @@ int main(int argc, char **argv) {
                   << ",\"profile\":\"" << profile << "\""
                   << ",\"full_attention_layers\":" << full_attention_layers
                   << ",\"qsa_layers\":" << qsa_layers
+                  << ",\"kv_q8_layers\":" << kv_q8_layers
+                  << ",\"kv_storage_bytes\":" << kv_storage_bytes
                   << ",\"qsa_engaged\":" << (qsa_layers != 0 ? "true" : "false")
                   << ",\"pooled_blocks\":" << pooled_blocks
                   << ",\"prefill_ms\":" << prefill_ms << ",\"prefill_tps\":"

@@ -40,6 +40,7 @@ void print_usage(const char* program) {
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
         << " [--allocator-cache-mib N]"
         << " [--max-generation-tokens N]"
+        << " [--kv-cache bf16|q8] [--kv-q8-min-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
         << "qwen38-flash.cpp native inference server.\n";
@@ -112,6 +113,8 @@ int main(int argc, char** argv) {
         std::size_t allocator_cache_limit_bytes = 256ULL * 1024ULL * 1024ULL;
         bool allocator_cache_explicit = false;
         std::size_t max_generation_tokens = 4096;
+        std::string kv_cache = "bf16";
+        std::size_t kv_q8_min_tokens = 65536;
         std::optional<std::string> model_path;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
@@ -126,7 +129,9 @@ int main(int argc, char** argv) {
                  argument == "--ssd-prefix-cache-gib" ||
                  argument == "--ssd-prefix-cache-dir" ||
                  argument == "--allocator-cache-mib" ||
-                 argument == "--max-generation-tokens" || argument == "--profile") &&
+                 argument == "--max-generation-tokens" ||
+                 argument == "--kv-cache" || argument == "--kv-q8-min-tokens" ||
+                 argument == "--profile") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
             }
@@ -175,6 +180,16 @@ int main(int argc, char** argv) {
                 if (max_generation_tokens == 0) {
                     throw std::runtime_error("generation token limit must be positive");
                 }
+            } else if (argument == "--kv-cache") {
+                kv_cache = argv[++i];
+                if (kv_cache != "bf16" && kv_cache != "q8") {
+                    throw std::runtime_error("KV cache must be bf16 or q8");
+                }
+            } else if (argument == "--kv-q8-min-tokens") {
+                kv_q8_min_tokens = parse_size(argv[++i], "Q8 KV activation threshold");
+                if (kv_q8_min_tokens < 2049) {
+                    throw std::runtime_error("Q8 KV activation threshold must exceed 2048");
+                }
             } else {
                 throw std::runtime_error("unknown argument: " + argument);
             }
@@ -186,6 +201,12 @@ int main(int argc, char** argv) {
                 profile_config.allocator_cache_mib * 1024ULL * 1024ULL;
         }
         qwen38::apply_runtime_profile(profile);
+        const std::string kv_q8_min_tokens_text = std::to_string(kv_q8_min_tokens);
+        if (setenv("QWEN38_KV_CACHE", kv_cache.c_str(), 1) != 0 ||
+            setenv("QWEN38_KV_Q8_MIN_TOKENS",
+                kv_q8_min_tokens_text.c_str(), 1) != 0) {
+            throw std::runtime_error("cannot configure KV cache mode");
+        }
         if (profile_config.optimized && !prefill_chunk_explicit) {
             // Normal interactive profiles have enough headroom for a wider
             // trunk batch. Memory-bearing and MTP-heavy profiles keep the
@@ -231,6 +252,8 @@ int main(int argc, char** argv) {
                           << ssd_prefix_cache_max_bytes / (1024ULL * 1024ULL * 1024ULL)
                           << " allocator_cache_mib="
                           << allocator_cache_limit_bytes / (1024ULL * 1024ULL)
+                          << " kv_cache=" << kv_cache
+                          << " kv_q8_min_tokens=" << kv_q8_min_tokens
                           << " max_generation_tokens=" << max_generation_tokens << '\n';
                 runtime.mark_ready(std::filesystem::path(*model_path).filename().string());
 #else

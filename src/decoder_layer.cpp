@@ -56,9 +56,19 @@ DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
     snapshot.full_attention.position_base = state.full_attention.position_base;
     snapshot.full_attention.qsa_pooled_count =
         state.full_attention.qsa_pooled_count;
+    snapshot.full_attention.kv_q8 = state.full_attention.kv_q8;
     if (state.full_attention.token_count != 0) {
-        snapshot.full_attention.keys = state.full_attention.keys.share();
-        snapshot.full_attention.values = state.full_attention.values.share();
+        if (state.full_attention.kv_q8) {
+            snapshot.full_attention.key_weights = state.full_attention.key_weights.share();
+            snapshot.full_attention.key_scales = state.full_attention.key_scales.share();
+            snapshot.full_attention.key_biases = state.full_attention.key_biases.share();
+            snapshot.full_attention.value_weights = state.full_attention.value_weights.share();
+            snapshot.full_attention.value_scales = state.full_attention.value_scales.share();
+            snapshot.full_attention.value_biases = state.full_attention.value_biases.share();
+        } else {
+            snapshot.full_attention.keys = state.full_attention.keys.share();
+            snapshot.full_attention.values = state.full_attention.values.share();
+        }
         snapshot.full_attention.qsa_raw_keys =
             state.full_attention.qsa_raw_keys.share();
         if (state.full_attention.qsa_pooled_count != 0) {
