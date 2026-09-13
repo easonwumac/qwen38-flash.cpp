@@ -634,7 +634,9 @@ See [docs/architecture.md](docs/architecture.md) and the
 [benchmark contract](docs/benchmark-contract.md). Historical optimization
 results are classified in the
 [prior-research ledger](docs/prior-research-ledger.md); rejected experiments
-must not be repeated without a materially different hypothesis.
+must not be repeated without a materially different hypothesis. The concise
+[research retrospective](docs/research-retrospective.md) records the retained
+production baseline and the dead ends whose raw artifacts were removed.
 
 ## Target gates
 
