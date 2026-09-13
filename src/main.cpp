@@ -36,7 +36,8 @@ void print_usage(const char* program) {
         << " [--profile safe|speed|turbo|latency|long-context|memory]"
         << " [--prefill-chunk 1..1024] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
-        << " [--qmeta-cache-max-prompt-tokens N]"
+        << " [--qmeta-cache-max-prompt-tokens N] [--qmeta-cache-layers 0..48]"
+        << " [--qsa-packed-min-tokens N] [--qsa-shared-rows 1|2|4|8]"
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
         << " [--allocator-cache-mib N]"
         << " [--max-generation-tokens N]"
@@ -90,6 +91,11 @@ std::size_t parse_size(const std::string& value, const char* name) {
     return parsed;
 }
 
+std::string environment_or(const char* name, const char* fallback) {
+    const char* value = std::getenv(name);
+    return value == nullptr ? fallback : value;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -108,6 +114,9 @@ int main(int argc, char** argv) {
         bool prefix_cache_explicit = false;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
         bool qmeta_cache_limit_explicit = false;
+        std::optional<std::size_t> qmeta_cache_layers;
+        std::optional<std::size_t> qsa_packed_min_tokens;
+        std::optional<std::size_t> qsa_shared_rows;
         std::uint64_t ssd_prefix_cache_max_bytes = 0;
         std::filesystem::path ssd_prefix_cache_directory;
         std::size_t allocator_cache_limit_bytes = 256ULL * 1024ULL * 1024ULL;
@@ -127,6 +136,9 @@ int main(int argc, char** argv) {
                  argument == "--mtp-depth" || argument == "--prefill-chunk" ||
                  argument == "--prefix-cache-tokens" ||
                  argument == "--qmeta-cache-max-prompt-tokens" ||
+                 argument == "--qmeta-cache-layers" ||
+                 argument == "--qsa-packed-min-tokens" ||
+                 argument == "--qsa-shared-rows" ||
                  argument == "--ssd-prefix-cache-gib" ||
                  argument == "--ssd-prefix-cache-dir" ||
                  argument == "--allocator-cache-mib" ||
@@ -160,6 +172,20 @@ int main(int argc, char** argv) {
                 qmeta_cache_max_prompt_tokens =
                     parse_size(argv[++i], "qmeta cache prompt token limit");
                 qmeta_cache_limit_explicit = true;
+            } else if (argument == "--qmeta-cache-layers") {
+                qmeta_cache_layers = parse_size(argv[++i], "qmeta cache layer count");
+                if (*qmeta_cache_layers > 48) {
+                    throw std::runtime_error("qmeta cache layer count must be between 0 and 48");
+                }
+            } else if (argument == "--qsa-packed-min-tokens") {
+                qsa_packed_min_tokens =
+                    parse_size(argv[++i], "packed QSA activation threshold");
+            } else if (argument == "--qsa-shared-rows") {
+                qsa_shared_rows = parse_size(argv[++i], "QSA shared row count");
+                if (*qsa_shared_rows != 1 && *qsa_shared_rows != 2 &&
+                    *qsa_shared_rows != 4 && *qsa_shared_rows != 8) {
+                    throw std::runtime_error("QSA shared row count must be 1, 2, 4, or 8");
+                }
             } else if (argument == "--ssd-prefix-cache-gib") {
                 const std::size_t gib = parse_size(argv[++i], "SSD prefix cache size");
                 constexpr std::uint64_t bytes_per_gib = 1024ULL * 1024ULL * 1024ULL;
@@ -208,6 +234,26 @@ int main(int argc, char** argv) {
                 profile_config.allocator_cache_mib * 1024ULL * 1024ULL;
         }
         qwen38::apply_runtime_profile(profile);
+        if (qmeta_cache_layers.has_value()) {
+            const std::string layers = std::to_string(*qmeta_cache_layers);
+            const char* enabled = *qmeta_cache_layers == 0 ? "0" : "1";
+            if (setenv("QWEN38_QMETA_PREFILL_CACHE", enabled, 1) != 0 ||
+                setenv("QWEN38_QMETA_PREFILL_CACHE_LAYERS", layers.c_str(), 1) != 0) {
+                throw std::runtime_error("cannot configure qmeta prefill cache");
+            }
+        }
+        if (qsa_packed_min_tokens.has_value()) {
+            const std::string threshold = std::to_string(*qsa_packed_min_tokens);
+            if (setenv("QWEN38_QSA_PACKED_MIN_TOKENS", threshold.c_str(), 1) != 0) {
+                throw std::runtime_error("cannot configure packed QSA activation threshold");
+            }
+        }
+        if (qsa_shared_rows.has_value()) {
+            const std::string rows = std::to_string(*qsa_shared_rows);
+            if (setenv("QWEN38_QSA_SHARED_ROWS", rows.c_str(), 1) != 0) {
+                throw std::runtime_error("cannot configure QSA row sharing");
+            }
+        }
         const std::string kv_q8_min_tokens_text = std::to_string(kv_q8_min_tokens);
         const std::string kv_q8_flush_tokens_text = std::to_string(kv_q8_flush_tokens);
         if (setenv("QWEN38_KV_CACHE", kv_cache.c_str(), 1) != 0 ||
@@ -258,6 +304,12 @@ int main(int argc, char** argv) {
                           << (adaptive_prefill_chunks ? "true" : "false")
                           << " qmeta_cache_max_prompt_tokens="
                           << qmeta_cache_max_prompt_tokens
+                          << " qmeta_cache_layers="
+                          << environment_or("QWEN38_QMETA_PREFILL_CACHE_LAYERS", "all")
+                          << " qsa_packed_min_tokens="
+                          << environment_or("QWEN38_QSA_PACKED_MIN_TOKENS", "65536")
+                          << " qsa_shared_rows="
+                          << environment_or("QWEN38_QSA_SHARED_ROWS", "1")
                           << " ssd_prefix_cache_gib="
                           << ssd_prefix_cache_max_bytes / (1024ULL * 1024ULL * 1024ULL)
                           << " allocator_cache_mib="

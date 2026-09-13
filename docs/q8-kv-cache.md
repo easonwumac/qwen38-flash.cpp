@@ -14,6 +14,14 @@ The hot tail flushes into Q8 in 8,192-token slabs by default; use
 `--kv-q8-flush-tokens` to change the interval. This removes the old per-chunk
 packed-array concatenation from the critical path.
 
+For high-throughput long prefill, `--qsa-shared-rows 4` runs QSA selection from
+one representative query per four adjacent rows in a fused Metal kernel. The
+chosen blocks are expanded back to all rows before per-row causal validity,
+local tail, and token expansion are applied. This approximates only the QSA
+selector; it does not change model weights or top-10 expert routing. The default
+is `1` (no row sharing). `--qsa-packed-min-tokens 32768` starts the packed
+selector before Q8 KV itself activates.
+
 ## Retained measurements
 
 Environment: Qwen3.8-Flash-Next-REAP-288-MTP-Q8 target, affine Q4/group-64
@@ -27,19 +35,23 @@ server process, and no recorded thermal warning.
   `K7-MOON-491` needle was recovered at 500.47 PP/s and 23.89 decode tok/s.
   The same slabbed Q8 path without the four-layer qmeta cache reached 477.89
   PP/s. These are single cold policy diagnostics, not a distribution.
-- At 131,140 prompt tokens, threshold 65,536, fixed 512-row chunks, the 8,192
-  hot-tail slab, and four cached lossless-qmeta layers recovered the expected
-  `V1-NEBULA-128` needle. The single guarded run reached 392.57 PP/s and 11.42
-  decode tok/s, peaked at 40.4 GiB footprint, and retained 8.7 GiB minimum
-  available memory. Relative to the predecessor's 293.62 PP/s and 6.68 decode
-  tok/s, the complete policy improved PP by 33.7%; this is not an isolated
-  format A/B because qmeta caching also changed.
+- At 131,140 prompt tokens, threshold 65,536, fixed 512-row chunks, an 8,192-token
+  hot slab, eight cached lossless-qmeta layers, packed QSA from 32,768 tokens,
+  and four-row selection recovered `V1-NEBULA-128` in all three independent cold
+  runs. PP was 581.40/550.92/538.23 tok/s (median 550.92); decode was
+  21.45/20.56/20.02 tok/s (median 20.56). Peak footprint was
+  39.93/40.05/40.05 GiB (median 40.05), peak RSS 28.63/29.15/29.64 GiB, and
+  minimum available memory 8.58/8.52/8.40 GiB.
+- A same-build, same-prompt, same-selector BF16 KV control recovered the needle
+  at 529.19 PP/s and 10.56 decode tok/s, with 41.51 GiB peak footprint and
+  30.38 GiB peak RSS. Against that control, Q8 reduced median peak footprint by
+  1.46 GiB (3.5%), raised median PP by 4.1%, and raised decode by 94.7%.
 
-Q8 therefore provides real capacity headroom and now preserves 500 PP/s at the
-16K stress gate, but the 128K target remains unmet. A 1024-row outer batch
-regressed the 128K run to 277.55 PP/s, and the speed profile reached only 365.71
-PP/s; neither is retained as the recommended policy. Q8 remains opt-in until
-128K decode and a clean 192K guarded run pass promotion gates.
+Q8 therefore provides capacity headroom while preserving more than 500 PP/s at
+128K on the test machine. It remains opt-in because four-row QSA selection is an
+accuracy/throughput tradeoff and the faster policy has not yet been requalified
+at 192K. A 1024-row outer batch regressed 128K to 277.55 PP/s; keep fixed 512.
+Machine-readable results are in [q8-kv-128k-results.json](q8-kv-128k-results.json).
 
 ## Rejected implementation
 

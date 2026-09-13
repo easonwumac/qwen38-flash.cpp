@@ -1,0 +1,41 @@
+{
+  "environment": {
+    "hardware": "Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GiB unified memory",
+    "os": "macOS 26.5 (25F71)",
+    "runtime": "MLX 0.32.2 through pinned MLX-C ABI",
+    "power": "AC",
+    "thermal": "no recorded thermal or performance warning",
+    "server_processes": 1
+  },
+  "workload": {
+    "model": "Qwen3.8-Flash-Next-REAP-288-MTP-Q8",
+    "weights": "affine Q4/group-64",
+    "routing": "exact top-10",
+    "prompt": "needle_128k",
+    "prompt_tokens": 131140,
+    "expected": "V1-NEBULA-128",
+    "sampling": "temperature 0, thinking off",
+    "mtp": "off",
+    "prefix_cache_tokens": 0,
+    "prefill_chunk": 512,
+    "adaptive_prefill_chunks": false,
+    "qmeta": "lossless13, 8 cached prefill layers",
+    "qsa_packed_min_tokens": 32768,
+    "qsa_shared_rows": 4
+  },
+  "q8_kv": {
+    "activation_tokens": 65536,
+    "flush_tokens": 8192,
+    "cold_runs": [
+      {"prefill_tps": 581.3999884730824, "decode_tps": 21.4536, "peak_footprint_gib": 39.93360589444637, "peak_rss_gib": 28.628631591796875, "minimum_available_gib": 8.580230712890625, "needle_passed": true},
+      {"prefill_tps": 550.9181268615647, "decode_tps": 20.5577, "peak_footprint_gib": 40.05138844251633, "peak_rss_gib": 29.149551391601562, "minimum_available_gib": 8.516387939453125, "needle_passed": true},
+      {"prefill_tps": 538.233278199377, "decode_tps": 20.0151, "peak_footprint_gib": 40.049038633704185, "peak_rss_gib": 29.643646240234375, "minimum_available_gib": 8.396743774414062, "needle_passed": true}
+    ],
+    "median": {"prefill_tps": 550.9181268615647, "decode_tps": 20.5577, "peak_footprint_gib": 40.049038633704185}
+  },
+  "bf16_kv_control": {
+    "cold_runs": [
+      {"prefill_tps": 529.1914838668023, "decode_tps": 10.5582, "peak_footprint_gib": 41.506008848547935, "peak_rss_gib": 30.37738037109375, "minimum_available_gib": 7.585845947265625, "needle_passed": true}
+    ]
+  }
+}

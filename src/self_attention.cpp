@@ -92,6 +92,26 @@ std::shared_ptr<MlxMetalKernel> packed_qsa_q8_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> qsa_query_sampler_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"query"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_qsa_query_sampler", inputs, "output",
+            qsa_metal::sample_queries, qsa_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> qsa_block_expander_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"block_indices"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_qsa_block_expander", inputs, "output",
+            qsa_metal::expand_block_indices, qsa_metal::header);
+    }();
+    return kernel;
+}
+
 bool q8_kv_requested() {
     const char* configured = std::getenv("QWEN38_KV_CACHE");
     if (configured == nullptr || *configured == '\0' || std::string_view(configured) == "bf16") {
@@ -123,6 +143,61 @@ std::size_t q8_kv_flush_tokens() {
         throw std::runtime_error("QWEN38_KV_Q8_FLUSH_TOKENS must be an integer of at least 512");
     }
     return static_cast<std::size_t>(parsed);
+}
+
+std::size_t qsa_shared_rows() {
+    const char* configured = std::getenv("QWEN38_QSA_SHARED_ROWS");
+    if (configured == nullptr) return 1;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(configured, &end, 10);
+    if (end == configured || *end != '\0' ||
+        (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+        throw std::runtime_error("QWEN38_QSA_SHARED_ROWS must be 1, 2, 4, or 8");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
+MlxArray sample_qsa_queries(const MlxArray& queries, const std::size_t stride) {
+    const std::vector<int> shape = queries.shape();
+    const int groups = (shape[2] + static_cast<int>(stride) - 1) /
+        static_cast<int>(stride);
+    const int values = shape[1] * groups * shape[3];
+    const std::array<const MlxArray*, 1> inputs{&queries};
+    const std::array<MlxMetalIntTemplate, 5> ints{{
+        {.name = "H", .value = shape[1]},
+        {.name = "ROWS", .value = shape[2]},
+        {.name = "GROUPS", .value = groups},
+        {.name = "D", .value = shape[3]},
+        {.name = "STRIDE", .value = static_cast<int>(stride)},
+    }};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {1, shape[1], groups, shape[3]}, .dtype = queries.dtype()},
+    }};
+    const std::array<MlxMetalDtypeTemplate, 1> dtypes{{
+        {.name = "T", .value = queries.dtype()},
+    }};
+    return std::move(qsa_query_sampler_kernel()->apply(
+        inputs, outputs, std::array<int, 3>{values, 1, 1},
+        std::array<int, 3>{256, 1, 1}, dtypes, ints).front());
+}
+
+MlxArray expand_qsa_blocks(
+    const MlxArray& blocks,
+    const int rows,
+    const int topk,
+    const std::size_t stride) {
+    const std::array<const MlxArray*, 1> inputs{&blocks};
+    const std::array<MlxMetalIntTemplate, 3> ints{{
+        {.name = "ROWS", .value = rows},
+        {.name = "TOPK", .value = topk},
+        {.name = "STRIDE", .value = static_cast<int>(stride)},
+    }};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {1, rows, topk}, .dtype = MLX_INT32},
+    }};
+    return std::move(qsa_block_expander_kernel()->apply(
+        inputs, outputs, std::array<int, 3>{rows * topk, 1, 1},
+        std::array<int, 3>{256, 1, 1}, {}, ints).front());
 }
 
 struct PackedQ8 {
@@ -569,6 +644,8 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         state.position_base + state.token_count,
         1,
         indexer_head_dimension_);
+    const std::size_t shared_rows = packed && rows >= 16 ? qsa_shared_rows() : 1;
+    if (shared_rows > 1) queries = sample_qsa_queries(queries, shared_rows);
     MlxArray pooled_transposed = state.qsa_pooled_keys
                                      .reshape(std::vector<int>{
                                          1, 1, dimension(block_count, "QSA blocks"),
@@ -611,21 +688,36 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         static_cast<double>(ratio),
         MLX_INT32).reshape(std::vector<int>{1, dimension(block_count, "QSA blocks")});
     MlxArray visible = MlxArray::less_equal(block_ends, positions).expand_dims(0);
+    MlxArray selection_visible;
+    if (shared_rows == 1) {
+        selection_visible = visible.share();
+    } else {
+        MlxArray selection_positions = MlxArray::arange(
+            static_cast<double>(state.token_count),
+            static_cast<double>(total),
+            static_cast<double>(shared_rows),
+            MLX_INT32).reshape(std::vector<int>{queries.shape()[2], 1});
+        selection_visible = MlxArray::less_equal(
+            block_ends, selection_positions).expand_dims(0);
+    }
     MlxArray block_indices = MlxArray::arange(
         0.0, static_cast<double>(block_count), 1.0, MLX_FLOAT32);
     MlxArray tie_bias = MlxArray::multiply(
         block_indices, scalar(1.0e-7F, MLX_FLOAT32));
     MlxArray biased_scores = MlxArray::subtract(scores, tie_bias);
     MlxArray masked_scores = MlxArray::where(
-        visible,
+        selection_visible,
         biased_scores,
         scalar(-std::numeric_limits<float>::infinity(), MLX_FLOAT32));
     const int first_top = dimension(block_count, "QSA blocks") - block_topk;
     MlxArray partition = masked_scores.argpartition_axis(first_top, -1);
     MlxArray top_indices = partition.slice(
         std::vector<int>{0, 0, first_top},
-        std::vector<int>{1, rows, dimension(block_count, "QSA blocks")},
+        std::vector<int>{1, queries.shape()[2], dimension(block_count, "QSA blocks")},
         strides3);
+    if (shared_rows > 1) {
+        top_indices = expand_qsa_blocks(top_indices, rows, block_topk, shared_rows);
+    }
     if (packed) {
         MlxArray selected_block_valid = MlxArray::take_along_axis(
             visible, top_indices, -1);

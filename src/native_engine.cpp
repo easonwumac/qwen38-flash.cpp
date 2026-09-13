@@ -187,7 +187,7 @@ std::string cache_compatibility_key(
         source << '|' << bytes << '|' << ticks;
         ignored.clear();
     }
-    constexpr std::array<const char*, 10> state_environment{
+    constexpr std::array<const char*, 16> state_environment{
         "QWEN38_COMPACT_QMETA",
         "QWEN38_FUSED_MOE",
         "QWEN38_DEVICE_ROUTER",
@@ -195,6 +195,12 @@ std::string cache_compatibility_key(
         "QWEN38_GDN_METAL_PREFILL",
         "QWEN38_SDPA_PREFILL",
         "QWEN38_QSA_PREFILL",
+        "QWEN38_QSA_PACKED_PREFILL",
+        "QWEN38_QSA_PACKED_MIN_TOKENS",
+        "QWEN38_QSA_SHARED_ROWS",
+        "QWEN38_KV_CACHE",
+        "QWEN38_KV_Q8_MIN_TOKENS",
+        "QWEN38_KV_Q8_FLUSH_TOKENS",
         "QWEN38_HC_FUSED_INJECTION",
         "QWEN38_COMPILE_LAYER",
         "QWEN38_SDPA_DECODE",

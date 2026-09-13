@@ -31,7 +31,7 @@ upstream shard payloads to install them.
 | Normal interactive use | `speed`, default MTP off | Exact top-10; 1024-row PP batches through 32K |
 | Lowest memory | `memory`, MTP off | Pageable experts and lossless13; slower cold/decode |
 | 128K+ context | `long-context`, MTP off, RAM cache off | Maximum state headroom |
-| Experimental 128K capacity/PP | `memory --kv-cache q8`, fixed chunk 512 | 46.875% smaller KV; slower decode remains possible |
+| Validated 128K throughput | `memory`, Q8 KV, shared-row QSA, fixed chunk 512 | 550.92 PP tok/s median; selector approximation is opt-in |
 | Known favorable speculation | `speed --mtp-depth auto` | Faster only when acceptance repays verification |
 | Explicit quality/speed experiment | `turbo` | Changes target routing/qmeta; not exact parity |
 
@@ -62,6 +62,8 @@ DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
   ./build-release/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
   --profile memory --mtp-depth off --prefix-cache-tokens 0 \
+  --qmeta-cache-max-prompt-tokens 262144 --qmeta-cache-layers 8 \
+  --qsa-packed-min-tokens 32768 --qsa-shared-rows 4 \
   --kv-cache q8 --kv-q8-min-tokens 65536 \
   --kv-q8-flush-tokens 8192 \
   --prefill-chunk 512 --prefill-chunk-fixed

@@ -41,6 +41,9 @@ the table into RAM.
 - **Exact Qwen Sparse Attention:** raw and pooled indexer state, causal top-block
   selection, snapshots, verifier checkpoints, and rollback remain native to the
   engine.
+- **Fused long-context selection:** a Metal selector can reuse each representative
+  query across four adjacent prefill rows, then restore per-row causal validity.
+  Combined with slabbed Q8 KV, this keeps 128K prefill above 500 tok/s.
 - **Transactional MTP:** batched verification and accepted-row commit are paired
   with adaptive depth and economic fallback. Serial remains the safe default.
 - **Complete-state prefix caching:** target, recurrent, attention, QSA, and
@@ -54,8 +57,7 @@ Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified
 memory, macOS 26.5 (25F71), AC power, no recorded thermal or performance
 warning, temperature 0, thinking off, one server process, and guarded memory
 measurement. The checkpoint is the exact REAP-288 Q4/group-64 target above.
-The runtime measurement milestone is `d44e823`; later changes only simplify
-documentation and make the AoS smoke independent of the deleted fallback file.
+Long-context distributions below use independent cold server starts.
 
 | Workload | Configuration | Result |
 |---|---|---:|
@@ -63,7 +65,8 @@ documentation and make the AoS smoke independent of the deleted fallback file.
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
-| 128K needle retrieval, 131,140 tokens | serial capacity profile; expected `V1-NEBULA-128` recovered | 214.22 PP tok/s; 8.67 decode tok/s; 42.9 GiB peak footprint |
+| 128K needle retrieval, 131,140 tokens | `memory`, Q8 KV, shared-row QSA, MTP/prefix cache off; 3 cold runs; expected `V1-NEBULA-128` recovered | 581.40 / 550.92 / 538.23 PP tok/s; median **550.92**; median decode 20.56 tok/s; 40.0 GiB median peak footprint |
+| 128K BF16 KV control, 131,140 tokens | same build, prompt and selector policy; one cold run; needle recovered | 529.19 PP tok/s; 10.56 decode tok/s; 41.5 GiB peak footprint |
 | 192K needle retrieval, 196,675 tokens | `memory`, MTP/cache off; expected `S4-PULSAR-192` recovered | 281.17 PP tok/s; 4.19 decode tok/s; 42.14 GiB footprint, 26.93 GiB RSS |
 | Generated-turn RAM prefix reuse | 3,923-token first turn, then 3,951-token appended turn | 3,925 cached; prompt 5,584.72 ms → 157.45 ms, about 35x |
 | Q8 MTP, favorable 128-token fixture | explicit depth 4; 3 samples; 97/124 accepted | 65.48 / 65.65 / 65.78 tok/s |
@@ -87,9 +90,10 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 - Exact serial decode is stable around 41 tok/s; the 45 tok/s target is not met.
 - Exact 8K prefill exceeds 600 PP tok/s, but 32K remains around 572 PP tok/s.
-- Q8 KV storage is opt-in. An 8K-slabbed hot/cold store reached 392.57 PP tok/s
-  and 11.42 decode tok/s on a correct guarded 128K needle run; 500 PP/s remains
-  a long-context research target.
+- The validated 128K Q8 recipe exceeds 500 PP tok/s, but its four-row QSA
+  selection is an explicit long-context approximation and remains opt-in.
+- The 192K capacity result predates the shared-row QSA recipe; it has not yet
+  been requalified with this faster policy.
 - Auto MTP improves aggregate mixed-workload results but can still lose on an
   individual prompt. It must be enabled deliberately.
 - The Q8 drafter increases admission pressure on a 64 GB machine. Normal daily
@@ -142,9 +146,20 @@ python3 devtools/memory_guard.py --min-available-gib 8 -- \
 Use `--mtp-depth auto` only when sufficient memory is reclaimable. Explicit
 depth 4 is reserved for a previously calibrated high-acceptance workload.
 
-`--kv-cache q8` enables the experimental packed long-context KV path after
-65,536 tokens. `--kv-q8-flush-tokens 8192` controls the BF16 hot-tail slab.
-See the [Q8 KV notes](docs/q8-kv-cache.md) before enabling it.
+The validated 128K recipe is:
+
+```bash
+python3 devtools/memory_guard.py --min-available-gib 6 -- \
+  ./build/qwen38-server \
+  --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
+  --profile memory --mtp-depth off --prefix-cache-tokens 0 \
+  --qmeta-cache-max-prompt-tokens 262144 --qmeta-cache-layers 8 \
+  --qsa-packed-min-tokens 32768 --qsa-shared-rows 4 \
+  --kv-cache q8 --kv-q8-min-tokens 65536 --kv-q8-flush-tokens 8192 \
+  --prefill-chunk 512 --prefill-chunk-fixed
+```
+
+See the [Q8 KV notes](docs/q8-kv-cache.md) for semantics and measurements.
 
 See the [operations guide](docs/operations.md) for cache persistence, recovery,
 benchmark commands, and guard exit codes.

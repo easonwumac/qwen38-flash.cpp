@@ -201,4 +201,22 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
     }
 )metal";
 
+inline constexpr std::string_view sample_queries = R"metal(
+    const uint index = thread_position_in_grid.x;
+    if (index >= uint(H * GROUPS * D)) return;
+    const uint channel = index % uint(D);
+    const uint group = (index / uint(D)) % uint(GROUPS);
+    const uint head = index / (uint(D) * uint(GROUPS));
+    const uint source = (head * uint(ROWS) + group * uint(STRIDE)) * uint(D) + channel;
+    output[index] = query[source];
+)metal";
+
+inline constexpr std::string_view expand_block_indices = R"metal(
+    const uint index = thread_position_in_grid.x;
+    if (index >= uint(ROWS * TOPK)) return;
+    const uint row = index / uint(TOPK);
+    const uint slot = index % uint(TOPK);
+    output[index] = block_indices[(row / uint(STRIDE)) * uint(TOPK) + slot];
+)metal";
+
 } // namespace qwen38::qsa_metal
