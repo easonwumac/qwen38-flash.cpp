@@ -45,7 +45,9 @@ query output gate. Adding `--qsa` forwards the real indexer through the
 2,052-token engagement boundary and checks batched-verifier output against the
 serial path together with every rollback checkpoint's raw/pooled cache frontier.
 `qwen38-ngram-smoke MODEL_DIRECTORY` validates PLE hash rows and the low-memory
-SSD AoS row gather against the original 30 GB safetensors table.
+SSD AoS row gather against the original safetensors table when it is present.
+For a production-only checkpoint where that 30 GB fallback has been removed,
+it instead checks repeated AoS reads for exact agreement and finite output.
 
 `qwen38-long-context-smoke MODEL PROMPT [CHUNK [MAX_TOKENS [PROFILE]]]` is the
 guarded full-model QSA check. It requires
