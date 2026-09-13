@@ -9,6 +9,9 @@
 
 #include <algorithm>
 #include <array>
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+#include <chrono>
+#endif
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -174,6 +177,17 @@ std::size_t qsa_selection_budget(
     return static_cast<std::size_t>(parsed);
 }
 
+std::size_t qsa_raw_window() {
+    const char* value = std::getenv("QWEN38_QSA_RAW_WINDOW");
+    if (value == nullptr || std::string_view(value) == "0") return 0;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < 16 || parsed > 4096) {
+        throw std::runtime_error("QWEN38_QSA_RAW_WINDOW must be 0 or 16..4096");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 MlxArray sample_qsa_queries(const MlxArray& queries, const std::size_t stride) {
     const std::vector<int> shape = queries.shape();
     const int groups = (shape[2] + static_cast<int>(stride) - 1) /
@@ -300,6 +314,7 @@ SelfAttentionState share_attention_state(const SelfAttentionState& state) {
     SelfAttentionState copy;
     copy.token_count = state.token_count;
     copy.position_base = state.position_base;
+    copy.qsa_raw_start = state.qsa_raw_start;
     copy.qsa_pooled_count = state.qsa_pooled_count;
     copy.kv_q8 = state.kv_q8;
     copy.kv_q8_cold_tokens = state.kv_q8_cold_tokens;
@@ -596,6 +611,11 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         "indexer budget");
     const int block_topk = budget / ratio;
     const std::vector<int> strides3{1, 1, 1};
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    const bool selection_profile = rows == 1 &&
+        std::getenv("QWEN38_PROFILE_QSA_DECODE") != nullptr;
+    const auto selection_started = std::chrono::steady_clock::now();
+#endif
 
     MlxArray qk = project(input, indexer_projection_);
     MlxArray raw_keys = qk.slice(
@@ -606,7 +626,9 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         state.qsa_raw_keys = raw_keys.share();
     } else {
         const std::vector<int> raw_shape = state.qsa_raw_keys.shape();
-        if (raw_shape != std::vector<int>({1, dimension(state.token_count, "QSA history"),
+        if (state.qsa_raw_start > state.token_count ||
+            raw_shape != std::vector<int>({
+                1, dimension(state.token_count - state.qsa_raw_start, "QSA history"),
                                           index_dimension})) {
             throw std::runtime_error("QSA raw-key state is not aligned with attention KV");
         }
@@ -616,6 +638,14 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const std::size_t total = state.token_count + static_cast<std::size_t>(rows);
     const std::size_t block_count = total / indexer_compress_ratio_;
     if (block_count <= static_cast<std::size_t>(block_topk)) return {};
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (selection_profile) {
+        const std::array<const MlxArray*, 2> raw_outputs{
+            &state.qsa_raw_keys, &state.qsa_pooled_keys};
+        MlxArray::eval_all(raw_outputs);
+    }
+    const auto raw_done = std::chrono::steady_clock::now();
+#endif
 
     if (state.qsa_pooled_count > block_count) {
         throw std::runtime_error("QSA pooled state extends beyond the KV frontier");
@@ -623,10 +653,15 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     if (state.qsa_pooled_count < block_count) {
         const std::size_t first_block = state.qsa_pooled_count;
         const std::size_t new_blocks = block_count - first_block;
+        const std::size_t first_token = first_block * indexer_compress_ratio_;
+        const std::size_t stop_token = block_count * indexer_compress_ratio_;
+        if (first_token < state.qsa_raw_start) {
+            throw std::runtime_error("QSA raw window does not cover the pooling frontier");
+        }
         MlxArray fresh = state.qsa_raw_keys.slice(
-            std::vector<int>{0, coordinate(first_block * indexer_compress_ratio_,
+            std::vector<int>{0, coordinate(first_token - state.qsa_raw_start,
                                            "QSA pooled start"), 0},
-            std::vector<int>{1, dimension(block_count * indexer_compress_ratio_,
+            std::vector<int>{1, dimension(stop_token - state.qsa_raw_start,
                                           "QSA pooled stop"), index_dimension},
             strides3);
         fresh = fresh.reshape(std::vector<int>{
@@ -651,6 +686,20 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         state.qsa_pooled_count = block_count;
     }
 
+    const std::size_t raw_window = qsa_raw_window();
+    const std::size_t retained_rows = raw_window == 0
+        ? total : std::min(total, raw_window + static_cast<std::size_t>(rows));
+    const std::size_t retained_start = total - retained_rows;
+    if (retained_start > state.qsa_raw_start) {
+        const int stored_rows = state.qsa_raw_keys.shape()[1];
+        const int local_start = coordinate(
+            retained_start - state.qsa_raw_start, "QSA retained raw start");
+        state.qsa_raw_keys = state.qsa_raw_keys.slice(
+            std::vector<int>{0, local_start, 0},
+            std::vector<int>{1, stored_rows, index_dimension}, strides3);
+        state.qsa_raw_start = retained_start;
+    }
+
     MlxArray queries = qk.slice(
         std::vector<int>{0, 0, 0},
         std::vector<int>{1, rows, index_heads * index_dimension},
@@ -663,6 +712,10 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         state.position_base + state.token_count,
         1,
         indexer_head_dimension_);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (selection_profile) queries.eval();
+    const auto query_done = std::chrono::steady_clock::now();
+#endif
     const std::size_t shared_rows = packed && rows >= 16 ? qsa_shared_rows() : 1;
     if (shared_rows > 1) queries = sample_qsa_queries(queries, shared_rows);
     MlxArray pooled_transposed = state.qsa_pooled_keys
@@ -694,6 +747,10 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     MlxArray scores = MlxArray::matmul(
         queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
     scores = MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
+#endif
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (selection_profile) scores.eval();
+    const auto scores_done = std::chrono::steady_clock::now();
 #endif
 
     MlxArray positions = MlxArray::arange(
@@ -737,6 +794,10 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     if (shared_rows > 1) {
         top_indices = expand_qsa_blocks(top_indices, rows, block_topk, shared_rows);
     }
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (selection_profile) top_indices.eval();
+    const auto partition_done = std::chrono::steady_clock::now();
+#endif
     if (packed) {
         MlxArray selected_block_valid = MlxArray::take_along_axis(
             visible, top_indices, -1);
@@ -780,6 +841,23 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
             selected_indices, integer_scalar(dimension(total - 1, "QSA last token")));
         selected_indices = MlxArray::where(
             selected_valid, selected_indices, integer_scalar(0));
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+        if (selection_profile) {
+            const std::array<const MlxArray*, 2> packed_outputs{
+                &selected_indices, &selected_valid};
+            MlxArray::eval_all(packed_outputs);
+            const auto packed_done = std::chrono::steady_clock::now();
+            const auto ms = [](const auto begin, const auto end) {
+                return std::chrono::duration<double, std::milli>(end - begin).count();
+            };
+            std::clog << "qwen38-qsa-selector-phase: raw_ms="
+                      << ms(selection_started, raw_done)
+                      << " query_ms=" << ms(raw_done, query_done)
+                      << " scores_ms=" << ms(query_done, scores_done)
+                      << " partition_ms=" << ms(scores_done, partition_done)
+                      << " pack_ms=" << ms(partition_done, packed_done) << '\n';
+        }
+#endif
         return {
             .packed_indices = std::move(selected_indices),
             .packed_mask = std::move(selected_valid),
@@ -1005,10 +1083,20 @@ void SelfAttention::copy_qsa_checkpoint(
     if (token_count == 0) return;
     const int index_dimension = dimension(indexer_head_dimension_, "indexer dimension");
     const std::vector<int> strides{1, 1, 1};
+    if (complete.qsa_raw_start > token_count) {
+        throw std::runtime_error("QSA checkpoint predates the retained raw window");
+    }
+    const std::size_t window = qsa_raw_window();
+    const std::size_t checkpoint_start = window == 0
+        ? complete.qsa_raw_start
+        : std::max(complete.qsa_raw_start, token_count > window ? token_count - window : 0);
     checkpoint.qsa_raw_keys = complete.qsa_raw_keys.slice(
-        std::vector<int>{0, 0, 0},
-        std::vector<int>{1, dimension(token_count, "QSA checkpoint"), index_dimension},
+        std::vector<int>{0, coordinate(
+            checkpoint_start - complete.qsa_raw_start, "QSA checkpoint raw start"), 0},
+        std::vector<int>{1, dimension(
+            token_count - complete.qsa_raw_start, "QSA checkpoint"), index_dimension},
         strides);
+    checkpoint.qsa_raw_start = checkpoint_start;
     const std::size_t complete_blocks = token_count / indexer_compress_ratio_;
     const std::size_t selection_limit = indexer_budget_ / indexer_compress_ratio_;
     const std::size_t blocks = complete_blocks > selection_limit
@@ -1031,10 +1119,23 @@ MlxArray SelfAttention::forward_decode(
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] != 1) {
         throw std::runtime_error("attention decode requires shape [1,1,hidden]");
     }
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    const bool phase_profile = std::getenv("QWEN38_PROFILE_QSA_DECODE") != nullptr;
+    const auto phase_started = std::chrono::steady_clock::now();
+#endif
     const std::size_t resulting_tokens = state.token_count + 1;
     const bool want_q8 = state.kv_q8 ||
         (q8_kv_requested() && resulting_tokens >= q8_kv_min_tokens());
     QsaSelection qsa = update_qsa_and_build_mask(input, state, want_q8);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (phase_profile) {
+        const std::array<const MlxArray*, 4> selection_outputs{
+            &qsa.packed_indices, &qsa.packed_mask,
+            &state.qsa_raw_keys, &state.qsa_pooled_keys};
+        MlxArray::eval_all(selection_outputs);
+    }
+    const auto selection_done = std::chrono::steady_clock::now();
+#endif
     const int heads = dimension(attention_heads_, "attention heads");
     const int kv_heads = dimension(key_value_heads_, "key/value heads");
     const int head_dimension = dimension(head_dimension_, "head dimension");
@@ -1065,6 +1166,14 @@ MlxArray SelfAttention::forward_decode(
         state.values = MlxArray::concatenate(state.values, value, 2);
     }
     ++state.token_count;
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (phase_profile) {
+        const std::array<const MlxArray*, 4> projection_outputs{
+            &query, &gate, &state.keys, &state.values};
+        MlxArray::eval_all(projection_outputs);
+    }
+    const auto projection_done = std::chrono::steady_clock::now();
+#endif
     MlxArray attended;
     if (state.kv_q8) {
         if (qsa.packed_indices.get().ctx == nullptr) {
@@ -1096,10 +1205,32 @@ MlxArray SelfAttention::forward_decode(
         MlxArray probabilities = scores.astype(MLX_FLOAT32).softmax_axis(-1).astype(query.dtype());
         attended = MlxArray::matmul(probabilities, repeated_values).swapaxes(1, 2);
     }
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (phase_profile) attended.eval();
+    const auto attention_done = std::chrono::steady_clock::now();
+#endif
     const std::vector<int> flat_shape{1, 1, heads * head_dimension};
     MlxArray gated = MlxArray::multiply(
         attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
-    return project(gated, output_projection_);
+    MlxArray output = project(gated, output_projection_);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    if (phase_profile) {
+        output.eval();
+        const auto finished = std::chrono::steady_clock::now();
+        const auto milliseconds = [](const auto begin, const auto end) {
+            return std::chrono::duration<double, std::milli>(end - begin).count();
+        };
+        std::clog << "qwen38-qsa-decode-phase: selection_state_ms="
+                  << milliseconds(phase_started, selection_done)
+                  << " projection_kv_ms="
+                  << milliseconds(selection_done, projection_done)
+                  << " attention_ms="
+                  << milliseconds(projection_done, attention_done)
+                  << " output_ms="
+                  << milliseconds(attention_done, finished) << '\n';
+    }
+#endif
+    return output;
 }
 
 MlxArray SelfAttention::forward_verify(
@@ -1149,6 +1280,7 @@ MlxArray SelfAttention::forward_verify(
         SelfAttentionState complete;
         complete.token_count = origin.token_count;
         complete.position_base = origin.position_base;
+        complete.qsa_raw_start = origin.qsa_raw_start;
         complete.qsa_pooled_count = origin.qsa_pooled_count;
         if (origin.token_count != 0) {
             complete.qsa_raw_keys = origin.qsa_raw_keys.share();
@@ -1221,6 +1353,7 @@ MlxArray SelfAttention::forward_verify(
     SelfAttentionState working;
     working.token_count = origin.token_count;
     working.position_base = origin.position_base;
+    working.qsa_raw_start = origin.qsa_raw_start;
     working.qsa_pooled_count = origin.qsa_pooled_count;
     if (origin.token_count != 0) {
         working.keys = origin.keys.share();
@@ -1297,6 +1430,7 @@ MlxArray SelfAttention::forward_verify(
         checkpoints[row].values = working.values.share();
         checkpoints[row].token_count = working.token_count;
         checkpoints[row].position_base = working.position_base;
+        checkpoints[row].qsa_raw_start = working.qsa_raw_start;
         checkpoints[row].qsa_raw_keys = working.qsa_raw_keys.share();
         checkpoints[row].qsa_pooled_count = working.qsa_pooled_count;
         if (working.qsa_pooled_count != 0) {

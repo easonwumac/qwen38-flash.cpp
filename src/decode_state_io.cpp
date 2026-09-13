@@ -57,6 +57,8 @@ void append_decoder(
 
     add_metadata(metadata, prefix + ".attention.token_count", state.full_attention.token_count);
     add_metadata(metadata, prefix + ".attention.position_base", state.full_attention.position_base);
+    add_metadata(metadata, prefix + ".attention.qsa_raw_start",
+        state.full_attention.qsa_raw_start);
     add_metadata(
         metadata, prefix + ".attention.qsa_pooled_count",
         state.full_attention.qsa_pooled_count);
@@ -113,6 +115,9 @@ DecoderLayerState load_decoder(const std::string& prefix, const MlxSafetensors& 
 
     state.full_attention.token_count = parse_size(file, prefix + ".attention.token_count");
     state.full_attention.position_base = parse_size(file, prefix + ".attention.position_base");
+    state.full_attention.qsa_raw_start =
+        file.metadata(prefix + ".attention.qsa_raw_start").has_value()
+        ? parse_size(file, prefix + ".attention.qsa_raw_start") : 0;
     state.full_attention.qsa_pooled_count =
         parse_size(file, prefix + ".attention.qsa_pooled_count");
     state.full_attention.kv_q8 =

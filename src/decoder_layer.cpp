@@ -54,6 +54,7 @@ DecoderLayerState snapshot_decoder_layer_state(const DecoderLayerState& state) {
     }
     snapshot.full_attention.token_count = state.full_attention.token_count;
     snapshot.full_attention.position_base = state.full_attention.position_base;
+    snapshot.full_attention.qsa_raw_start = state.full_attention.qsa_raw_start;
     snapshot.full_attention.qsa_pooled_count =
         state.full_attention.qsa_pooled_count;
     snapshot.full_attention.kv_q8 = state.full_attention.kv_q8;

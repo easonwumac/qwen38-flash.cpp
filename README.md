@@ -149,6 +149,7 @@ depth 4 is reserved for a previously calibrated high-acceptance workload.
 The validated 128K recipe is:
 
 ```bash
+QWEN38_QSA_RAW_WINDOW=64 \
 python3 devtools/memory_guard.py --min-available-gib 6 -- \
   ./build/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \

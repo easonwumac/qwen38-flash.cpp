@@ -50,6 +50,7 @@ qwen38::SelfAttentionState snapshot(const qwen38::SelfAttentionState& state) {
     result.token_count = state.token_count;
     result.position_base = state.position_base;
     result.qsa_pooled_count = state.qsa_pooled_count;
+    result.qsa_raw_start = state.qsa_raw_start;
     if (state.token_count != 0) {
         result.keys = state.keys.share();
         result.values = state.values.share();
@@ -156,7 +157,7 @@ int qsa_smoke(
         checkpoints.back().token_count != engaged_tokens ||
         checkpoints.back().qsa_pooled_count != expected_blocks ||
         checkpoints.back().qsa_raw_keys.shape() != std::vector<int>({
-            1, static_cast<int>(engaged_tokens),
+            1, static_cast<int>(engaged_tokens - checkpoints.back().qsa_raw_start),
             static_cast<int>(config.indexer_head_dimension)}) ||
         output_cosine < 0.999) {
         throw std::runtime_error("QSA batched/serial parity or cache contract failed");
@@ -168,7 +169,7 @@ int qsa_smoke(
             row_blocks > budget / ratio ? row_blocks : 0;
         if (checkpoints[row].token_count != budget + row + 1 ||
             checkpoints[row].qsa_raw_keys.shape()[1] !=
-                static_cast<int>(budget + row + 1) ||
+                static_cast<int>(row_tokens - checkpoints[row].qsa_raw_start) ||
             checkpoints[row].qsa_pooled_count != expected_row_pooled) {
             throw std::runtime_error("QSA verifier checkpoint is misaligned");
         }

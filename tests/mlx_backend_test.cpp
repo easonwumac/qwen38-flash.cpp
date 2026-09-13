@@ -490,6 +490,7 @@ int main() {
     persisted.target = qwen38::snapshot_decode_state(snapshot);
     persisted.target.layers[0].full_attention.token_count = 2;
     persisted.target.layers[0].full_attention.position_base = 5;
+    persisted.target.layers[0].full_attention.qsa_raw_start = 1;
     persisted.target.layers[0].full_attention.keys = left.share();
     persisted.target.layers[0].full_attention.values = right.share();
     persisted.target.layers[0].full_attention.qsa_raw_keys = left.share();
@@ -512,6 +513,7 @@ int main() {
     std::filesystem::remove(state_path);
     if (restored.target.token_count != 7 || restored.target.layers.size() != 1 ||
         restored.target.layers[0].full_attention.position_base != 5 ||
+        restored.target.layers[0].full_attention.qsa_raw_start != 1 ||
         restored.target.layers[0].full_attention.qsa_pooled_count != 1 ||
         restored.target.layers[0].linear_attention.recurrent.to_float32() !=
             std::vector<float>({5, 6, 7, 8}) ||

@@ -12,6 +12,31 @@
 #include <stdexcept>
 
 using namespace qwen38;
+struct Packed { MlxArray weights, scales, biases; };
+Packed pack_q8(const MlxArray& value) {
+    auto vector = mlx_vector_array_new();
+    const auto stream = mlx_default_gpu_stream_new();
+    const int status = mlx_quantize(
+        &vector, value.get(), {.value = 64, .has_value = true},
+        {.value = 8, .has_value = true}, "affine", mlx_array{}, stream);
+    mlx_stream_free(stream);
+    if (status != 0) {
+        mlx_vector_array_free(vector);
+        throw std::runtime_error("Q8 packing failed");
+    }
+    std::array<mlx_array, 3> raw{
+        mlx_array_new(), mlx_array_new(), mlx_array_new()};
+    const int extract = mlx_vector_array_get(&raw[0], vector, 0) |
+        mlx_vector_array_get(&raw[1], vector, 1) |
+        mlx_vector_array_get(&raw[2], vector, 2);
+    mlx_vector_array_free(vector);
+    if (extract != 0) throw std::runtime_error("Q8 tuple extraction failed");
+    Packed packed{MlxArray(raw[0]), MlxArray(raw[1]), MlxArray(raw[2])};
+    const std::array<const MlxArray*, 3> outputs{
+        &packed.weights, &packed.scales, &packed.biases};
+    MlxArray::eval_all(outputs);
+    return packed;
+}
 MlxArray history(std::vector<int> shape, int seed) {
     std::size_t count = 1;
     for (int n : shape) count *= static_cast<std::size_t>(n);
@@ -23,10 +48,13 @@ MlxArray history(std::vector<int> shape, int seed) {
 }
 int main(int argc, char** argv) try {
     if (argc != 4 || std::getenv("QWEN38_MEMORY_GUARD") == nullptr)
-        throw std::runtime_error("usage: guarded qwen38-qsa-peak-probe MODEL CONTEXT MODE(0..4)");
+        throw std::runtime_error(
+            "usage: guarded qwen38-qsa-peak-probe MODEL CONTEXT MODE(0..4|decode)");
     const int context = std::stoi(argv[2]);
+    const bool decode_probe = std::string_view(argv[3]) == "decode";
     if ((context != 32768 && context != 65536 && context != 131072) ||
-        (std::string_view(argv[3]).size() != 1 || argv[3][0] < '0' || argv[3][0] > '4'))
+        (!decode_probe && (std::string_view(argv[3]).size() != 1 ||
+         argv[3][0] < '0' || argv[3][0] > '4')))
         throw std::runtime_error("invalid bounded probe configuration");
     std::size_t old{};
     if (mlx_set_memory_limit(&old, 3ULL * 1024 * 1024 * 1024) != 0)
@@ -35,16 +63,20 @@ int main(int argc, char** argv) try {
     apply_runtime_profile("speed");
     setenv("QWEN38_QSA_PACKED_PREFILL", "1", 1);
     setenv("QWEN38_QSA_PACKED_MIN_TOKENS", "0", 1);
-    setenv("QWEN38_QSA_SCORE_REDUCE", argv[3], 1);
+    setenv("QWEN38_QSA_SCORE_REDUCE", decode_probe ? "0" : argv[3], 1);
+    if (decode_probe) {
+        setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
+        setenv("QWEN38_PROFILE_QSA_DECODE", "1", 1);
+    }
     unsetenv("QWEN38_QSA_TILED_SCORES");
-    if (argv[3][0] >= '2') {
+    if (!decode_probe && argv[3][0] >= '2') {
         const char* modes[]{"128", "256", "async"};
         setenv("QWEN38_QSA_TILED_SCORES", modes[argv[3][0] - '2'], 1);
     }
     MlxTensorStore tensors(ModelManifest::load(argv[1]));
     const auto& c = tensors.manifest().config();
     SelfAttention layer(tensors, "language_model.model.layers.3.self_attn", c);
-    std::vector<std::uint32_t> tokens(512);
+    std::vector<std::uint32_t> tokens(decode_probe ? 1 : 512);
     for (std::size_t i = 0; i < tokens.size(); ++i)
         tokens[i] = static_cast<std::uint32_t>((9419 + 7919 * i) % c.vocabulary_size);
     auto embedding = embed_token_batch(tensors.tensor("language_model.model.embed_tokens.weight"),
@@ -63,6 +95,27 @@ int main(int argc, char** argv) try {
     origin.qsa_raw_keys = history({1, context, 128}, 13);
     origin.qsa_pooled_keys = history({1, context / 4, 128}, 19);
     origin.token_count = context; origin.qsa_pooled_count = context / 4;
+    if (decode_probe && std::getenv("QWEN38_QSA_RAW_WINDOW") != nullptr) {
+        origin.qsa_raw_keys = history({1, 64, 128}, 13);
+        origin.qsa_raw_start = static_cast<std::size_t>(context - 64);
+    }
+    if (decode_probe) {
+        Packed key = pack_q8(origin.keys);
+        Packed value = pack_q8(origin.values);
+        origin.key_weights = std::move(key.weights);
+        origin.key_scales = std::move(key.scales);
+        origin.key_biases = std::move(key.biases);
+        origin.value_weights = std::move(value.weights);
+        origin.value_scales = std::move(value.scales);
+        origin.value_biases = std::move(value.biases);
+        const std::vector<int> strides{1, 1, 1, 1};
+        origin.keys = origin.keys.slice(
+            std::vector<int>{0, 0, 0, 0}, std::vector<int>{1, 2, 0, 256}, strides);
+        origin.values = origin.values.slice(
+            std::vector<int>{0, 0, 0, 0}, std::vector<int>{1, 2, 0, 256}, strides);
+        origin.kv_q8 = true;
+        origin.kv_q8_cold_tokens = static_cast<std::size_t>(context);
+    }
     std::vector<double> times;
     std::vector<std::size_t> peaks;
     std::uint64_t hash = 1469598103934665603ULL;
@@ -70,11 +123,24 @@ int main(int argc, char** argv) try {
         SelfAttentionState state;
         state.keys = origin.keys.share(); state.values = origin.values.share();
         state.qsa_raw_keys = origin.qsa_raw_keys.share();
+        state.qsa_raw_start = origin.qsa_raw_start;
         state.qsa_pooled_keys = origin.qsa_pooled_keys.share();
         state.token_count = origin.token_count; state.qsa_pooled_count = origin.qsa_pooled_count;
+        state.kv_q8 = origin.kv_q8;
+        state.kv_q8_cold_tokens = origin.kv_q8_cold_tokens;
+        if (decode_probe) {
+            state.key_weights = origin.key_weights.share();
+            state.key_scales = origin.key_scales.share();
+            state.key_biases = origin.key_biases.share();
+            state.value_weights = origin.value_weights.share();
+            state.value_scales = origin.value_scales.share();
+            state.value_biases = origin.value_biases.share();
+        }
         if (mlx_reset_peak_memory() != 0) throw std::runtime_error("peak reset failed");
         const auto start = std::chrono::steady_clock::now();
-        auto output = layer.forward_prefill(input, state);
+        auto output = decode_probe
+            ? layer.forward_decode(input,  state)
+            : layer.forward_prefill(input, state);
         const std::array<const MlxArray*, 5> evaluated{
             &output, &state.keys, &state.values, &state.qsa_raw_keys, &state.qsa_pooled_keys};
         MlxArray::eval_all(evaluated);
@@ -90,7 +156,11 @@ int main(int argc, char** argv) try {
             }
     }
     std::cout << "{\"synthetic_history\":true,\"context\":" << context
-              << ",\"rows\":512,\"mode\":" << argv[3] << ",\"samples_ms\":[";
+              << ",\"rows\":" << (decode_probe ? 1 : 512)
+              << ",\"mode\":";
+    if (decode_probe) std::cout << "\"decode\"";
+    else std::cout << argv[3];
+    std::cout << ",\"samples_ms\":[";
     for (std::size_t i = 0; i < times.size(); ++i) { if (i) std::cout << ','; std::cout << times[i]; }
     std::sort(times.begin(), times.end()); std::sort(peaks.begin(), peaks.end());
     std::cout << "],\"median_ms\":" << times[5] << ",\"median_peak_mlx_bytes\":" << peaks[5]

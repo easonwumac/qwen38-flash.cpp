@@ -132,7 +132,9 @@ int main(int argc, char **argv) {
             const std::size_t expected_blocks =
                 complete_blocks > selected_block_limit ? complete_blocks : 0;
             if (attention.token_count != state.token_count ||
-                raw_shape != std::vector<int>({1, static_cast<int>(state.token_count),
+                attention.qsa_raw_start > state.token_count ||
+                raw_shape != std::vector<int>({
+                    1, static_cast<int>(state.token_count - attention.qsa_raw_start),
                                                static_cast<int>(config.indexer_head_dimension)}) ||
                 attention.qsa_pooled_count != expected_blocks) {
                 throw std::runtime_error("QSA cache mismatch at full-attention layer " +

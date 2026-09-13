@@ -46,6 +46,13 @@ server process, and no recorded thermal warning.
   at 529.19 PP/s and 10.56 decode tok/s, with 41.51 GiB peak footprint and
   30.38 GiB peak RSS. Against that control, Q8 reduced median peak footprint by
   1.46 GiB (3.5%), raised median PP by 4.1%, and raised decode by 94.7%.
+- A later bounded-raw-state development run retained only the QSA raw-key rows
+  needed for pooling and rollback (`QWEN38_QSA_RAW_WINDOW=64`). It recovered
+  `V1-NEBULA-128` at 590.69 PP/s and 26.11 serial decode tok/s, with 40.0 GiB
+  peak footprint, 33.4 GiB peak RSS, and 8.4 GiB minimum available memory. The
+  adjacent 65,601-token run reached 594.80 PP/s and 25.93 decode tok/s versus
+  22.91 for its control. These are single cold development runs, not a new
+  three-run product distribution.
 
 Q8 therefore provides capacity headroom while preserving more than 500 PP/s at
 128K on the test machine. It remains opt-in because four-row QSA selection is an
