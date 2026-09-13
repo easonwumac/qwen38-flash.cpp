@@ -101,6 +101,8 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
     constexpr uint QUERY_HEADS_PER_KV = HQ / HK;
     constexpr uint PACKED_D = D / 4;
     constexpr uint GROUPS = D / 64;
+    const uint total_count = uint(total);
+    const uint cold_count = uint(cold);
     const uint tid = thread_position_in_threadgroup.x;
     const uint lane = thread_index_in_simdgroup;
     const uint simd = simdgroup_index_in_threadgroup;
@@ -138,10 +140,10 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
             bool cold = false;
             if (selected_valid) {
                 token = uint(indices[row * uint(S) + selected_slot]);
-                cold = token < uint(COLD);
+                cold = token < cold_count;
             }
             if (cold) {
-                const size_t vector = size_t(kv_head) * size_t(COLD) + token;
+                const size_t vector = size_t(kv_head) * size_t(cold_count) + token;
                 const size_t word_index = vector * PACKED_D + packed_channel;
                 quantized = load_value ? vw[word_index] : kw[word_index];
                 const size_t group_index = vector * GROUPS + packed_channel / 16;
@@ -154,9 +156,9 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
                 if (cold) {
                     loaded = T(float((quantized >> (component * 8)) & 255u) * s + b);
                 } else if (selected_valid) {
-                    const size_t hot_token = size_t(token - uint(COLD));
+                    const size_t hot_token = size_t(token - cold_count);
                     const size_t hot_vector = size_t(kv_head) *
-                        size_t(TOTAL - COLD) + hot_token;
+                        size_t(total_count - cold_count) + hot_token;
                     const size_t hot_index = hot_vector * size_t(D) +
                         packed_channel * 4 + component;
                     loaded = load_value ? hot_values[hot_index] : hot_keys[hot_index];

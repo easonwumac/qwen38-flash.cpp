@@ -81,7 +81,7 @@ std::shared_ptr<MlxMetalKernel> packed_qsa_q8_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
             "query", "kw", "ks", "kb", "vw", "vs", "vb",
-            "hot_keys", "hot_values", "indices", "valid", "scale"};
+            "hot_keys", "hot_values", "indices", "valid", "scale", "total", "cold"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_packed_qsa_attention_q8",
             inputs,
@@ -153,6 +153,23 @@ std::size_t qsa_shared_rows() {
     if (end == configured || *end != '\0' ||
         (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
         throw std::runtime_error("QWEN38_QSA_SHARED_ROWS must be 1, 2, 4, or 8");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
+std::size_t qsa_selection_budget(
+    const std::size_t configured,
+    const int rows,
+    const std::size_t ratio) {
+    if (rows != 1) return configured;
+    const char* value = std::getenv("QWEN38_QSA_DECODE_BUDGET");
+    if (value == nullptr) return configured;
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (end == value || *end != '\0' || parsed < ratio || parsed > configured ||
+        parsed % ratio != 0) {
+        throw std::runtime_error(
+            "QWEN38_QSA_DECODE_BUDGET must be ratio-aligned and no larger than the model budget");
     }
     return static_cast<std::size_t>(parsed);
 }
@@ -574,7 +591,9 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const int index_heads = dimension(indexer_head_count_, "indexer heads");
     const int index_dimension = dimension(indexer_head_dimension_, "indexer dimension");
     const int ratio = dimension(indexer_compress_ratio_, "indexer ratio");
-    const int budget = dimension(indexer_budget_, "indexer budget");
+    const int budget = dimension(
+        qsa_selection_budget(indexer_budget_, rows, indexer_compress_ratio_),
+        "indexer budget");
     const int block_topk = budget / ratio;
     const std::vector<int> strides3{1, 1, 1};
 
@@ -925,7 +944,9 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
     }
     MlxArray scale = scalar(
         1.0F / std::sqrt(static_cast<float>(head_dimension_)), MLX_FLOAT32);
-    const std::array<const MlxArray*, 12> inputs{
+    MlxArray total = integer_scalar(dimension(state.token_count, "Q8 KV total"));
+    MlxArray cold = integer_scalar(weight_shape[2]);
+    const std::array<const MlxArray*, 14> inputs{
         &query,
         &state.key_weights,
         &state.key_scales,
@@ -938,6 +959,8 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
         &selection.packed_indices,
         &selection.packed_mask,
         &scale,
+        &total,
+        &cold,
     };
     const int thread_count = 512;
     const std::array<int, 3> grid{thread_count, rows, kv_heads};
@@ -955,10 +978,8 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
         }
         tile_size = static_cast<int>(parsed);
     }
-    const std::array<MlxMetalIntTemplate, 9> int_templates{{
+    const std::array<MlxMetalIntTemplate, 7> int_templates{{
         {.name = "R", .value = rows},
-        {.name = "TOTAL", .value = dimension(state.token_count, "Q8 KV total")},
-        {.name = "COLD", .value = weight_shape[2]},
         {.name = "S", .value = selected},
         {.name = "HQ", .value = query_shape[1]},
         {.name = "HK", .value = kv_heads},
