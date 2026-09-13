@@ -9,6 +9,11 @@ model construction, evaluation, cache mutation, and destruction retain stream
 affinity without duplicating weights. Authentication and concurrent model
 scheduling remain later milestones.
 
+The server defaults to stable serial inference. MTP companion execution is
+enabled only when `--mtp-depth auto`, `2`, `3`, or `4` is passed explicitly;
+startup logs the effective mode. This prevents a model capsule that happens to
+contain a drafter from silently increasing the steady memory requirement.
+
 | Method | Route | Current behavior |
 |---|---|---|
 | `GET` | `/healthz` | Process health; returns 200 while the server can respond. |

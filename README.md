@@ -3,6 +3,9 @@
 `qwen38-flash.cpp` is an independent, server-only inference engine being built
 specifically for Qwen3.8 Flash Next on Apple Silicon.
 
+For a concise daily-operation path, see [docs/operations.md](docs/operations.md).
+Release candidates follow [docs/release-checklist.md](docs/release-checklist.md).
+
 The product goal is to own the complete path from model weights to API tokens:
 model loading, execution scheduling, quantized kernels, hybrid attention state,
 KV/prefix caches, speculative verification, serving, and observability. It is not
@@ -105,7 +108,7 @@ With both MLX and tokenizer options enabled, run the native inference server:
 ```bash
 ./build/qwen38-server --host 127.0.0.1 --port 11438 --model /path/to/model \
   --profile speed --prefix-cache-tokens 8192 --max-generation-tokens 4096 \
-  --mtp-depth auto
+  --mtp-depth off
 curl http://127.0.0.1:11438/healthz
 curl http://127.0.0.1:11438/v1/status
 curl http://127.0.0.1:11438/metrics
@@ -179,8 +182,10 @@ old per-layer synchronization path. The lossless13 sidecar is
 required; startup fails clearly instead of silently falling back to the larger
 metadata representation. Use the memory guard for every long-context run.
 
-`--mtp-depth auto` is the default. When the model index has the Qwen3.8 MTP
-companion, short prompts start at depth 2 for an eight-round probe and promote
+Stable serial execution (`--mtp-depth off`) is the default. MTP is opt-in through
+`--mtp-depth auto`, `2`, `3`, or `4`, because a companion drafter adds memory and
+its benefit depends on the request trajectory. When the model index has the Qwen3.8 MTP
+companion, auto mode starts short prompts at depth 2 for an eight-round probe and promotes
 to depth 3 only after at least 10 accepted drafts. A promoted request is checked
 in 12-round windows and permanently demoted to depth 2 after two consecutive
 windows below 50% per-draft acceptance. A recovered window resets that
@@ -358,18 +363,20 @@ request cache remains opt-in because it has not yet been validated near the
 uses it only through 32,768 prompt tokens by default, even when the environment
 flag is set.
 
-`--prefill-chunk 64` is the default layer-major prompt path. It bounds the
+`--prefill-chunk 64` is the safe profile's default layer-major prompt path. It bounds the
 temporary prompt batch while preserving the retained production numerics.
 Values through 1024 are accepted when `QWEN38_GDN_METAL_PREFILL=1` enables the
 oMLX-derived whole-sequence GDN recurrence; wider chunks otherwise fail at
 startup instead of failing partway through a request. A 1024-row superchunk is
 kept whole through GDN and MoE while full-attention layers process two ordered
 512-row subchunks, retaining the attention-state contract without decoding MoE
-metadata twice. Adaptive mode retains an explicit 1024-row chunk through
+metadata twice. The `speed` and `latency` profiles default to 1024 rows;
+`turbo`, `memory`, and `long-context` default to 512. Adaptive mode retains an
+explicit 1024-row chunk through
 32,768 forwarded tokens and then reduces it to 512; `--prefill-chunk-fixed` is
-required to exercise 1024 rows at longer contexts. The optimized profiles
-retain their default chunk 512 through 66,048 forwarded tokens, then reduce to
-chunk 128 for larger prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
+required to exercise 1024 rows at longer contexts. A configured 512-row chunk
+is retained through 66,048 forwarded tokens, then reduced to 128 for larger
+prompts. On the 64 GiB M5 Pro, an 8,216-token prompt rose
 from 463.7 tok/s with the old chunk-128 crossover to 655.45/638.38 tok/s, while
 a 32,760-token prompt reached 532.67 tok/s and ended at a 36.66 GiB physical
 footprint. The first-token output hash was unchanged. `--prefill-chunk-fixed`

@@ -30,6 +30,36 @@ def process_exists(pid: int) -> bool:
 
 
 class MemoryGuardSignalTest(unittest.TestCase):
+    def test_signal_during_measurement_is_clean_shutdown(self) -> None:
+        child = mock.Mock(pid=123, returncode=-signal.SIGTERM)
+        child.poll.side_effect = [None, None]
+
+        def interrupt_measurement(_pid: int) -> float:
+            os.kill(os.getpid(), signal.SIGINT)
+            raise memory_guard.MeasurementError("shutdown race")
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            sys,
+            "argv",
+            [
+                str(GUARD),
+                "--min-start-gib", "0",
+                "--lock-file", str(Path(directory) / "guard.lock"),
+                "--", "dummy",
+            ],
+        ), mock.patch.object(memory_guard, "available_gib", return_value=100), \
+             mock.patch.object(memory_guard.subprocess, "Popen", return_value=child), \
+             mock.patch.object(memory_guard.fcntl, "flock"), \
+             mock.patch("builtins.open", mock.mock_open()), \
+             mock.patch.object(
+                 memory_guard,
+                 "guarded_tree_rss_gib",
+                 side_effect=interrupt_measurement,
+             ), mock.patch.object(memory_guard, "stop_tree") as stop_tree:
+            self.assertEqual(memory_guard.main(), 128 + signal.SIGINT)
+        stop_tree.assert_called_once_with(child.pid)
+        child.wait.assert_called_once_with()
+
     def test_main_stops_live_child_on_measurement_failure(self) -> None:
         child = mock.Mock(pid=123, returncode=-signal.SIGTERM)
         child.poll.side_effect = [None, None]
@@ -135,6 +165,7 @@ class MemoryGuardSignalTest(unittest.TestCase):
 
     def test_physical_footprint_limit_stops_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
             result = subprocess.run(
                 [
                     sys.executable,
@@ -151,6 +182,8 @@ class MemoryGuardSignalTest(unittest.TestCase):
                     "0.02",
                     "--lock-file",
                     str(Path(directory) / "guard.lock"),
+                    "--report-json",
+                    str(report),
                     "--",
                     sys.executable,
                     "-c",
@@ -163,6 +196,9 @@ class MemoryGuardSignalTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 76)
             self.assertIn("footprint=", result.stderr)
+            payload = __import__("json").loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["reason"], "memory_limit")
+            self.assertEqual(payload["exit_code"], 76)
 
     def test_control_signals_reap_guarded_child(self) -> None:
         signal_sequences = (

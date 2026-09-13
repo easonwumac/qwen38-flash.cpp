@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import ctypes
 import fcntl
+import json
 import os
+from pathlib import Path
 import re
 import signal
 import subprocess
@@ -151,6 +153,7 @@ def main() -> int:
     parser.add_argument("--max-footprint-gib", type=float, default=44.0)
     parser.add_argument("--interval", type=float, default=0.25)
     parser.add_argument("--lock-file", default="/tmp/qwen38-memory-guard.lock")
+    parser.add_argument("--report-json")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -182,13 +185,33 @@ def main() -> int:
     peak_footprint = 0.0
     minimum_available = start_available
 
-    def report_peak() -> None:
+    def report_peak(reason: str, exit_code: int) -> None:
         print(
             f"memory_guard: peak_footprint={peak_footprint:.1f} GiB "
             f"peak_rss={peak_rss:.1f} GiB "
             f"minimum_available={minimum_available:.1f} GiB",
             file=sys.stderr,
         )
+        if args.report_json:
+            try:
+                Path(args.report_json).write_text(
+                    json.dumps(
+                        {
+                            "reason": reason,
+                            "exit_code": exit_code,
+                            "start_available_gib": start_available,
+                            "peak_footprint_gib": peak_footprint,
+                            "peak_rss_gib": peak_rss,
+                            "minimum_available_gib": minimum_available,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            except OSError as error:
+                print(f"memory_guard: cannot write report: {error}", file=sys.stderr)
     handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous_handlers = {
         signum: signal.getsignal(signum) for signum in handled_signals
@@ -207,8 +230,9 @@ def main() -> int:
             if shutdown_signal != 0:
                 stop_tree(child.pid)
                 child.wait()
-                report_peak()
-                return 128 + shutdown_signal
+                exit_code = 128 + shutdown_signal
+                report_peak("signal", exit_code)
+                return exit_code
             try:
                 current_rss = guarded_tree_rss_gib(child.pid)
                 current_footprint = guarded_tree_footprint_gib(child.pid)
@@ -218,9 +242,19 @@ def main() -> int:
                 # a normal completion, but a live process must never run unguarded.
                 if child.poll() is not None:
                     break
+                # A control signal can arrive while ps/libproc is sampling the
+                # child tree. Honor the requested shutdown instead of reporting
+                # that expected teardown race as a measurement failure.
+                if shutdown_signal != 0:
+                    stop_tree(child.pid)
+                    child.wait()
+                    exit_code = 128 + shutdown_signal
+                    report_peak("signal", exit_code)
+                    return exit_code
                 print(f"memory_guard: measurement failed: {error}", file=sys.stderr)
                 stop_tree(child.pid)
                 child.wait()
+                report_peak("measurement_failure", MEASUREMENT_FAILURE_EXIT)
                 return MEASUREMENT_FAILURE_EXIT
             peak_rss = max(peak_rss, current_rss)
             peak_footprint = max(peak_footprint, current_footprint)
@@ -239,6 +273,7 @@ def main() -> int:
                 )
                 stop_tree(child.pid)
                 child.wait()
+                report_peak("memory_limit", 76)
                 return 76
             time.sleep(args.interval)
     except BaseException:
@@ -248,7 +283,7 @@ def main() -> int:
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
-    report_peak()
+    report_peak("child_exit", child.returncode)
     return child.returncode
 
 

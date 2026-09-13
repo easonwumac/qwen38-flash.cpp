@@ -58,10 +58,16 @@ def long_cases() -> list[Case]:
     results = []
     # The four-word filler averages about one token per word with this tokenizer.
     # Repeating it on both sides produces approximately 2 * size prompt tokens.
-    for size, needle in ((8192, "K7-MOON-491"), (32768, "R2-COMET-853")):
+    for size, label, needle in (
+        (8192, "16k", "K7-MOON-491"),
+        (32768, "64k", "R2-COMET-853"),
+        (65536, "128k", "V1-NEBULA-128"),
+        (98304, "192k", "S4-PULSAR-192"),
+        (131006, "262k", "MAX-ORBIT-262"),
+    ):
         filler = "amber cedar delta quartz "
         text = (filler * (size // 4)) + f" UNIQUE_ACCESS_CODE={needle} " + (filler * (size // 4))
-        results.append(Case(f"needle_{2 * size // 1024}k", "long_context", f"Read the text and return the unique access code.\n{text}", needle))
+        results.append(Case(f"needle_{label}", "long_context", f"Read the text and return the unique access code.\n{text}", needle))
     return results
 
 
@@ -87,7 +93,7 @@ def equal(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:11438")
     parser.add_argument("--output", type=Path, required=True)
@@ -95,6 +101,11 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--skip-long", action="store_true")
     parser.add_argument("--case", action="append", dest="case_ids", help="run only this case id (repeatable)")
+    parser.add_argument(
+        "--require-all",
+        action="store_true",
+        help="return a failing status unless every selected case passes",
+    )
     args = parser.parse_args()
 
     cases = CASES + ([] if args.skip_long else long_cases())
@@ -187,7 +198,8 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(artifact["summary"], ensure_ascii=False), flush=True)
+    return 1 if args.require_all and passed != len(rows) else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

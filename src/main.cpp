@@ -54,6 +54,12 @@ std::optional<std::size_t> parse_mtp_depth(const std::string& value) {
     throw std::runtime_error("invalid MTP depth: " + value);
 }
 
+std::string mtp_depth_name(const std::optional<std::size_t> depth) {
+    if (!depth.has_value()) return "auto";
+    if (*depth == 0) return "off";
+    return std::to_string(*depth);
+}
+
 std::uint16_t parse_port(const std::string& value) {
     unsigned int parsed = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
@@ -89,7 +95,10 @@ int main(int argc, char** argv) {
     try {
         qwen38::ServerConfig config;
         std::string profile = "safe";
-        std::optional<std::size_t> mtp_depth;
+        // Stable serial execution is the server default. Loading and executing a
+        // companion drafter is opt-in because its memory and throughput benefit
+        // depend on both the checkpoint and the request trajectory.
+        std::optional<std::size_t> mtp_depth = 0;
         bool mtp_depth_explicit = false;
         std::size_t prefill_chunk_rows = 64;
         bool prefill_chunk_explicit = false;
@@ -178,7 +187,11 @@ int main(int argc, char** argv) {
         }
         qwen38::apply_runtime_profile(profile);
         if (profile_config.optimized && !prefill_chunk_explicit) {
-            prefill_chunk_rows = 512;
+            // Normal interactive profiles have enough headroom for a wider
+            // trunk batch. Memory-bearing and MTP-heavy profiles keep the
+            // smaller working set.
+            prefill_chunk_rows =
+                profile == "speed" || profile == "latency" ? 1024 : 512;
         }
         if (profile_config.memory_efficient) {
             if (!mtp_depth_explicit) mtp_depth = 0;
@@ -208,6 +221,7 @@ int main(int argc, char** argv) {
                 engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
                 std::clog << "qwen38-server: profile=" << profile
+                          << " mtp_depth=" << mtp_depth_name(mtp_depth)
                           << " prefill_chunk=" << prefill_chunk_rows
                           << " adaptive_prefill_chunks="
                           << (adaptive_prefill_chunks ? "true" : "false")

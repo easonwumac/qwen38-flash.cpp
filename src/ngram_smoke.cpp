@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now() - second_started).count();
         const double first_checksum = std::accumulate(first.begin(), first.end(), 0.0);
         const double second_checksum = std::accumulate(second.begin(), second.end(), 0.0);
-        std::cout << "{\"first_row\":" << first_rows.front()
+        std::cout << "{\"storage\":\"aos-pread\",\"first_row\":" << first_rows.front()
                   << ",\"last_row\":" << first_rows.back()
                   << ",\"first_checksum\":" << first_checksum
                   << ",\"second_checksum\":" << second_checksum

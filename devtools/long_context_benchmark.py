@@ -24,6 +24,7 @@ class Measurement:
     lines: int
     prompt_bytes: int
     prompt_tokens: int
+    cached_prompt_tokens: int
     completion_tokens: int
     prompt_ms: float
     prompt_tps: float
@@ -54,13 +55,20 @@ def measurement_from_response(
             message.get("reasoning_content") or ""
         )
         prompt_tokens = int(usage["prompt_tokens"])
+        cached_prompt_tokens = int(performance.get("cached_prompt_tokens", 0))
         prompt_ms = float(performance["prompt_ms"])
-        if prompt_tokens <= 0 or prompt_ms <= 0:
+        if (
+            prompt_tokens <= 0
+            or cached_prompt_tokens < 0
+            or cached_prompt_tokens > prompt_tokens
+            or prompt_ms <= 0
+        ):
             raise ValueError("prompt telemetry must be positive")
         return Measurement(
             lines=lines,
             prompt_bytes=prompt_bytes,
             prompt_tokens=prompt_tokens,
+            cached_prompt_tokens=cached_prompt_tokens,
             completion_tokens=int(usage["completion_tokens"]),
             prompt_ms=prompt_ms,
             prompt_tps=1000.0 * prompt_tokens / prompt_ms,

@@ -32,6 +32,9 @@ reported as diagnostics but cannot prove a universal acceptance gate.
 - Greedy output parity on committed fixtures.
 - Quality suite does not regress from the retained reference.
 - Non-MTP controlled median is at least 45 tok/s.
+- Warm exact prefill is at least 600 prompt tok/s through 8K. 32K remains a
+  600 PP/s optimization target; larger contexts publish measured PP/TTFT and
+  memory degradation instead of extrapolating the short-context result.
 - MTP controlled median is at least 65 tok/s and p10 does not fall below the
   non-MTP path because unprofitable verification must fall back.
 - Prefix-cache correctness and a context sweep through the maximum feasible size,

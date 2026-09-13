@@ -28,6 +28,7 @@ class LongContextBenchmarkTest(unittest.TestCase):
             "usage": {"prompt_tokens": 258457, "completion_tokens": 1},
             "performance": {
                 "prompt_ms": 2500000.0,
+                "cached_prompt_tokens": 131072,
                 "generation_ms": 200.0,
                 "generation_tps": 5.0,
             },
@@ -38,7 +39,22 @@ class LongContextBenchmarkTest(unittest.TestCase):
         measurement = MODULE.measurement_from_response(response, 16152, 900000, 2500250.0)
         self.assertEqual(measurement.prompt_tokens, 258457)
         self.assertAlmostEqual(measurement.prompt_tps, 103.3828, places=4)
+        self.assertEqual(measurement.cached_prompt_tokens, 131072)
         self.assertEqual(measurement.output_preview, "All")
+
+    def test_measurement_rejects_impossible_cached_count(self) -> None:
+        response = {
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+            "performance": {
+                "prompt_ms": 10.0,
+                "cached_prompt_tokens": 11,
+                "generation_ms": 10.0,
+                "generation_tps": 100.0,
+            },
+            "choices": [{"message": {"content": "x"}}],
+        }
+        with self.assertRaises(ValueError):
+            MODULE.measurement_from_response(response, 1, 1, 1.0)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,16 @@ class QualityAbTest(unittest.TestCase):
         self.assertFalse(MODULE.equal(85.8, 85.8333333333))
 
     def test_long_case_labels_match_approximate_token_scale(self) -> None:
-        self.assertEqual([case.id for case in MODULE.long_cases()], ["needle_16k", "needle_64k"])
+        self.assertEqual(
+            [case.id for case in MODULE.long_cases()],
+            [
+                "needle_16k",
+                "needle_64k",
+                "needle_128k",
+                "needle_192k",
+                "needle_262k",
+            ],
+        )
 
 
 if __name__ == "__main__":
