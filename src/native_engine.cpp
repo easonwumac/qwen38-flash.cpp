@@ -98,8 +98,12 @@ std::uint32_t sample_token(
     MlxArray values = MlxArray::take(logits, indices)
                           .reshape(std::vector<int>{count})
                           .astype(MLX_FLOAT32);
+    MlxArray probabilities = MlxArray::take(logits.softmax_axis(-1), indices)
+                                 .reshape(std::vector<int>{count})
+                                 .astype(MLX_FLOAT32);
     eval_with_decode_state(values, state);
     const std::vector<float> candidate_values = values.to_float32();
+    const std::vector<float> candidate_probabilities = probabilities.to_float32();
     const std::vector<float> candidate_indices = indices.astype(MLX_FLOAT32).to_float32();
     std::vector<std::size_t> order(static_cast<std::size_t>(count));
     for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
@@ -109,18 +113,25 @@ std::uint32_t sample_token(
 
     const float maximum = candidate_values[order.front()];
     std::vector<double> weights(order.size());
-    double total = 0.0;
     for (std::size_t rank = 0; rank < order.size(); ++rank) {
         weights[rank] = std::exp(
             static_cast<double>(candidate_values[order[rank]] - maximum) /
             static_cast<double>(options.temperature));
-        total += weights[rank];
+    }
+    // Match mlx-vlm's ordering: nucleus filtering uses full-vocabulary,
+    // untempered probabilities, then top-k is applied, and temperature only
+    // affects the final categorical draw. A descending token survives while
+    // the probability mass strictly above it is below top_p.
+    double higher_probability = 0.0;
+    std::size_t retained_count = 0;
+    while (retained_count < weights.size() && higher_probability < options.top_p) {
+        higher_probability += candidate_probabilities[order[retained_count]];
+        ++retained_count;
     }
     double retained = 0.0;
-    std::size_t retained_count = 0;
-    do {
-        retained += weights[retained_count++];
-    } while (retained_count < weights.size() && retained / total < options.top_p);
+    for (std::size_t rank = 0; rank < retained_count; ++rank) {
+        retained += weights[rank];
+    }
     std::uniform_real_distribution<double> draw(0.0, retained);
     const double target = draw(random);
     double cumulative = 0.0;

@@ -357,14 +357,18 @@ or its entry was evicted, a later request may need to recompute the discarded
 prefix; inference arithmetic is unchanged.
 
 2026-09-14 thinking evaluation correction: do not evaluate Qwen thinking mode
-with greedy argmax. In a three-prompt IFBench pilot, temperature-zero xhigh
-thinking repeated or exhausted 4,096 tokens and scored 1/3 strict. Implementing
-bounded top-k/top-p sampling changed the matched pilot to 2/3 strict, with two
-properly separated final answers and one remaining length exhaustion. Sampled
-generation intentionally bypasses greedy MTP, history/context drafts, and the
-persistent greedy backend. Future acceleration requires stochastic speculative
-acceptance; re-enabling greedy verification for sampled requests is a rejected
-shortcut.
+with greedy argmax. The first sampled implementation was also wrong: it
+renormalized the top-20 logits before applying top-p and produced a misleading
+2/3 three-prompt result. Corrected parity with `mlx-vlm` applies top-p using
+full-vocabulary untempered probabilities, then top-k, then temperature for the
+draw. The matched REAP-288 pilot subsequently scored 0/3 with all responses
+exhausting 4,096 tokens inside thinking; corrected Niwaki 113B also scored 0/3.
+The invalid 2/3 result is retired. Sampled generation intentionally bypasses
+greedy MTP, history/context drafts, and the persistent greedy backend. Future
+acceleration requires stochastic speculative acceptance; re-enabling greedy
+verification for sampled requests is a rejected shortcut. The next quality
+gate is a bounded two-stage thinking lifecycle, not a larger run of an
+unbounded configuration.
 
 The implementation order is deliberately narrow:
 

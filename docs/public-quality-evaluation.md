@@ -95,13 +95,19 @@ draw. Because the retained MTP and persistent backends are greedy, the runtime
 automatically bypasses them for sampled requests rather than applying invalid
 speculative acceptance semantics.
 
-A three-prompt bring-up used REAP-288, xhigh thinking, temperature 1.0, top-p
-0.95, top-k 20, seed 0, maximum 4,096 generated tokens, and the same machine
-and official scorer as above. Strict and loose prompt accuracy were both 2/3.
-Two responses closed normally at 3,982 and 2,060 tokens; the third reached the
-4,096-token limit. Aggregate decode was 35.09 tok/s (per-request median 35.89,
-range 33.79--36.20). This pilot validates the sampling and response-splitting
-path; three prompts are not an estimate of full-suite accuracy.
+A three-prompt bring-up initially appeared to score 2/3, but that result is
+invalid: nucleus filtering had been applied after renormalizing the top-20
+candidates. The corrected implementation matches `mlx-vlm`'s operation order:
+full-vocabulary untempered probabilities select the nucleus, top-k bounds the
+remaining candidates, and temperature applies only to the categorical draw.
+
+Repeating the same REAP-288 xhigh pilot with temperature 1.0, top-p 0.95,
+top-k 20, seed 0, and a 4,096-token maximum scored **0/3 strict and loose**.
+Every response exhausted all 4,096 tokens without closing `</think>`; aggregate
+decode was 34.84 tok/s (per-request median 34.66, range 33.86--36.06), with a
+39.1 GiB peak footprint. The earlier 2/3 result and its throughput must not be
+used as quality evidence. The corrected run instead exposes the need for an
+explicit thinking budget and final-answer continuation.
 
 ### Niwaki 113B pilot
 
@@ -113,12 +119,19 @@ than the engine's row-major SSD format. This is therefore a clearly labelled
 hybrid, not checkpoint parity. MTP was off.
 
 The non-thinking pilot scored 0/3 strict and loose. Warm decode was 41.49 and
-42.04 tok/s after a 32.98 tok/s cold request. Sampled xhigh thinking used
-temperature 1.0, top-p 0.95, top-k 20, seed 0, and a 4,096-token maximum. All
-three requests reached EOS in 302--636 tokens and aggregate decode was 40.25
-tok/s, but their final answers omitted the requested exact keyword counts and
-also scored 0/3. The combined guarded engine session peaked at 26.6 GiB
-footprint and 26.0 GiB RSS, with 23.2 GiB minimum available memory.
+42.04 tok/s after a 32.98 tok/s cold request. The original sampled result is
+invalid because it used the incorrect top-p ordering described above. With
+corrected sampling, xhigh thinking at temperature 1.0, top-p 0.95, top-k 20,
+seed 0, and a 4,096-token maximum also scored 0/3. One request reached the
+length limit, one emitted EOS before `</think>`, and one produced a final answer
+that missed the exact constraints. Aggregate decode was 36.72 tok/s. The
+corrected-sampling session peaked at 26.8 GiB footprint and 25.2 GiB RSS, with
+16.9 GiB minimum available memory.
+
+A low-effort control closed all three thinking blocks in 335--521 tokens but
+still scored 0/3; lowering temperature to 0.6 made all three requests exhaust
+4,096 tokens. These tiny controls establish lifecycle sensitivity, not an
+accuracy estimate.
 
 A stock `mlx-vlm` 0.7.0 / MLX 0.32.2 control used the checkpoint's native
 2-bit PLE on the first prompt. Sampled xhigh thinking did not emit
@@ -127,8 +140,16 @@ reported 43.58 GB peak memory, while the external guard measured 41.3 GiB peak
 footprint. A stock non-thinking 512-token control also repeated and failed the
 keyword constraint. These controls do not prove hybrid numerical parity, but
 they show that the checkpoint itself also fails this pilot rather than exposing
-a quality result hidden by the custom engine. A full 300-prompt run is not
-justified until a larger pilot clears this gate.
+a quality result hidden by the custom engine. Tokenization of all three prompts
+is identical between the retained and Niwaki tokenizers. The 99B and 113B native
+PLE tensors are bit-identical, and sampled rows from the external Q4 PLE have
+roughly 0.90--0.93 cosine similarity with the native Q2 rows, consistent with
+the same base table at different precision. A one-token stock/native-Q2 versus
+engine/external-Q4 trace selected the same top token with logits 15.0 and
+14.875 and stayed close through all 48 layer checksums. This rules out a gross
+tokenizer, PLE, or layer-layout error, but is not full-sequence numerical parity.
+A full 300-prompt Niwaki run is not justified until a larger pilot clears this
+gate.
 
 ## Other published Qwen3.8-27B rows
 
