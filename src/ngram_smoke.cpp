@@ -19,12 +19,14 @@ int main(int argc, char** argv) {
     try {
         const qwen38::ModelManifest manifest = qwen38::ModelManifest::load(argv[1]);
         qwen38::NgramHash hash(manifest.config());
-        qwen38::NgramTable aos(manifest.directory(), hash.total_rows(), true);
-        if (!aos.uses_aos()) throw std::runtime_error("n-gram AoS table is unavailable");
+        qwen38::NgramTable table(manifest.directory(), hash.total_rows(), true);
+        if (!table.uses_aos() && !table.uses_paired_shards()) {
+            throw std::runtime_error("supported n-gram storage is unavailable");
+        }
         qwen38::NgramState state;
         const auto first_rows = hash.row_ids(9419, state);
         const auto started = std::chrono::steady_clock::now();
-        const auto first = aos.gather(first_rows);
+        const auto first = table.gather(first_rows);
         const double first_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         if (first.size() != manifest.config().ple_embedding_dimension ||
@@ -35,7 +37,7 @@ int main(int argc, char** argv) {
         }
         const auto second_rows = hash.row_ids(11, state);
         const auto second_started = std::chrono::steady_clock::now();
-        const auto second = aos.gather(second_rows);
+        const auto second = table.gather(second_rows);
         const double second_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - second_started).count();
         const bool has_fallback = std::filesystem::is_regular_file(
@@ -46,8 +48,8 @@ int main(int argc, char** argv) {
                 second != fallback.gather(second_rows)) {
                 throw std::runtime_error("AoS and safetensors n-gram rows disagree");
             }
-        } else if (first != aos.gather(first_rows) || second != aos.gather(second_rows)) {
-            throw std::runtime_error("repeated AoS n-gram reads disagree");
+        } else if (first != table.gather(first_rows) || second != table.gather(second_rows)) {
+            throw std::runtime_error("repeated n-gram reads disagree");
         }
         if (!std::all_of(second.begin(), second.end(), [](const float value) {
                 return std::isfinite(value);
@@ -56,9 +58,11 @@ int main(int argc, char** argv) {
         }
         const double first_checksum = std::accumulate(first.begin(), first.end(), 0.0);
         const double second_checksum = std::accumulate(second.begin(), second.end(), 0.0);
-        std::cout << "{\"storage\":\"aos-pread\",\"first_row\":" << first_rows.front()
+        const char* storage =
+            table.uses_paired_shards() ? "niwaki-paired-q2-mmap" : "aos-pread";
+        std::cout << "{\"storage\":\"" << storage << "\",\"first_row\":" << first_rows.front()
                   << ",\"last_row\":" << first_rows.back()
-                  << ",\"reference\":\"" << (has_fallback ? "safetensors" : "aos-repeat") << '"'
+                  << ",\"reference\":\"" << (has_fallback ? "safetensors" : "repeat") << '"'
                   << ",\"first_checksum\":" << first_checksum
                   << ",\"second_checksum\":" << second_checksum
                   << ",\"first_ms\":" << first_ms

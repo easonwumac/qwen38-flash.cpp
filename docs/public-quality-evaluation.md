@@ -173,6 +173,16 @@ tokenizer, PLE, or layer-layout error, but is not full-sequence numerical parity
 A full 300-prompt Niwaki run is not justified until a larger pilot clears this
 gate.
 
+The engine now also reads the checkpoint's native paired Q2/group-128 PLE
+directly from its 128 indexed shard tensors. An independent decoder matched two
+sampled 2,560-value gathers exactly (checksums `-0.38299560546875` and
+`-0.17431640625`). Repeating the same three-prompt bounded-thinking gate with
+that native PLE still failed every requested keyword-count constraint. Aggregate
+decode was 37.76 tok/s (36.65--38.70), and the guarded peak footprint was 26.6
+GiB. The external Q4 PLE is therefore not the cause of this pilot's quality
+failure; native Q2 changes the trajectory and costs about 5.8% throughput here,
+but does not recover instruction following.
+
 ## Other published Qwen3.8-27B rows
 
 GPQA Diamond and LiveCodeBench v6 remain pending until their full harness and

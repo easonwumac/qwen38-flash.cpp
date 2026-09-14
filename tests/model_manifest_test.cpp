@@ -80,6 +80,7 @@ void run_model_manifest_tests() {
         "ngram_size":3,"heads_per_ngram":8,"ngram_vocab_size_base":20000000,
         "make_ngram_vocab_size_divisible_by":128,"ple_embed_dim":2560,
         "ple_conv_kernel_size":4,"ple_layer_ids":[2],"eos_token_id":248044,
+        "niwaki_ple_pair":4,"niwaki_ple_quant":{"bits":2,"group_size":128},
         "layer_types":["linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
           "full_attention","linear_attention","linear_attention","linear_attention",
@@ -131,6 +132,9 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().end_of_sequence_token == 248044);
     QWEN38_CHECK(manifest.config().layer_types.at(3) == "full_attention");
     QWEN38_CHECK(manifest.config().ple_layer_ids == std::vector<std::size_t>({2}));
+    QWEN38_CHECK(manifest.config().niwaki_ple_pair == 4);
+    QWEN38_CHECK(manifest.config().niwaki_ple_bits == 2);
+    QWEN38_CHECK(manifest.config().niwaki_ple_group_size == 128);
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
     QWEN38_CHECK(manifest.has_tensor("tensor"));
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_tags"));

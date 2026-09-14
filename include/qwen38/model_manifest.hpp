@@ -63,6 +63,9 @@ struct ModelConfig {
     bool indexer_norm_has_offset{true};
     std::vector<std::size_t> shared_only_layers;
     bool niwaki_maps_unfolded{false};
+    std::size_t niwaki_ple_pair{1};
+    std::size_t niwaki_ple_bits{0};
+    std::size_t niwaki_ple_group_size{0};
 };
 
 struct QuantizationSpec {

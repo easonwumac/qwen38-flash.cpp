@@ -25,19 +25,24 @@ table. `ngram_table.bin.aos` stores each requested row contiguously, so one
 bounded `pread` retrieves its packed weights, scales, and biases without loading
 the table into RAM.
 
-### Niwaki 99B fast path
+### Niwaki fast path
 
-The engine also loads `Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx` natively:
-mixed Q3/Q4/Q8 quantization, 24 shared-only layers, BF16 output-healing maps,
-and MLX/PyTorch PLE convolution layouts are detected from the checkpoint. It can
-reuse the retained tokenizer and higher-precision SSD Q4 n-gram table without
-copying or linking either asset:
+The engine also loads the 99B and 113B Niwaki MLX checkpoints natively:
+mixed Q3/Q4/Q8 quantization, checkpoint-declared shared-only layers, BF16 output-healing maps,
+MLX/PyTorch PLE convolution layouts, and Niwaki's paired Q2 PLE shards are
+detected from the checkpoint. The paired table is dequantized directly from the
+original memory-mapped model shards, without conversion or a second weight copy.
+The retained tokenizer is still required because the Niwaki packages omit
+`merges.txt`:
 
 ```bash
 ./build/qwen38-server --model "$NIWAKI_MODEL_DIR" \
-  --tokenizer-dir "$REAP_MODEL_DIR" --ngram-table-dir "$REAP_MODEL_DIR" \
+  --tokenizer-dir "$REAP_MODEL_DIR" \
   --max-generation-tokens 4096
 ```
+
+`--ngram-table-dir "$REAP_MODEL_DIR"` remains an explicit higher-precision Q4
+PLE override for controlled comparisons.
 
 Niwaki contains no MTP tensors. When the supplied n-gram/tokenizer package also
 contains the compatible retained REAP Q8 drafter, the server detects it and
@@ -107,6 +112,7 @@ Long-context distributions below use independent cold server starts.
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
 | REAP-288 bounded-thinking IFBench pilot, 3 prompts | corrected sampled xhigh thinking; automatic 2,730-token reasoning budget within max 4,096; MTP off | **2/3 strict and loose**; all three forced a close and returned a final answer; **35.81 aggregate decode tok/s**; 39.0 GiB peak footprint |
 | Niwaki 113B bounded-thinking IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; same protocol; MTP off | **0/3 strict and loose** despite three final answers; **40.07 aggregate decode tok/s**; 26.7 GiB peak footprint |
+| Niwaki 113B native-PLE bounded-thinking pilot, 3 prompts | native paired Q2/group-128 PLE mmap + REAP tokenizer; temperature 1, top-p .95, top-k 20, seed 0, xhigh bounded thinking, 105--188 prompt tokens, max 4,096; MTP off | **0/3 explicit keyword gates**; **37.76 aggregate decode tok/s** (36.65--38.70); 26.6 GiB peak footprint |
 | Niwaki 113B stock control, first pilot prompt | stock `mlx-vlm` 0.7.0/MLX 0.32.2 and native 2-bit PLE; sampled xhigh thinking, max 4,096 | no `</think>` or final answer; 29.13 tok/s; 43.58 GB MLX peak / 41.3 GiB guarded footprint |
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |

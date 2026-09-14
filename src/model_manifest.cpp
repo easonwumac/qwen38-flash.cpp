@@ -125,6 +125,24 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     result.config_.ple_embedding_dimension = size_value(text.at("ple_embed_dim"), "ple_embed_dim");
     result.config_.ple_convolution_kernel_size = size_value(
         text.at("ple_conv_kernel_size"), "ple_conv_kernel_size");
+    if (const Json* pair = text.find("niwaki_ple_pair")) {
+        result.config_.niwaki_ple_pair = size_value(*pair, "niwaki_ple_pair");
+        const Json& quantization = text.at("niwaki_ple_quant");
+        result.config_.niwaki_ple_bits = size_value(
+            quantization.at("bits"), "niwaki_ple_quant.bits");
+        result.config_.niwaki_ple_group_size = size_value(
+            quantization.at("group_size"), "niwaki_ple_quant.group_size");
+        const std::size_t physical_dimension =
+            result.config_.niwaki_ple_pair * result.config_.ple_embedding_dimension /
+            (result.config_.heads_per_ngram * 2);
+        if (result.config_.niwaki_ple_pair < 2 ||
+            result.config_.niwaki_ple_bits < 2 || result.config_.niwaki_ple_bits > 8 ||
+            result.config_.niwaki_ple_group_size == 0 ||
+            physical_dimension % result.config_.niwaki_ple_group_size != 0 ||
+            (physical_dimension * result.config_.niwaki_ple_bits) % 32 != 0) {
+            throw std::runtime_error("unsupported Niwaki paired PLE geometry");
+        }
+    }
     if (const Json* seed = text.find("seed")) {
         result.config_.ngram_seed = size_value(*seed, "seed");
     }

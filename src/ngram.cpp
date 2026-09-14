@@ -4,7 +4,9 @@
 #include <bit>
 #include <cstring>
 #include <fcntl.h>
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <unistd.h>
 
 namespace qwen38 {
@@ -126,7 +128,12 @@ NgramTable::NgramTable(
         if (aos_fd_ < 0) throw std::runtime_error("cannot open n-gram AoS table");
         return;
     }
-    fallback_ = std::make_unique<SafetensorsFile>(model_directory / "ngram_table.bin");
+    const std::filesystem::path fallback_path = model_directory / "ngram_table.bin";
+    if (!std::filesystem::is_regular_file(fallback_path)) {
+        initialize_paired(ModelManifest::load(model_directory));
+        return;
+    }
+    fallback_ = std::make_unique<SafetensorsFile>(fallback_path);
     fallback_weight_ = fallback_->tensor("weight");
     fallback_scales_ = fallback_->tensor("scales");
     fallback_biases_ = fallback_->tensor("biases");
@@ -139,6 +146,62 @@ NgramTable::NgramTable(
         biases_shape.size() != 2 || biases_shape[0] != rows_ ||
         biases_shape[1] != scale_count_) {
         throw std::runtime_error("n-gram table geometry mismatch");
+    }
+}
+
+void NgramTable::initialize_paired(ModelManifest manifest) {
+    const ModelConfig& config = manifest.config();
+    pair_ = config.niwaki_ple_pair;
+    bits_ = config.niwaki_ple_bits;
+    group_size_ = config.niwaki_ple_group_size;
+    if (pair_ < 2 || bits_ == 0 || group_size_ == 0) {
+        throw std::runtime_error(
+            "model has neither a legacy n-gram table nor Niwaki paired PLE metadata");
+    }
+    const std::size_t physical_dimension = dimension_ * pair_;
+    if ((physical_dimension * bits_) % 32 != 0 ||
+        physical_dimension % group_size_ != 0) {
+        throw std::runtime_error("invalid Niwaki paired PLE quantization geometry");
+    }
+    packed_word_count_ = physical_dimension * bits_ / 32;
+    scale_count_ = physical_dimension / group_size_;
+    if (config.ple_layer_ids.size() != 1) {
+        throw std::runtime_error("Niwaki paired PLE requires exactly one PLE layer");
+    }
+    const std::string prefix = "language_model.model.layers." +
+        std::to_string(config.ple_layer_ids.front() - 1) +
+        ".ple.ple_embedding.ngram_embedding.shards.";
+    paired_store_ = std::make_unique<TensorStore>(std::move(manifest));
+    std::uint64_t logical_begin = 0;
+    for (std::size_t index = 0;; ++index) {
+        const std::string base = prefix + std::to_string(index);
+        if (!paired_store_->manifest().has_tensor(base + ".weight")) break;
+        TensorView weight = paired_store_->tensor(base + ".weight");
+        TensorView scales = paired_store_->tensor(base + ".scales");
+        TensorView biases = paired_store_->tensor(base + ".biases");
+        if (weight.dtype != "U32" || scales.dtype != "BF16" || biases.dtype != "BF16" ||
+            weight.shape.size() != 2 || scales.shape.size() != 2 ||
+            biases.shape.size() != 2 || weight.shape[1] != packed_word_count_ ||
+            scales.shape[0] != weight.shape[0] || biases.shape[0] != weight.shape[0] ||
+            scales.shape[1] != scale_count_ || biases.shape[1] != scale_count_) {
+            throw std::runtime_error("Niwaki paired PLE shard geometry mismatch: " + base);
+        }
+        const std::uint64_t physical_rows = weight.shape[0];
+        if (physical_rows > (std::numeric_limits<std::uint64_t>::max() - logical_begin) / pair_) {
+            throw std::runtime_error("Niwaki paired PLE row count overflow");
+        }
+        const std::uint64_t logical_end = logical_begin + physical_rows * pair_;
+        paired_shards_.push_back({
+            .logical_begin = logical_begin,
+            .logical_end = logical_end,
+            .weight = weight,
+            .scales = scales,
+            .biases = biases,
+        });
+        logical_begin = logical_end;
+    }
+    if (paired_shards_.empty() || logical_begin != rows_) {
+        throw std::runtime_error("Niwaki paired PLE total row count mismatch");
     }
 }
 
@@ -157,10 +220,42 @@ void NgramTable::decode_row(
     const std::byte* scales = packed.data() + weight_bytes;
     const std::byte* biases = scales + scale_bytes;
     for (std::size_t index = 0; index < dimension_; ++index) {
+        const std::size_t values_per_word = 32 / bits_;
         const std::uint32_t word = read_integer<std::uint32_t>(
-            packed.data() + (index / 8) * 4);
-        const std::uint32_t quantized = (word >> ((index % 8) * 4)) & 0xFU;
+            packed.data() + (index / values_per_word) * 4);
+        const std::uint32_t quantized =
+            (word >> ((index % values_per_word) * bits_)) & ((1U << bits_) - 1U);
         const std::size_t group = index / group_size_;
+        const float scale = bf16_to_float(read_integer<std::uint16_t>(scales + group * 2));
+        const float bias = bf16_to_float(read_integer<std::uint16_t>(biases + group * 2));
+        output[index] = static_cast<float>(quantized) * scale + bias;
+    }
+}
+
+void NgramTable::decode_paired_row(
+    const PairedShard& shard,
+    const std::uint64_t logical_row,
+    const std::span<float> output) const {
+    if (output.size() != dimension_ || logical_row < shard.logical_begin ||
+        logical_row >= shard.logical_end) {
+        throw std::runtime_error("invalid Niwaki paired PLE row");
+    }
+    const std::uint64_t within = logical_row - shard.logical_begin;
+    const std::size_t physical_row = static_cast<std::size_t>(within / pair_);
+    const std::size_t piece = static_cast<std::size_t>(within % pair_);
+    const std::size_t weight_bytes = packed_word_count_ * sizeof(std::uint32_t);
+    const std::size_t scale_bytes = scale_count_ * sizeof(std::uint16_t);
+    const std::byte* weights = shard.weight.bytes.data() + physical_row * weight_bytes;
+    const std::byte* scales = shard.scales.bytes.data() + physical_row * scale_bytes;
+    const std::byte* biases = shard.biases.bytes.data() + physical_row * scale_bytes;
+    const std::size_t values_per_word = 32 / bits_;
+    for (std::size_t index = 0; index < dimension_; ++index) {
+        const std::size_t column = piece * dimension_ + index;
+        const std::uint32_t word = read_integer<std::uint32_t>(
+            weights + (column / values_per_word) * sizeof(std::uint32_t));
+        const std::uint32_t quantized =
+            (word >> ((column % values_per_word) * bits_)) & ((1U << bits_) - 1U);
+        const std::size_t group = column / group_size_;
         const float scale = bf16_to_float(read_integer<std::uint16_t>(scales + group * 2));
         const float bias = bf16_to_float(read_integer<std::uint16_t>(biases + group * 2));
         output[index] = static_cast<float>(quantized) * scale + bias;
@@ -177,6 +272,21 @@ std::vector<float> NgramTable::gather(
     for (std::size_t index = 0; index < row_ids.size(); ++index) {
         if (row_ids[index] < 0 || static_cast<std::uint64_t>(row_ids[index]) >= rows_) {
             throw std::runtime_error("n-gram row index is out of range");
+        }
+        if (paired_store_ != nullptr) {
+            const std::uint64_t logical_row = static_cast<std::uint64_t>(row_ids[index]);
+            const auto shard = std::upper_bound(
+                paired_shards_.begin(), paired_shards_.end(), logical_row,
+                [](const std::uint64_t row_id, const PairedShard& candidate) {
+                    return row_id < candidate.logical_end;
+                });
+            if (shard == paired_shards_.end() || logical_row < shard->logical_begin) {
+                throw std::runtime_error("Niwaki paired PLE shard lookup failed");
+            }
+            decode_paired_row(
+                *shard, logical_row,
+                std::span<float>(result).subspan(index * dimension_, dimension_));
+            continue;
         }
         if (aos_fd_ >= 0) {
             const off_t offset = static_cast<off_t>(
