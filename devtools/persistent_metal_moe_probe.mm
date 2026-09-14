@@ -2120,13 +2120,14 @@ GdnTrajectoryResult mlx_gdn_trajectory_oracle(
 }
 
 OracleResult mlx_gdn_layer_oracle(const qwen38::ModelManifest &manifest,
-                                  std::span<const std::uint16_t> stream_values) {
+                                  std::span<const std::uint16_t> stream_values,
+                                  const std::size_t layer_index = 0) {
     setenv("QWEN38_HC_FUSED", "1", 1);
     unsetenv("QWEN38_HC_FUSED_INJECTION");
     setenv("QWEN38_GDN_PREWORK", "1", 1);
     setenv("QWEN38_GDN_NORM_GATE", "1", 1);
     qwen38::MlxTensorStore store(manifest);
-    qwen38::DecoderLayer layer(store, 0, manifest.config());
+    qwen38::DecoderLayer layer(store, layer_index, manifest.config());
     const std::array<int, 3> shape{1, 1, 10240};
     const MlxArray stream(
         mlx_array_new_data(stream_values.data(), shape.data(), 3, MLX_BFLOAT16));
@@ -2243,6 +2244,42 @@ int main(int argc, char **argv) {
                 projection(gdn_attn_hc_prefix + ".block_inject_weight");
             const std::string gdn_healing_left = gdn_mlp_prefix + ".T_delta_left";
             const std::string gdn_healing_right = gdn_mlp_prefix + ".T_delta_right";
+            const std::string shared_prefix = "language_model.model.layers.10";
+            const std::string shared_gdn_prefix = shared_prefix + ".linear_attn";
+            const auto shared_gdn_qkv = projection(shared_gdn_prefix + ".in_proj_qkv");
+            const auto shared_gdn_z = projection(shared_gdn_prefix + ".in_proj_z");
+            const auto shared_gdn_beta = projection(shared_gdn_prefix + ".in_proj_b");
+            const auto shared_gdn_decay = projection(shared_gdn_prefix + ".in_proj_a");
+            const auto shared_gdn_output = projection(shared_gdn_prefix + ".out_proj");
+            const std::string shared_gdn_convolution = shared_gdn_prefix + ".conv1d.weight";
+            const std::string shared_gdn_decay_log = shared_gdn_prefix + ".A_log";
+            const std::string shared_gdn_decay_bias = shared_gdn_prefix + ".dt_bias";
+            const std::string shared_gdn_norm = shared_gdn_prefix + ".norm.weight";
+            const std::string shared_mlp_prefix = shared_prefix + ".mlp";
+            const auto shared_only_gate =
+                projection(shared_mlp_prefix + ".shared_expert.gate_proj");
+            const auto shared_only_up = projection(shared_mlp_prefix + ".shared_expert.up_proj");
+            const auto shared_only_down =
+                projection(shared_mlp_prefix + ".shared_expert.down_proj");
+            const auto shared_only_router = projection(shared_mlp_prefix + ".shared_expert_gate");
+            const std::string shared_mlp_hc_prefix = shared_prefix + ".mlp_hyper_connection";
+            const std::string shared_mlp_hc_norm = shared_mlp_hc_prefix + ".hc_norm.weight";
+            const auto shared_mlp_hc_down =
+                projection(shared_mlp_hc_prefix + ".input_mix_weight_down");
+            const auto shared_mlp_hc_up =
+                projection(shared_mlp_hc_prefix + ".input_mix_weight_up");
+            const auto shared_mlp_hc_injection =
+                projection(shared_mlp_hc_prefix + ".block_inject_weight");
+            const std::string shared_attn_hc_prefix = shared_prefix + ".attn_hyper_connection";
+            const std::string shared_attn_hc_norm = shared_attn_hc_prefix + ".hc_norm.weight";
+            const auto shared_attn_hc_down =
+                projection(shared_attn_hc_prefix + ".input_mix_weight_down");
+            const auto shared_attn_hc_up =
+                projection(shared_attn_hc_prefix + ".input_mix_weight_up");
+            const auto shared_attn_hc_injection =
+                projection(shared_attn_hc_prefix + ".block_inject_weight");
+            const std::string shared_healing_left = shared_mlp_prefix + ".T_delta_left";
+            const std::string shared_healing_right = shared_mlp_prefix + ".T_delta_right";
             const std::string healing_left = layer_prefix + ".T_delta_left";
             const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
@@ -2310,6 +2347,10 @@ int main(int argc, char **argv) {
                 device, manifest.directory() / manifest.weight_map().at(gdn_mlp_gate.weight));
             Shard gdn_healing_shard(
                 device, manifest.directory() / manifest.weight_map().at(gdn_healing_left));
+            Shard shared_layer_shard(
+                device, manifest.directory() / manifest.weight_map().at(shared_gdn_qkv.weight));
+            Shard shared_mlp_shard(
+                device, manifest.directory() / manifest.weight_map().at(shared_only_gate.weight));
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
@@ -2754,15 +2795,21 @@ int main(int argc, char **argv) {
                         threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
                 [encoder endEncoding];
             };
-            const auto encode_gdn_block = [&](id<MTLCommandBuffer> command,
-                                              id<MTLBuffer> block_input) {
+            const auto encode_gdn_block = [&] (
+                id<MTLCommandBuffer> command, id<MTLBuffer> block_input,
+                const Shard &weight_shard, const ProjectionNames &qkv_projection,
+                const ProjectionNames &z_projection, const ProjectionNames &beta_projection,
+                const ProjectionNames &decay_projection,
+                const ProjectionNames &output_projection, const std::string &convolution_weight,
+                const std::string &decay_log, const std::string &decay_bias,
+                const std::string &norm_weight) {
                 const auto encode_projection = [&](const ProjectionNames &projection,
                                                    const std::uint32_t rows,
                                                    const NSUInteger output_offset) {
                     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
                     [encoder setComputePipelineState:q4_input_state];
                     [encoder setBuffer:block_input offset:0 atIndex:0];
-                    bind_projection(encoder, gdn_shard, projection, 1);
+                    bind_projection(encoder, weight_shard, projection, 1);
                     [encoder setBuffer:gdn_projected
                                 offset:output_offset * sizeof(std::uint16_t)
                                atIndex:4];
@@ -2771,17 +2818,17 @@ int main(int argc, char **argv) {
                             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                     [encoder endEncoding];
                 };
-                encode_projection(gdn_qkv, 10240, 0);
-                encode_projection(gdn_z, 6144, 10240);
-                encode_projection(gdn_beta, 48, 16384);
-                encode_projection(gdn_decay, 48, 16432);
+                encode_projection(qkv_projection, 10240, 0);
+                encode_projection(z_projection, 6144, 10240);
+                encode_projection(beta_projection, 48, 16384);
+                encode_projection(decay_projection, 48, 16432);
                 id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:gdn_prework_state];
                 [encoder setBuffer:gdn_projected offset:0 atIndex:0];
                 [encoder setBuffer:gdn_convolution_state offset:0 atIndex:1];
-                bind_tensor(encoder, gdn_shard, gdn_convolution, 2);
-                bind_tensor(encoder, gdn_shard, gdn_decay_log, 3);
-                bind_tensor(encoder, gdn_shard, gdn_decay_bias, 4);
+                bind_tensor(encoder, weight_shard, convolution_weight, 2);
+                bind_tensor(encoder, weight_shard, decay_log, 3);
+                bind_tensor(encoder, weight_shard, decay_bias, 4);
                 [encoder setBuffer:gdn_query_buffer offset:0 atIndex:5];
                 [encoder setBuffer:gdn_key_buffer offset:0 atIndex:6];
                 [encoder setBuffer:gdn_value_buffer offset:0 atIndex:7];
@@ -2806,7 +2853,7 @@ int main(int argc, char **argv) {
                 [encoder setComputePipelineState:gdn_norm_gate_state];
                 [encoder setBuffer:gdn_recurrent_output offset:0 atIndex:0];
                 [encoder setBuffer:gdn_projected offset:0 atIndex:1];
-                bind_tensor(encoder, gdn_shard, gdn_norm, 2);
+                bind_tensor(encoder, weight_shard, norm_weight, 2);
                 [encoder setBuffer:gdn_gated_output offset:0 atIndex:3];
                 [encoder dispatchThreadgroups:MTLSizeMake(48, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -2814,7 +2861,7 @@ int main(int argc, char **argv) {
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:gdn_output_state];
                 [encoder setBuffer:gdn_gated_output offset:0 atIndex:0];
-                bind_projection(encoder, gdn_shard, gdn_output, 1);
+                bind_projection(encoder, weight_shard, output_projection, 1);
                 [encoder setBuffer:gdn_block_output offset:0 atIndex:4];
                 [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -2898,7 +2945,9 @@ int main(int argc, char **argv) {
                 id<MTLCommandBuffer> command = [queue commandBuffer];
                 encode_hc_read(command, hc_stream, gdn_shard, gdn_attn_hc_norm,
                                gdn_attn_hc_down, gdn_attn_hc_up, gdn_attn_hc_injection);
-                encode_gdn_block(command, hc_mixed);
+                encode_gdn_block(command, hc_mixed, gdn_shard, gdn_qkv, gdn_z, gdn_beta,
+                                 gdn_decay, gdn_output, gdn_convolution, gdn_decay_log,
+                                 gdn_decay_bias, gdn_norm);
                 id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:hc_write_state];
                 [encoder setBuffer:hc_stream offset:0 atIndex:0];
@@ -2936,6 +2985,114 @@ int main(int argc, char **argv) {
             for (int iteration = 0; iteration < 31; ++iteration) {
                 evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 213));
                 gdn_layer_gpu.push_back(run_gdn_layer());
+            }
+            const auto encode_shared_only_mlp = [&](id<MTLCommandBuffer> command,
+                                                    id<MTLBuffer> stream) {
+                encode_hc_read(command, stream, shared_layer_shard, shared_mlp_hc_norm,
+                               shared_mlp_hc_down, shared_mlp_hc_up,
+                               shared_mlp_hc_injection);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:shared_gate_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, shared_mlp_shard, shared_only_gate, 1);
+                bind_projection(encoder, shared_mlp_shard, shared_only_up, 4);
+                [encoder setBuffer:shared_hidden offset:0 atIndex:7];
+                [encoder dispatchThreadgroups:MTLSizeMake(160, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:shared_router_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, shared_layer_shard, shared_only_router, 1);
+                [encoder setBuffer:shared_router_output offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:shared_down_state];
+                [encoder setBuffer:shared_hidden offset:0 atIndex:0];
+                bind_projection(encoder, shared_mlp_shard, shared_only_down, 1);
+                [encoder setBuffer:shared_router_output offset:0 atIndex:4];
+                [encoder setBuffer:full_output offset:0 atIndex:5];
+                [encoder setBuffer:full_output offset:0 atIndex:6];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:healing_left_state];
+                [encoder setBuffer:full_output offset:0 atIndex:0];
+                bind_tensor(encoder, gdn_healing_shard, shared_healing_left, 1);
+                [encoder setBuffer:healing_hidden offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(16, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:healing_right_state];
+                [encoder setBuffer:full_output offset:0 atIndex:0];
+                [encoder setBuffer:healing_hidden offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_healing_shard, shared_healing_right, 2);
+                [encoder setBuffer:stream offset:0 atIndex:3];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:4];
+                [encoder setBuffer:hc_output_stream offset:0 atIndex:5];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            };
+            const auto run_shared_gdn_layer = [&] {
+                std::memset(gdn_convolution_state.contents, 0,
+                            3 * 10240 * sizeof(std::uint16_t));
+                std::memset(gdn_recurrent_state_buffer.contents, 0,
+                            48ULL * 128 * 128 * sizeof(std::uint16_t));
+                std::memset(full_output.contents, 0, 2560 * sizeof(std::uint16_t));
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                encode_hc_read(command, hc_stream, shared_layer_shard, shared_attn_hc_norm,
+                               shared_attn_hc_down, shared_attn_hc_up,
+                               shared_attn_hc_injection);
+                encode_gdn_block(command, hc_mixed, shared_layer_shard, shared_gdn_qkv,
+                                 shared_gdn_z, shared_gdn_beta, shared_gdn_decay,
+                                 shared_gdn_output, shared_gdn_convolution,
+                                 shared_gdn_decay_log, shared_gdn_decay_bias, shared_gdn_norm);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_write_state];
+                [encoder setBuffer:hc_stream offset:0 atIndex:0];
+                [encoder setBuffer:gdn_block_output offset:0 atIndex:1];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:2];
+                [encoder setBuffer:attention_output_stream offset:0 atIndex:3];
+                [encoder dispatchThreads:MTLSizeMake(10240, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encode_shared_only_mlp(command, attention_output_stream);
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+            };
+            const double shared_gdn_layer_first_gpu = run_shared_gdn_layer();
+            const OracleResult shared_gdn_layer_oracle =
+                mlx_gdn_layer_oracle(manifest, stream_bf16, 10);
+            const auto *shared_gdn_layer_bits =
+                static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            double shared_gdn_layer_dot = 0.0, shared_gdn_layer_aa = 0.0;
+            double shared_gdn_layer_bb = 0.0, shared_gdn_layer_squared_error = 0.0;
+            double shared_gdn_layer_max_abs = 0.0;
+            for (std::size_t component = 0; component < 10240; ++component) {
+                const double actual = from_bf16(shared_gdn_layer_bits[component]);
+                const double expected = shared_gdn_layer_oracle.output[component];
+                const double delta = actual - expected;
+                shared_gdn_layer_dot += actual * expected;
+                shared_gdn_layer_aa += actual * actual;
+                shared_gdn_layer_bb += expected * expected;
+                shared_gdn_layer_squared_error += delta * delta;
+                shared_gdn_layer_max_abs =
+                    std::max(shared_gdn_layer_max_abs, std::abs(delta));
+            }
+            for (int warmup = 0; warmup < 5; ++warmup)
+                static_cast<void>(run_shared_gdn_layer());
+            std::vector<double> shared_gdn_layer_gpu;
+            for (int iteration = 0; iteration < 31; ++iteration) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 229));
+                shared_gdn_layer_gpu.push_back(run_shared_gdn_layer());
             }
 
             const auto run_attention_half = [&](const bool include_mlp,
@@ -3964,6 +4121,15 @@ int main(int argc, char **argv) {
                 << gdn_layer_trajectory_max_rmse
                 << ",\"gdn_layer_trajectory_max_abs\":"
                 << gdn_layer_trajectory_max_abs
+                << ",\"shared_gdn_layer_first_gpu_ms\":" << shared_gdn_layer_first_gpu
+                << ",\"shared_gdn_layer_gpu_median_ms\":" << median(shared_gdn_layer_gpu)
+                << ",\"shared_gdn_layer_oracle_ms\":" << shared_gdn_layer_oracle.median_ms
+                << ",\"shared_gdn_layer_cosine\":"
+                << shared_gdn_layer_dot /
+                       std::sqrt(shared_gdn_layer_aa * shared_gdn_layer_bb)
+                << ",\"shared_gdn_layer_rmse\":"
+                << std::sqrt(shared_gdn_layer_squared_error / 10240.0)
+                << ",\"shared_gdn_layer_max_abs\":" << shared_gdn_layer_max_abs
                 << ",\"gdn_projection_max_abs\":" << gdn_projection_max_abs
                 << ",\"gdn_projection_nonfinite\":[" << gdn_projection_nonfinite[0] << ','
                 << gdn_projection_nonfinite[1] << ',' << gdn_projection_nonfinite[2] << ','

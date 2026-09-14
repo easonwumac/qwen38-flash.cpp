@@ -175,9 +175,27 @@ real layers are shared-only and should avoid routed expert work. A dedicated
 shared-only layer gate and runtime integration are required before claiming the
 40 token/s target.
 
+The ninth gate replaces part of that estimate with a real shared-only GDN
+layer. The layer-10 command contains both HyperConnection halves, its complete
+persistent GDN state update, Q4/group-32 shared gate/up/down projections,
+Q8/group-64 shared router, rank-64 healing and final stream write; no absent
+routed bank is touched. Across five independent 31-sample cache-evicted
+processes, GPU medians were 0.334--0.338 ms. Complete output versus the MLX
+layer-10 oracle measured 0.999997 cosine, 7.26e-4 RMSE and 3.91e-3 maximum
+absolute error. Conditions match the preceding gates: Apple M5 Pro 64 GiB,
+actual Niwaki 99B weights, deterministic BF16 stream, zero initial GDN state,
+greedy/no-sampling and no MTP. A shared-only full-attention layer remains to be
+measured directly.
+
+Using the measured routed/shared difference as a temporary estimate for the six
+shared-only full-attention layers, the checkpoint's actual 24 routed and 24
+shared-only split projects about 21.8 ms of layer-device work, approximately
+45.9 token/s before embedding, final head and host overhead. This is useful
+headroom evidence, not an end-to-end result.
+
 The next acceptance gates are:
 
-1. validate a complete shared-only GDN and full-attention layer;
+1. validate a complete shared-only full-attention layer;
 2. integrate the persistent state and layer dispatch into the runtime;
 3. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
 4. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate.
