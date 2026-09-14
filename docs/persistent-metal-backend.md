@@ -210,6 +210,16 @@ work, or 44.8 token/s before embedding, final head and host overhead. The
 compute bound, but only runtime integration and non-layer overhead can establish
 the end-to-end result.
 
+The eleventh gate removes the developer probe as the owner of the Metal source.
+The same 29-kernel catalog is now compiled into the production `qwen38_mlx`
+library behind an exact Niwaki-99B geometry check. Its loader parsed and
+read-only-mapped all 74 files referenced by the installed model index--
+36,681,428,627 bytes of virtual file mapping--and compiled every pipeline
+without copying the weight payloads into a second host allocation. The bounded
+backend smoke reports this inventory directly. This gate establishes production
+kernel and weight ownership; model decode still uses MLX until persistent state
+handoff and layer dispatch pass the following parity gates.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;
@@ -221,4 +231,5 @@ Run the bounded primitive probe with:
 
 ```sh
 ./build-v1-all/qwen38-persistent-metal-moe-probe MODEL_DIRECTORY
+./build-v1-all/qwen38-persistent-metal-backend-smoke MODEL_DIRECTORY
 ```
