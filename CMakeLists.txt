@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.24)
 
 project(qwen38_flash_cpp VERSION 0.1.0 LANGUAGES CXX)
 
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 option(QWEN38_BUILD_TESTS "Build qwen38-flash.cpp tests" ON)
 option(QWEN38_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(QWEN38_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
@@ -169,6 +173,16 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
     target_link_libraries(qwen38-direct-q4-probe PRIVATE qwen38_mlx)
     set_target_properties(qwen38-direct-q4-probe PROPERTIES
         BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    if(APPLE)
+        add_executable(qwen38-persistent-metal-moe-probe
+            devtools/persistent_metal_moe_probe.mm)
+        target_link_libraries(qwen38-persistent-metal-moe-probe PRIVATE
+            qwen38_mlx "-framework Foundation" "-framework Metal")
+        target_compile_options(qwen38-persistent-metal-moe-probe PRIVATE -fobjc-arc)
+        target_link_options(qwen38-persistent-metal-moe-probe PRIVATE -fobjc-arc)
+        set_target_properties(qwen38-persistent-metal-moe-probe PROPERTIES
+            BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
+    endif()
     add_executable(qwen38-prefill-embedding-ab devtools/prefill_embedding_ab.cpp)
     target_link_libraries(qwen38-prefill-embedding-ab PRIVATE qwen38_mlx)
     set_target_properties(qwen38-prefill-embedding-ab PROPERTIES
