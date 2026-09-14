@@ -1,6 +1,8 @@
 #include "qwen38/ple.hpp"
 
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -34,6 +36,27 @@ MlxArray offset_norm_weight(
     return MlxArray::add(raw, ones);
 }
 
+MlxArray convolution_weight(
+    MlxArray raw,
+    const std::size_t channels,
+    const std::size_t kernel_size) {
+    const std::vector<int> pytorch_shape{
+        dimension(channels, "convolution channels"), 1,
+        dimension(kernel_size, "convolution kernel")};
+    const std::vector<int> mlx_shape{
+        dimension(channels, "convolution channels"),
+        dimension(kernel_size, "convolution kernel"), 1};
+    if (raw.shape() == pytorch_shape) return raw.swapaxes(1, 2);
+    if (raw.shape() == mlx_shape) return raw;
+    throw std::runtime_error("unsupported PLE convolution weight layout");
+}
+
+std::filesystem::path ngram_table_directory(const MlxTensorStore& tensors) {
+    const char* external = std::getenv("QWEN38_NGRAM_TABLE_DIR");
+    if (external != nullptr && *external != '\0') return external;
+    return tensors.manifest().directory();
+}
+
 } // namespace
 
 Ple::Ple(
@@ -48,7 +71,7 @@ Ple::Ple(
       group_size_(dimension(config.quantization_group_size, "quantization group size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       hash_(config),
-      table_(tensors.manifest().directory(), hash_.total_rows()),
+      table_(ngram_table_directory(tensors), hash_.total_rows()),
       key_projection_(load_projection(tensors, std::string(prefix) + ".key_proj")),
       value_projection_(load_projection(tensors, std::string(prefix) + ".value_proj")),
       norm_key_(offset_norm_weight(
@@ -63,10 +86,10 @@ Ple::Ple(
           tensors.tensor(std::string(prefix) + ".norm_conv.weight"),
           config.hyper_connection_count,
           config.hidden_size)),
-      // The converted checkpoint retains the PyTorch depthwise-convolution
-      // layout [channels, 1, kernel]. MLX conv1d consumes
-      // [output_channels, kernel, input_channels/groups].
-      convolution_weight_(tensors.tensor(std::string(prefix) + ".conv1d.weight").swapaxes(1, 2)) {
+      convolution_weight_(convolution_weight(
+          tensors.tensor(std::string(prefix) + ".conv1d.weight"),
+          config.hyper_connection_count * config.hidden_size,
+          config.ple_convolution_kernel_size)) {
     if (convolution_state_length_ != 9) {
         throw std::runtime_error("the retained PLE requires a 9-token convolution state");
     }

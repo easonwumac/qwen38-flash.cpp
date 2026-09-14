@@ -42,6 +42,17 @@ std::size_t prefill_barrier_stride() {
     return static_cast<std::size_t>(parsed);
 }
 
+std::size_t decode_barrier_stride() {
+    const char* raw = std::getenv("QWEN38_DECODE_BARRIER_STRIDE");
+    if (raw == nullptr) return 48;
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (end == raw || *end != '\0' || parsed < 1 || parsed > 48) {
+        throw std::runtime_error("decode barrier stride must be between 1 and 48");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 MlxArray concatenate_sequence_rows(const std::vector<MlxArray>& rows) {
     if (rows.empty()) throw std::runtime_error("cannot concatenate an empty model batch");
     MlxArray result = rows.front().share();
@@ -429,6 +440,7 @@ QwenModel::HiddenDecodeStep QwenModel::forward_hidden_decode_impl(
         throw std::runtime_error("model state layer count mismatch");
     }
     MlxArray stream = HyperConnection::initialize_stream(embed(token), stream_count_);
+    const std::size_t barrier_stride = decode_barrier_stride();
     for (std::size_t index = 0; index < layers_.size(); ++index) {
         const auto started = std::chrono::steady_clock::now();
         stream = layers_[index]->forward_decode(stream, token, state.layers[index]);
@@ -440,6 +452,10 @@ QwenModel::HiddenDecodeStep QwenModel::forward_hidden_decode_impl(
         if (layer_ms != nullptr) {
             layer_ms->push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count());
+        }
+        if (layer_checksums == nullptr &&
+            ((index + 1) % barrier_stride == 0 || index + 1 == layers_.size())) {
+            eval_with_decode_state(stream, state);
         }
     }
     HyperConnectionRead final = final_mixer_.read(stream);

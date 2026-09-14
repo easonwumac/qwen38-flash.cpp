@@ -117,9 +117,14 @@ HyperConnection::HyperConnection(
     norm_weight_ = MlxArray::add(raw_norm, ones);
     const char* fused_read = std::getenv("QWEN38_HC_FUSED");
     const char* fused_injection = std::getenv("QWEN38_HC_FUSED_INJECTION");
-    if (with_injection_ && injection_.quantized && fused_read != nullptr &&
+    const char* dense_injection = std::getenv("QWEN38_HC_DENSE_INJECTION");
+    const bool fused_injection_requested = fused_read != nullptr &&
         std::string_view(fused_read) == "1" && fused_injection != nullptr &&
-        std::string_view(fused_injection) == "1") {
+        std::string_view(fused_injection) == "1";
+    const bool dense_injection_requested = dense_injection != nullptr &&
+        std::string_view(dense_injection) == "1";
+    if (with_injection_ && injection_.quantized &&
+        (fused_injection_requested || dense_injection_requested)) {
         injection_dense_ = MlxArray::multiply(
             MlxArray::dequantize(
                 injection_.weight,
@@ -355,8 +360,9 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
     if (!with_injection_) {
         return {.mixed = std::move(mixed), .injection = MlxArray{}, .has_injection = false};
     }
-    MlxArray raw_injection = project(flat, injection_);
-    MlxArray scaled_injection = MlxArray::multiply(raw_injection, inv_streams);
+    MlxArray scaled_injection = fused_injection_ready_
+        ? MlxArray::matmul(flat, injection_dense_)
+        : MlxArray::multiply(project(flat, injection_), inv_streams);
     MlxArray injection_gate = scaled_injection.sigmoid();
     MlxArray two = scalar_like(2.0F, injection_gate.dtype());
     MlxArray doubled = MlxArray::multiply(injection_gate, two);

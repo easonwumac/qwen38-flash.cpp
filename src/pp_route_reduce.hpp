@@ -6,6 +6,29 @@
 
 namespace qwen38 {
 
+inline MlxArray pp_inverse_permutation(const MlxArray& order) {
+    if ((order.dtype() != MLX_INT32 && order.dtype() != MLX_UINT32) ||
+        order.size() == 0 || order.size() > 10240) {
+        throw std::runtime_error("invalid PP permutation geometry");
+    }
+    static const MlxMetalKernel kernel(
+        "qwen38_pp_inverse_permutation", std::array<const char*, 1>{"order"},
+        "inverse", R"metal(
+        const uint i = thread_position_in_grid.x;
+        if (i >= N) return;
+        inverse[order[i]] = int(i);
+        )metal", "#include <metal_stdlib>\nusing namespace metal;\n");
+    const std::array<const MlxArray*, 1> inputs{&order};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = order.shape(), .dtype = order.dtype()}}};
+    const std::array<MlxMetalIntTemplate, 1> ints{{
+        {.name = "N", .value = static_cast<int>(order.size())}}};
+    return std::move(kernel.apply(
+        inputs, outputs,
+        std::array<int, 3>{static_cast<int>(order.size()), 1, 1},
+        std::array<int, 3>{256, 1, 1}, {}, ints).front());
+}
+
 // MLX Sigmoid formula (Apple Inc., MIT), with both BF16 multiplication
 // boundaries retained. PP-only candidate: no sigmoid/activated global arrays.
 inline MlxArray pp_swiglu(const MlxArray& gate, const MlxArray& up) {

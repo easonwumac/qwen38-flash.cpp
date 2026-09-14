@@ -34,6 +34,9 @@ int main(int argc, char** argv) {
                   << ",\"max_context_tokens\":" << config.max_context_tokens
                   << ",\"quantization_bits\":" << config.quantization_bits
                   << ",\"quantization_group_size\":" << config.quantization_group_size
+                  << ",\"shared_only_layers\":" << config.shared_only_layers.size()
+                  << ",\"mlp_output_maps\":"
+                  << (config.niwaki_maps_unfolded ? "true" : "false")
                   << ",\"mtp_layers\":" << config.mtp_layer_count
                   << ",\"indexed_tensors\":" << manifest.weight_map().size()
                   << ",\"declared_weight_bytes\":" << manifest.declared_weight_bytes();

@@ -57,6 +57,16 @@ int main() {
             std::array<int, 3>{1, rows, topk}).astype(MLX_BFLOAT16);
         const auto order = qwen38::MlxArray::from_int32(permutation,
             std::array<int, 1>{slots});
+        std::vector<float> expected_inverse(static_cast<std::size_t>(slots));
+        for (int index = 0; index < slots; ++index) {
+            expected_inverse[static_cast<std::size_t>(permutation[index])] =
+                static_cast<float>(index);
+        }
+        if (qwen38::pp_inverse_permutation(order).astype(MLX_FLOAT32).to_float32() !=
+            expected_inverse) {
+            std::cerr << "PP inverse permutation differs from stock inverse\n";
+            return 1;
+        }
         if (qwen38::MlxArray::multiply(down.silu(), down).astype(MLX_FLOAT32).to_float32() !=
             qwen38::pp_swiglu(down, down).astype(MLX_FLOAT32).to_float32()) {
             std::cerr << "PP SwiGLU differs from stock BF16 output\n";

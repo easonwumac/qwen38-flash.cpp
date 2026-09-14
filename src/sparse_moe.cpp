@@ -299,29 +299,36 @@ SparseMoe::SparseMoe(
     : layer_index_(layer_index(prefix)),
       expert_count_(expert_count),
       experts_per_token_(effective_experts_per_token(prefix, experts_per_token)),
-      group_size_(checked_int(quantization_group_size, "quantization_group_size")),
+      group_size_(checked_int(
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".switch_mlp.gate_proj").group_size,
+          "expert quantization group_size")),
       normalize_topk_probability_(normalize_topk_probability),
       paged_store_(tensors.paged() ? &tensors : nullptr),
       prefix_(prefix),
-      router_weight_(tensors.tensor(std::string(prefix) + ".gate.weight")),
-      expert_gate_(tensors.paged() ? QuantizedProjection{} : load_projection(
-          tensors, std::string(prefix) + ".switch_mlp.gate_proj", quantization_group_size)),
-      expert_up_(tensors.paged() ? QuantizedProjection{} : load_projection(
-          tensors, std::string(prefix) + ".switch_mlp.up_proj", quantization_group_size)),
-      expert_down_(tensors.paged() ? QuantizedProjection{} : load_projection(
-          tensors, std::string(prefix) + ".switch_mlp.down_proj", quantization_group_size)),
+      has_routed_(tensors.manifest().has_tensor(
+          std::string(prefix) + ".switch_mlp.gate_proj.weight")),
+      router_(load_linear(tensors, std::string(prefix) + ".gate")),
+      expert_gate_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.gate_proj")),
+      expert_up_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.up_proj")),
+      expert_down_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+          tensors, std::string(prefix) + ".switch_mlp.down_proj")),
       shared_gate_(load_projection(
-          tensors, std::string(prefix) + ".shared_expert.gate_proj", quantization_group_size)),
+          tensors, std::string(prefix) + ".shared_expert.gate_proj")),
       shared_up_(load_projection(
-          tensors, std::string(prefix) + ".shared_expert.up_proj", quantization_group_size)),
+          tensors, std::string(prefix) + ".shared_expert.up_proj")),
       shared_down_(load_projection(
-          tensors, std::string(prefix) + ".shared_expert.down_proj", quantization_group_size)),
-      shared_router_weight_(tensors.tensor(std::string(prefix) + ".shared_expert_gate.weight")) {
+          tensors, std::string(prefix) + ".shared_expert.down_proj")),
+      shared_router_(load_linear(tensors, std::string(prefix) + ".shared_expert_gate")) {
     static_cast<void>(checked_int(quantization_bits, "quantization_bits"));
+    static_cast<void>(checked_int(quantization_group_size, "quantization_group_size"));
     static_cast<void>(checked_int(expert_count_, "expert_count"));
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
     }
+    if (!has_routed_) return;
     if (paged_store_) {
         if (experts_per_token_ != experts_per_token || compact_qmeta_requested_bits() != 0)
             throw std::runtime_error("paged probe preserves original experts and affine metadata");
@@ -352,7 +359,7 @@ SparseMoe::SparseMoe(
          experts_per_token_ == 10) &&
         expert_gate_.bits == expert_up_.bits && expert_gate_.bits == expert_down_.bits &&
         (expert_gate_.bits == 4 || expert_gate_.bits == 8) &&
-        group_size_ == 64) {
+        expert_gate_.group_size == 64) {
         if (expert_gate_.bits == 8) {
             fused_q8_exact_ = q8_exact == nullptr || std::string_view(q8_exact) != "0";
             if (fused_q8_exact_) {
@@ -368,13 +375,16 @@ SparseMoe::SparseMoe(
 
 SparseMoe::QuantizedProjection SparseMoe::load_projection(
     MlxTensorStore& tensors,
-    const std::string_view name,
-    const std::size_t group_size) {
+    const std::string_view name) {
     const std::string base(name);
     MlxArray weight = tensors.tensor(base + ".weight");
     MlxArray scales = tensors.tensor(base + ".scales");
+    const QuantizationSpec quantization = tensors.manifest().quantization_for(base);
     const int bits = infer_affine_quantization_bits(
-        weight.shape(), scales.shape(), group_size, "MoE");
+        weight.shape(), scales.shape(), quantization.group_size, "MoE");
+    if (bits != static_cast<int>(quantization.bits)) {
+        throw std::runtime_error("MoE tensor disagrees with quantization metadata for " + base);
+    }
     CompactQmeta qmeta;
     const int requested_qmeta_bits = compact_qmeta_requested_bits();
     const std::string suffix = ".qmeta" + std::to_string(requested_qmeta_bits);
@@ -413,7 +423,29 @@ SparseMoe::QuantizedProjection SparseMoe::load_projection(
         .biases = tensors.tensor(base + ".biases"),
         .qmeta = std::move(qmeta),
         .bits = bits,
+        .group_size = checked_int(quantization.group_size, "MoE projection group_size"),
     };
+}
+
+SparseMoe::LinearProjection SparseMoe::load_linear(
+    MlxTensorStore& tensors,
+    const std::string_view name) {
+    const std::string base(name);
+    LinearProjection projection;
+    projection.weight = tensors.tensor(base + ".weight");
+    if (!tensors.manifest().has_tensor(base + ".scales")) return projection;
+    const QuantizationSpec quantization = tensors.manifest().quantization_for(base);
+    projection.scales = tensors.tensor(base + ".scales");
+    projection.biases = tensors.tensor(base + ".biases");
+    const int group_size = checked_int(quantization.group_size, "linear group_size");
+    projection.bits = infer_affine_quantization_bits(
+        projection.weight.shape(), projection.scales.shape(), quantization.group_size, "linear");
+    if (projection.bits != static_cast<int>(quantization.bits)) {
+        throw std::runtime_error("linear tensor disagrees with quantization metadata for " + base);
+    }
+    projection.group_size = group_size;
+    projection.quantized = true;
+    return projection;
 }
 
 void SparseMoe::make_resident(QuantizedProjection& projection) {
@@ -563,7 +595,18 @@ MlxArray SparseMoe::project(
     const QuantizedProjection& projection) const {
     return MlxArray::quantized_matmul(
         input, projection.weight, projection.scales, projection.biases,
-        group_size_, projection.bits);
+        projection.group_size, projection.bits);
+}
+
+MlxArray SparseMoe::project_linear(
+    const MlxArray& input,
+    const LinearProjection& projection) {
+    if (!projection.quantized) {
+        return MlxArray::matmul(input, projection.weight.transpose());
+    }
+    return MlxArray::quantized_matmul(
+        input, projection.weight, projection.scales, projection.biases,
+        projection.group_size, projection.bits);
 }
 
 MlxArray SparseMoe::project_expert(
@@ -578,7 +621,7 @@ MlxArray SparseMoe::project_expert(
     const MlxArray scales = MlxArray::take_axis(projection.scales, index, 0);
     const MlxArray biases = MlxArray::take_axis(projection.biases, index, 0);
     return MlxArray::quantized_matmul(
-        input, weight, scales, biases, group_size_, projection.bits);
+        input, weight, scales, biases, projection.group_size, projection.bits);
 }
 
 RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
@@ -586,7 +629,7 @@ RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
     if (shape.size() != 3 || shape[0] != 1 || shape[1] != 1) {
         throw std::runtime_error("decode router requires input shape [1,1,hidden]");
     }
-    MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
+    MlxArray logits = project_linear(input, router_);
     const std::vector<float> values = logits.astype(MLX_FLOAT32).to_float32();
     if (values.size() != expert_count_) throw std::runtime_error("router width mismatch");
     const float maximum = *std::max_element(values.begin(), values.end());
@@ -632,7 +675,7 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
         MlxArray weights;
         const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
         if (device_router != nullptr && std::string_view(device_router) == "1") {
-            MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
+            MlxArray logits = project_linear(input, router_);
             const bool use_selected_softmax =
                 selected_softmax_router_enabled(normalize_topk_probability_);
             MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -728,8 +771,7 @@ MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
     MlxArray shared_up = project(input, shared_up_);
     MlxArray shared_hidden = MlxArray::multiply(shared_gate, shared_up);
     MlxArray shared_output = project(shared_hidden, shared_down_);
-    MlxArray shared_router = MlxArray::matmul(
-        input, shared_router_weight_.transpose()).sigmoid();
+    MlxArray shared_router = project_linear(input, shared_router_).sigmoid();
     return MlxArray::multiply(shared_output, shared_router);
 }
 
@@ -941,6 +983,7 @@ MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
+    if (!has_routed_) return forward_shared(input);
     if (paged_store_) return forward_paged(input);
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
@@ -967,6 +1010,7 @@ MlxArray SparseMoe::forward_verify_profiled(
 MlxArray SparseMoe::forward_verify_impl(
     const MlxArray& input,
     MoeVerifyTimings* timings) const {
+    if (!has_routed_) return forward_shared(input);
     if (paged_store_) return forward_paged(input);
     using Clock = std::chrono::steady_clock;
     const auto elapsed_ms = [](const Clock::time_point started) {
@@ -988,7 +1032,7 @@ MlxArray SparseMoe::forward_verify_impl(
         std::string_view(device_router) == "1") {
         const int rows = shape[1];
         const auto routing_started = Clock::now();
-        MlxArray logits = MlxArray::matmul(input, router_weight_.transpose());
+        MlxArray logits = project_linear(input, router_);
         const bool use_selected_softmax =
             selected_softmax_router_enabled(normalize_topk_probability_);
         MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1184,6 +1228,7 @@ MlxArray SparseMoe::forward_prefill_profiled(
 MlxArray SparseMoe::forward_prefill_impl(
     const MlxArray& input,
     MoePrefillTimings* timings) const {
+    if (!has_routed_) return forward_shared(input);
     if (paged_store_) return forward_paged(input);
     using Clock = std::chrono::steady_clock;
     const auto elapsed_ms = [](const Clock::time_point started) {
@@ -1209,7 +1254,7 @@ MlxArray SparseMoe::forward_prefill_impl(
     const int top_k = checked_int(experts_per_token_, "experts_per_token");
     const int slots = rows * top_k;
     const auto routing_started = Clock::now();
-    MlxArray gates = MlxArray::matmul(input, router_weight_.transpose()).softmax_axis(-1);
+    MlxArray gates = project_linear(input, router_).softmax_axis(-1);
     MlxArray partition = gates.argpartition_axis(-top_k, -1);
     const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - top_k};
     const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};
@@ -1223,7 +1268,11 @@ MlxArray SparseMoe::forward_prefill_impl(
 
     MlxArray flat_experts = selected.reshape(std::vector<int>{slots});
     MlxArray order = flat_experts.argsort_axis(0);
-    MlxArray inverse_order = order.argsort_axis(0);
+    const char* inverse_candidate = std::getenv("QWEN38_PP_INVERSE_PERMUTE");
+    MlxArray inverse_order = inverse_candidate != nullptr &&
+        std::string_view(inverse_candidate) == "1"
+        ? pp_inverse_permutation(order)
+        : order.argsort_axis(0);
     MlxArray sorted_experts = MlxArray::take_axis(flat_experts, order, 0);
     const std::array<std::int32_t, 1> divisor_value{top_k};
     const std::array<int, 0> scalar_shape{};

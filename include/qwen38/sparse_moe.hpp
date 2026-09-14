@@ -83,16 +83,31 @@ private:
         mutable DecodedQmeta cached_qmeta;
         mutable bool qmeta_cached{false};
         int bits{0};
+        int group_size{0};
+    };
+
+    struct LinearProjection {
+        MlxArray weight;
+        MlxArray scales;
+        MlxArray biases;
+        int bits{0};
+        int group_size{0};
+        bool quantized{false};
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
-        std::string_view name,
-        std::size_t group_size);
+        std::string_view name);
+    [[nodiscard]] static LinearProjection load_linear(
+        MlxTensorStore& tensors,
+        std::string_view name);
     static void make_resident(QuantizedProjection& projection);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
+    [[nodiscard]] static MlxArray project_linear(
+        const MlxArray& input,
+        const LinearProjection& projection);
     [[nodiscard]] MlxArray project_expert(
         const MlxArray& input,
         const QuantizedProjection& projection,
@@ -121,14 +136,15 @@ private:
     bool normalize_topk_probability_;
     MlxTensorStore* paged_store_;
     std::string prefix_;
-    MlxArray router_weight_;
+    bool has_routed_{true};
+    LinearProjection router_;
     QuantizedProjection expert_gate_;
     QuantizedProjection expert_up_;
     QuantizedProjection expert_down_;
     QuantizedProjection shared_gate_;
     QuantizedProjection shared_up_;
     QuantizedProjection shared_down_;
-    MlxArray shared_router_weight_;
+    LinearProjection shared_router_;
     std::shared_ptr<MlxMetalKernel> fused_gate_up_;
     std::shared_ptr<MlxMetalKernel> fused_down_;
     bool fused_q8_exact_{false};

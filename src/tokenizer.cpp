@@ -219,6 +219,11 @@ std::string pair_key(const std::string_view left, const std::string_view right) 
 
 Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
     Tokenizer result;
+    const char* external_directory = std::getenv("QWEN38_TOKENIZER_DIR");
+    const std::filesystem::path tokenizer_directory =
+        external_directory != nullptr && *external_directory != '\0'
+        ? std::filesystem::path(external_directory)
+        : model_directory;
 
     std::vector<std::uint32_t> visible;
     for (std::uint32_t value = 33; value <= 126; ++value) visible.push_back(value);
@@ -233,7 +238,7 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
         result.symbol_to_byte_.emplace(symbol, static_cast<std::uint8_t>(byte));
     }
 
-    const Json vocabulary = Json::parse(read_text(model_directory / "vocab.json"));
+    const Json vocabulary = Json::parse(read_text(tokenizer_directory / "vocab.json"));
     std::size_t maximum_id = 0;
     for (const auto& [token, id_value] : vocabulary.as_object()) {
         const std::int64_t id = id_value.as_integer();
@@ -247,7 +252,7 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
     result.id_to_token_.resize(maximum_id + 1);
     for (const auto& [token, id] : result.token_to_id_) result.id_to_token_[id] = token;
 
-    std::istringstream merges(read_text(model_directory / "merges.txt"));
+    std::istringstream merges(read_text(tokenizer_directory / "merges.txt"));
     std::string line;
     std::uint32_t rank = 0;
     while (std::getline(merges, line)) {
@@ -261,7 +266,8 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
             std::string_view(line).substr(separator + 1)), rank++);
     }
 
-    const Json tokenizer_config = Json::parse(read_text(model_directory / "tokenizer_config.json"));
+    const Json tokenizer_config = Json::parse(
+        read_text(tokenizer_directory / "tokenizer_config.json"));
     for (const auto& [id_text, description] : tokenizer_config.at("added_tokens_decoder").as_object()) {
         std::uint32_t id = 0;
         const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);

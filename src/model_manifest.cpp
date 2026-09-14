@@ -162,6 +162,36 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     result.config_.quantization_bits = size_value(quantization->at("bits"), "quantization.bits");
     result.config_.quantization_group_size = size_value(
         quantization->at("group_size"), "quantization.group_size");
+    for (const auto& [module, value] : quantization->as_object()) {
+        if (!value.is_object()) continue;
+        const Json* bits = value.find("bits");
+        const Json* group_size = value.find("group_size");
+        if (bits == nullptr || group_size == nullptr) continue;
+        const QuantizationSpec spec{
+            .bits = size_value(*bits, "quantization override bits"),
+            .group_size = size_value(*group_size, "quantization override group_size"),
+        };
+        if (spec.bits < 2 || spec.bits > 8 || spec.group_size == 0) {
+            throw std::runtime_error("invalid quantization override for " + module);
+        }
+        result.quantization_overrides_.emplace(module, spec);
+    }
+
+    if (const Json* niwaki = root.find("niwaki")) {
+        if (const Json* maps = niwaki->find("maps_unfolded")) {
+            result.config_.niwaki_maps_unfolded = maps->as_boolean();
+        }
+        if (const Json* layers = niwaki->find("shared_only_layers")) {
+            std::unordered_set<std::size_t> seen;
+            for (const Json& layer : layers->as_array()) {
+                const std::size_t index = size_value(layer, "niwaki.shared_only_layers");
+                if (index >= result.config_.layer_count || !seen.insert(index).second) {
+                    throw std::runtime_error("invalid Niwaki shared-only layer index");
+                }
+                result.config_.shared_only_layers.push_back(index);
+            }
+        }
+    }
 
     const Json index = Json::parse(read_text(result.directory_ / "model.safetensors.index.json"));
     const std::int64_t declared_weight_bytes = index.at("metadata").at("total_size").as_integer();
@@ -211,6 +241,15 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         }
     }
     return result;
+}
+
+QuantizationSpec ModelManifest::quantization_for(const std::string_view module) const {
+    const auto found = quantization_overrides_.find(std::string(module));
+    if (found != quantization_overrides_.end()) return found->second;
+    return {
+        .bits = config_.quantization_bits,
+        .group_size = config_.quantization_group_size,
+    };
 }
 
 TensorView TensorStore::tensor(const std::string_view name) {

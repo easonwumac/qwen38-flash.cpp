@@ -24,6 +24,30 @@ table. `ngram_table.bin.aos` stores each requested row contiguously, so one
 bounded `pread` retrieves its packed weights, scales, and biases without loading
 the table into RAM.
 
+### Niwaki 99B candidate
+
+The engine also loads `Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx` natively:
+mixed Q3/Q4/Q8 quantization, 24 shared-only layers, BF16 output-healing maps,
+and MLX/PyTorch PLE convolution layouts are detected from the checkpoint. It can
+reuse the retained tokenizer and higher-precision SSD Q4 n-gram table without
+copying or linking either asset:
+
+```bash
+./build/qwen38-server --model "$NIWAKI_MODEL_DIR" \
+  --tokenizer-dir "$REAP_MODEL_DIR" --ngram-table-dir "$REAP_MODEL_DIR" \
+  --profile speed --mtp-depth off
+```
+
+Directional single-run results on the same M5 Pro 64 GiB Mac were 34.81 tok/s
+steady short decode with the dense-injection candidate, and 600.45 PP tok/s for
+an 8,192-token developer corpus with 1,024-row chunks. Short-model footprint was
+20.9 GiB. At 131,140 tokens, Q8 KV plus a 64-row raw-QSA window used 20.6 GiB RSS
+and produced 12.44 tok/s with the full 2,048-token decode attention budget; the
+remaining 32--35 tok/s long-context target still requires the planned QSA/Metal
+backend work. These are performance/capacity probes, not a Niwaki quality or
+needle-retrieval qualification. Full conditions are in
+[the Niwaki 99B bring-up report](docs/niwaki-99b-bringup.md).
+
 ## What improved
 
 - **Layer-major batched execution:** wide prompt and verifier rows pass through

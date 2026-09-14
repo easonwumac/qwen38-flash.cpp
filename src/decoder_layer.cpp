@@ -153,6 +153,10 @@ DecoderLayer::DecoderLayer(
         config.ple_layer_ids.end()) {
         ple_ = std::make_unique<Ple>(tensors, prefix + ".ple", config);
     }
+    if (config.niwaki_maps_unfolded) {
+        mlp_output_map_ = tensors.tensor(prefix + ".mlp.T");
+        has_mlp_output_map_ = true;
+    }
 }
 
 DecoderLayer::~DecoderLayer() {
@@ -165,6 +169,12 @@ void DecoderLayer::set_prefill_qmeta_cache_allowed(const bool allowed) const noe
 
 bool DecoderLayer::clear_prefill_qmeta_cache() const {
     return mlp_.clear_prefill_qmeta_cache();
+}
+
+MlxArray DecoderLayer::apply_mlp_output_map(MlxArray output) const {
+    if (!has_mlp_output_map_) return output;
+    const mlx_dtype dtype = output.dtype();
+    return MlxArray::matmul(output.astype(MLX_BFLOAT16), mlp_output_map_).astype(dtype);
 }
 
 void DecoderLayer::materialize_speculative_state(DecoderLayerState& state) const {
@@ -236,7 +246,7 @@ std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
         attention_streams, concatenate_rows(attention_outputs), attention.injection);
 
     HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention);
-    MlxArray mlp_outputs = mlp_.forward_verify(mlp.mixed);
+    MlxArray mlp_outputs = apply_mlp_output_map(mlp_.forward_verify(mlp.mixed));
     MlxArray output = mlp_hyper_connection_.write(
         post_attention, mlp_outputs, mlp.injection);
     std::vector<MlxArray> result;
@@ -296,7 +306,7 @@ MlxArray DecoderLayer::forward_prefill(
     MlxArray post_attention = attention_hyper_connection_.write(
         stream_batch, attention_output, attention.injection);
     HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention);
-    MlxArray mlp_output = mlp_.forward_prefill(mlp.mixed);
+    MlxArray mlp_output = apply_mlp_output_map(mlp_.forward_prefill(mlp.mixed));
     return mlp_hyper_connection_.write(
         post_attention, mlp_output, mlp.injection);
 }
@@ -340,7 +350,7 @@ MlxArray DecoderLayer::forward_decode_graph(
     }
 
     HyperConnectionRead mlp = mlp_hyper_connection_.read(stream);
-    MlxArray mlp_output = mlp_.forward_decode(mlp.mixed);
+    MlxArray mlp_output = apply_mlp_output_map(mlp_.forward_decode(mlp.mixed));
     if (trace != nullptr) {
         const std::vector<int> zero_shape{1};
         trace->mlp_mixed = MlxArray::add(

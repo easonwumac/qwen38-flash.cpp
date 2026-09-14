@@ -61,6 +61,13 @@ struct ModelConfig {
     std::vector<std::size_t> ple_layer_ids;
     bool attention_norm_has_offset{true};
     bool indexer_norm_has_offset{true};
+    std::vector<std::size_t> shared_only_layers;
+    bool niwaki_maps_unfolded{false};
+};
+
+struct QuantizationSpec {
+    std::size_t bits{0};
+    std::size_t group_size{0};
 };
 
 class ModelManifest final {
@@ -75,12 +82,14 @@ public:
     [[nodiscard]] bool has_tensor(std::string_view name) const {
         return weight_map_.contains(std::string(name));
     }
+    [[nodiscard]] QuantizationSpec quantization_for(std::string_view module) const;
     [[nodiscard]] std::uint64_t declared_weight_bytes() const noexcept { return declared_weight_bytes_; }
 
 private:
     std::filesystem::path directory_;
     ModelConfig config_;
     std::unordered_map<std::string, std::string> weight_map_;
+    std::unordered_map<std::string, QuantizationSpec> quantization_overrides_;
     std::uint64_t declared_weight_bytes_{0};
 };
 

@@ -26,6 +26,21 @@ std::string read_file(const std::filesystem::path &path) {
     return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 
+std::string repeated_prompt(const std::filesystem::path& path) {
+    const std::string source = read_file(path);
+    const char* configured = std::getenv("QWEN38_PROMPT_REPEAT");
+    if (configured == nullptr) return source;
+    char* end = nullptr;
+    const unsigned long repeat = std::strtoul(configured, &end, 10);
+    if (end == configured || *end != '\0' || repeat < 1 || repeat > 16) {
+        throw std::runtime_error("QWEN38_PROMPT_REPEAT must be between 1 and 16");
+    }
+    std::string result;
+    result.reserve(source.size() * repeat);
+    for (unsigned long index = 0; index < repeat; ++index) result.append(source);
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -53,7 +68,7 @@ int main(int argc, char **argv) {
         options.enable_thinking = false;
         const std::string rendered = qwen38::render_chat_prompt(
             {
-                {qwen38::ChatRole::user, read_file(argv[2]), std::nullopt},
+                {qwen38::ChatRole::user, repeated_prompt(argv[2]), std::nullopt},
             },
             options);
         const qwen38::Tokenizer tokenizer = qwen38::Tokenizer::load(model_path);

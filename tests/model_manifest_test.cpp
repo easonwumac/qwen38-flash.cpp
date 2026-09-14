@@ -59,7 +59,10 @@ void run_model_manifest_tests() {
     write_file(directory / "config.json", R"({
       "architectures":["Qwen4ExpForConditionalGeneration"],
       "model_type":"qwen4_exp",
-      "quantization":{"bits":4,"group_size":64},
+      "quantization":{"bits":4,"group_size":64,
+        "language_model.model.layers.0.mlp.switch_mlp.gate_proj":{
+          "bits":3,"group_size":64,"mode":"affine"}},
+      "niwaki":{"shared_only_layers":[10,11],"maps_unfolded":true},
       "text_config":{
         "model_type":"qwen4_exp_text","hidden_size":2560,
         "num_hidden_layers":48,"num_experts":288,"num_experts_per_tok":10,
@@ -106,6 +109,12 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().expert_count == 288);
     QWEN38_CHECK(manifest.config().max_context_tokens == 262144);
     QWEN38_CHECK(manifest.config().quantization_bits == 4);
+    QWEN38_CHECK(manifest.quantization_for(
+        "language_model.model.layers.0.mlp.switch_mlp.gate_proj").bits == 3);
+    QWEN38_CHECK(manifest.quantization_for("unlisted").group_size == 64);
+    QWEN38_CHECK(manifest.config().shared_only_layers ==
+        std::vector<std::size_t>({10, 11}));
+    QWEN38_CHECK(manifest.config().niwaki_maps_unfolded);
     QWEN38_CHECK(manifest.config().hyper_connection_count == 4);
     QWEN38_CHECK(manifest.config().indexer_head_count == 4);
     QWEN38_CHECK(manifest.config().indexer_key_value_head_count == 1);

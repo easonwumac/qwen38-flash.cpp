@@ -33,6 +33,7 @@ void print_usage(const char* program) {
     std::cout
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
+        << " [--ngram-table-dir PATH] [--tokenizer-dir PATH]"
         << " [--profile safe|speed|turbo|latency|long-context|memory]"
         << " [--prefill-chunk 1..1024] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
@@ -126,6 +127,8 @@ int main(int argc, char** argv) {
         std::size_t kv_q8_min_tokens = 65536;
         std::size_t kv_q8_flush_tokens = 8192;
         std::optional<std::string> model_path;
+        std::optional<std::string> ngram_table_directory;
+        std::optional<std::string> tokenizer_directory;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
             if (argument == "--help" || argument == "-h") {
@@ -133,6 +136,7 @@ int main(int argc, char** argv) {
                 return EXIT_SUCCESS;
             }
             if ((argument == "--host" || argument == "--port" || argument == "--model" ||
+                 argument == "--ngram-table-dir" || argument == "--tokenizer-dir" ||
                  argument == "--mtp-depth" || argument == "--prefill-chunk" ||
                  argument == "--prefix-cache-tokens" ||
                  argument == "--qmeta-cache-max-prompt-tokens" ||
@@ -155,6 +159,10 @@ int main(int argc, char** argv) {
                 config.port = parse_port(argv[++i]);
             } else if (argument == "--model") {
                 model_path = argv[++i];
+            } else if (argument == "--ngram-table-dir") {
+                ngram_table_directory = argv[++i];
+            } else if (argument == "--tokenizer-dir") {
+                tokenizer_directory = argv[++i];
             } else if (argument == "--profile") {
                 profile = argv[++i];
             } else if (argument == "--mtp-depth") {
@@ -229,6 +237,14 @@ int main(int argc, char** argv) {
         }
         const qwen38::RuntimeProfileConfig profile_config =
             qwen38::runtime_profile_config(profile);
+        if (ngram_table_directory.has_value() &&
+            setenv("QWEN38_NGRAM_TABLE_DIR", ngram_table_directory->c_str(), 1) != 0) {
+            throw std::runtime_error("cannot configure external n-gram table directory");
+        }
+        if (tokenizer_directory.has_value() &&
+            setenv("QWEN38_TOKENIZER_DIR", tokenizer_directory->c_str(), 1) != 0) {
+            throw std::runtime_error("cannot configure external tokenizer directory");
+        }
         if (!allocator_cache_explicit) {
             allocator_cache_limit_bytes =
                 profile_config.allocator_cache_mib * 1024ULL * 1024ULL;

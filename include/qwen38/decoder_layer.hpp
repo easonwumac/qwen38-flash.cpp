@@ -85,6 +85,7 @@ private:
     [[nodiscard]] MlxArray apply_compiled(
         const MlxArray& stream,
         DecoderLayerState& state) const;
+    [[nodiscard]] MlxArray apply_mlp_output_map(MlxArray output) const;
     static int compile_callback(
         mlx_vector_array* outputs,
         mlx_vector_array inputs,
@@ -97,6 +98,8 @@ private:
     std::unique_ptr<SelfAttention> full_attention_;
     std::unique_ptr<Ple> ple_;
     SparseMoe mlp_;
+    bool has_mlp_output_map_{false};
+    MlxArray mlp_output_map_;
     mutable std::once_flag compile_once_;
     mutable mlx_closure compiled_{};
 };
