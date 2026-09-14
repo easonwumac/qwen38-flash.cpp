@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "qwen38/hyper_connection.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
 #include "qwen38/sparse_moe.hpp"
@@ -384,6 +385,139 @@ kernel void select_top10(
     for (uint slot = 0; slot < 10; ++slot)
         weights[slot] = bfloat(metal::exp(selected[slot] - selected[0]) / denominator);
 }
+
+kernel void hc_normalize(
+    const device bfloat* stream [[buffer(0)]], const device bfloat* norm [[buffer(1)]],
+    device bfloat* normalized [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint hc [[threadgroup_position_in_grid]]) {
+    threadgroup float partial[8];
+    float values[10];
+    float square_sum = 0.0f;
+    const uint base = hc * 2560;
+    for (uint i = 0; i < 10; ++i) {
+        const uint index = base + tid + i * 256;
+        values[i] = float(stream[index]);
+        square_sum += values[i] * values[i];
+    }
+    square_sum = simd_sum(square_sum);
+    if (lane == 0) partial[simd] = square_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint i = 0; i < 8; ++i) total += partial[i];
+    const float inverse_rms = rsqrt(total / 2560.0f + 1.0e-6f);
+    for (uint i = 0; i < 10; ++i) {
+        const uint index = base + tid + i * 256;
+        const bfloat value = bfloat(values[i] * inverse_rms);
+        const bfloat weight = bfloat(float(norm[index]) + 1.0f);
+        normalized[index] = bfloat(float(value) * float(weight));
+    }
+}
+
+kernel void hc_down_injection(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* down_weight [[buffer(1)]],
+    const device bfloat* down_scale [[buffer(2)]],
+    const device bfloat* down_bias [[buffer(3)]],
+    const device uchar* injection_weight [[buffer(4)]],
+    const device bfloat* injection_scale [[buffer(5)]],
+    const device bfloat* injection_bias [[buffer(6)]],
+    device bfloat* activation [[buffer(7)]], device bfloat* injection [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
+    threadgroup float partial[8];
+    const bool is_down = row < 320;
+    const uint local_row = is_down ? row : row - 320;
+    const device uchar* weight = is_down ? down_weight : injection_weight;
+    const device bfloat* scale = is_down ? down_scale : injection_scale;
+    const device bfloat* bias = is_down ? down_bias : injection_bias;
+    float dot = 0.0f;
+    for (uint base = tid * 8; base < 10240; base += 2048) {
+        const device uchar* bytes = weight + local_row * 5120 + base / 2;
+        const float s = float(scale[local_row * 320 + base / 32]);
+        const float b = float(bias[local_row * 320 + base / 32]);
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+        dot += s * q4_dot8(bytes, x + base) + b * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) partial[simd] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) total += partial[i];
+        const bfloat value = bfloat(total / 4.0f);
+        if (is_down) {
+            const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(value))));
+            activation[row] = value * gate;
+        } else {
+            injection[local_row] =
+                bfloat(2.0f * (1.0f / (1.0f + metal::exp(-float(value)))));
+        }
+    }
+}
+
+kernel void hc_up_mix(
+    const device bfloat* normalized [[buffer(0)]], const device bfloat* activation [[buffer(1)]],
+    const device uchar* weight [[buffer(2)]], const device bfloat* scale [[buffer(3)]],
+    const device bfloat* bias [[buffer(4)]], device bfloat* mixed [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint column = group * 8 + simd;
+    if (column >= 2560) return;
+    float stream_sum = 0.0f;
+    for (uint hc = 0; hc < 4; ++hc) {
+        const uint row = hc * 2560 + column;
+        float dot = 0.0f;
+        for (uint base = lane * 8; base < 320; base += 256) {
+            const device uchar* bytes = weight + row * 160 + base / 2;
+            const float s = float(scale[row * 10 + base / 32]);
+            const float b = float(bias[row * 10 + base / 32]);
+            float sum = 0.0f;
+            for (uint i = 0; i < 8; ++i) sum += float(activation[base + i]);
+            dot += s * q4_dot8(bytes, activation + base) + b * sum;
+        }
+        dot = simd_sum(dot);
+        const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(bfloat(dot)))));
+        stream_sum += float(bfloat(float(gate) * float(normalized[row])));
+    }
+    if (lane == 0) mixed[column] = bfloat(float(bfloat(stream_sum)) / 4.0f);
+}
+
+kernel void healing_left(
+    const device bfloat* input [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
+    device bfloat* hidden [[buffer(2)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint column = group * 4 + simd;
+    if (column >= 64) return;
+    float dot = 0.0f;
+    for (uint row = lane; row < 2560; row += 32)
+        dot += float(input[row]) * float(weight[row * 64 + column]);
+    dot = simd_sum(dot);
+    if (lane == 0) hidden[column] = bfloat(dot);
+}
+
+kernel void healing_right_write(
+    const device bfloat* block [[buffer(0)]], const device bfloat* hidden [[buffer(1)]],
+    const device bfloat* weight [[buffer(2)]], const device bfloat* stream [[buffer(3)]],
+    const device bfloat* injection [[buffer(4)]], device bfloat* output [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint column = group * 4 + simd;
+    if (column >= 2560) return;
+    float dot = 0.0f;
+    for (uint row = lane; row < 64; row += 32)
+        dot += float(hidden[row]) * float(weight[row * 2560 + column]);
+    dot = simd_sum(dot);
+    if (lane == 0) {
+        const bfloat healed = bfloat(float(block[column]) + float(bfloat(dot)));
+        for (uint hc = 0; hc < 4; ++hc) {
+            const bfloat update = bfloat(float(healed) * float(injection[hc]));
+            output[hc * 2560 + column] =
+                bfloat(float(stream[hc * 2560 + column]) + float(update));
+        }
+    }
+}
 )metal";
 
 std::uint16_t bf16(const float value) {
@@ -444,6 +578,52 @@ void bind_projection(id<MTLComputeCommandEncoder> encoder, const Shard &shard,
     [encoder setBuffer:shard.buffer offset:shard.offset(names.weight) atIndex:first];
     [encoder setBuffer:shard.buffer offset:shard.offset(names.scales) atIndex:first + 1];
     [encoder setBuffer:shard.buffer offset:shard.offset(names.biases) atIndex:first + 2];
+}
+
+void bind_tensor(id<MTLComputeCommandEncoder> encoder, const Shard &shard, const std::string &name,
+                 const NSUInteger index) {
+    [encoder setBuffer:shard.buffer offset:shard.offset(name) atIndex:index];
+}
+
+double run_hc_read(id<MTLCommandQueue> queue, id<MTLComputePipelineState> normalize_state,
+                   id<MTLComputePipelineState> down_state, id<MTLComputePipelineState> up_state,
+                   id<MTLBuffer> stream, const Shard &shard, const std::string &norm,
+                   const ProjectionNames &down, const ProjectionNames &up,
+                   const ProjectionNames &injection, id<MTLBuffer> normalized,
+                   id<MTLBuffer> activation, id<MTLBuffer> injection_output, id<MTLBuffer> mixed) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> normalize_encoder = [command computeCommandEncoder];
+    [normalize_encoder setComputePipelineState:normalize_state];
+    [normalize_encoder setBuffer:stream offset:0 atIndex:0];
+    bind_tensor(normalize_encoder, shard, norm, 1);
+    [normalize_encoder setBuffer:normalized offset:0 atIndex:2];
+    [normalize_encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [normalize_encoder endEncoding];
+    id<MTLComputeCommandEncoder> down_encoder = [command computeCommandEncoder];
+    [down_encoder setComputePipelineState:down_state];
+    [down_encoder setBuffer:normalized offset:0 atIndex:0];
+    bind_projection(down_encoder, shard, down, 1);
+    bind_projection(down_encoder, shard, injection, 4);
+    [down_encoder setBuffer:activation offset:0 atIndex:7];
+    [down_encoder setBuffer:injection_output offset:0 atIndex:8];
+    [down_encoder dispatchThreadgroups:MTLSizeMake(324, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [down_encoder endEncoding];
+    id<MTLComputeCommandEncoder> up_encoder = [command computeCommandEncoder];
+    [up_encoder setComputePipelineState:up_state];
+    [up_encoder setBuffer:normalized offset:0 atIndex:0];
+    [up_encoder setBuffer:activation offset:0 atIndex:1];
+    bind_projection(up_encoder, shard, up, 2);
+    [up_encoder setBuffer:mixed offset:0 atIndex:5];
+    [up_encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+               threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [up_encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
 }
 
 void encode_gate(id<MTLCommandBuffer> command, id<MTLComputePipelineState> state,
@@ -658,6 +838,129 @@ double run_device_routed_full(
     return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
 }
 
+double run_hc_device_routed_full(
+    id<MTLCommandQueue> queue, id<MTLComputePipelineState> normalize_state,
+    id<MTLComputePipelineState> hc_down_state, id<MTLComputePipelineState> hc_up_state,
+    id<MTLComputePipelineState> router_state, id<MTLComputePipelineState> select_state,
+    id<MTLComputePipelineState> gate_state, id<MTLComputePipelineState> moe_down_state,
+    id<MTLComputePipelineState> healing_left_state, id<MTLComputePipelineState> healing_right_state,
+    id<MTLBuffer> stream, const Shard &expert_shard, const Shard &router_shard,
+    const Shard &healing_shard, const std::string &norm, const ProjectionNames &hc_down,
+    const ProjectionNames &hc_up, const ProjectionNames &injection,
+    const ProjectionNames &device_router, const ProjectionNames &routed_gate,
+    const ProjectionNames &routed_up, const ProjectionNames &routed_down,
+    const ProjectionNames &shared_gate, const ProjectionNames &shared_up,
+    const ProjectionNames &shared_down, const ProjectionNames &shared_router,
+    const std::string &healing_left, const std::string &healing_right, id<MTLBuffer> normalized,
+    id<MTLBuffer> activation, id<MTLBuffer> injection_output, id<MTLBuffer> mixed,
+    id<MTLBuffer> logits, id<MTLBuffer> experts, id<MTLBuffer> weights, id<MTLBuffer> routed_hidden,
+    id<MTLBuffer> shared_hidden, id<MTLBuffer> router_output, id<MTLBuffer> block_output,
+    id<MTLBuffer> healing_hidden, id<MTLBuffer> output_stream) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:normalize_state];
+    [encoder setBuffer:stream offset:0 atIndex:0];
+    bind_tensor(encoder, router_shard, norm, 1);
+    [encoder setBuffer:normalized offset:0 atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:hc_down_state];
+    [encoder setBuffer:normalized offset:0 atIndex:0];
+    bind_projection(encoder, router_shard, hc_down, 1);
+    bind_projection(encoder, router_shard, injection, 4);
+    [encoder setBuffer:activation offset:0 atIndex:7];
+    [encoder setBuffer:injection_output offset:0 atIndex:8];
+    [encoder dispatchThreadgroups:MTLSizeMake(324, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:hc_up_state];
+    [encoder setBuffer:normalized offset:0 atIndex:0];
+    [encoder setBuffer:activation offset:0 atIndex:1];
+    bind_projection(encoder, router_shard, hc_up, 2);
+    [encoder setBuffer:mixed offset:0 atIndex:5];
+    [encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:router_state];
+    [encoder setBuffer:mixed offset:0 atIndex:0];
+    bind_projection(encoder, router_shard, device_router, 1);
+    [encoder setBuffer:logits offset:0 atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(128, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:select_state];
+    [encoder setBuffer:logits offset:0 atIndex:0];
+    [encoder setBuffer:experts offset:0 atIndex:1];
+    [encoder setBuffer:weights offset:0 atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:gate_state];
+    [encoder setBuffer:mixed offset:0 atIndex:0];
+    bind_projection(encoder, expert_shard, routed_gate, 1);
+    bind_projection(encoder, expert_shard, routed_up, 4);
+    [encoder setBuffer:experts offset:0 atIndex:7];
+    [encoder setBuffer:routed_hidden offset:0 atIndex:8];
+    bind_projection(encoder, expert_shard, shared_gate, 9);
+    bind_projection(encoder, expert_shard, shared_up, 12);
+    [encoder setBuffer:shared_hidden offset:0 atIndex:15];
+    bind_projection(encoder, router_shard, shared_router, 16);
+    [encoder setBuffer:router_output offset:0 atIndex:19];
+    [encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:moe_down_state];
+    [encoder setBuffer:routed_hidden offset:0 atIndex:0];
+    bind_projection(encoder, expert_shard, routed_down, 1);
+    [encoder setBuffer:experts offset:0 atIndex:4];
+    [encoder setBuffer:weights offset:0 atIndex:5];
+    [encoder setBuffer:shared_hidden offset:0 atIndex:6];
+    bind_projection(encoder, expert_shard, shared_down, 7);
+    [encoder setBuffer:router_output offset:0 atIndex:10];
+    [encoder setBuffer:block_output offset:0 atIndex:11];
+    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:healing_left_state];
+    [encoder setBuffer:block_output offset:0 atIndex:0];
+    bind_tensor(encoder, healing_shard, healing_left, 1);
+    [encoder setBuffer:healing_hidden offset:0 atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(16, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:healing_right_state];
+    [encoder setBuffer:block_output offset:0 atIndex:0];
+    [encoder setBuffer:healing_hidden offset:0 atIndex:1];
+    bind_tensor(encoder, healing_shard, healing_right, 2);
+    [encoder setBuffer:stream offset:0 atIndex:3];
+    [encoder setBuffer:injection_output offset:0 atIndex:4];
+    [encoder setBuffer:output_stream offset:0 atIndex:5];
+    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
 double run_joined(id<MTLCommandQueue> queue, id<MTLComputePipelineState> gate_state,
                   id<MTLComputePipelineState> down_state, id<MTLBuffer> input, const Shard &shard,
                   const ProjectionNames &gate, const ProjectionNames &up,
@@ -787,6 +1090,79 @@ OracleResult mlx_oracle(const qwen38::ModelManifest &manifest, const ProjectionN
     return {std::move(output), median(std::move(samples))};
 }
 
+struct HcOracleResult {
+    std::vector<float> mixed;
+    std::vector<float> injection;
+    double median_ms{0.0};
+};
+
+HcOracleResult mlx_hc_oracle(const qwen38::ModelManifest &manifest, const std::string &prefix,
+                             std::span<const float> stream_values) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::HyperConnection hc(store, prefix, 2560, 4, 4, 32, 1.0e-6F, true);
+    const auto stream =
+        MlxArray::from_float32(stream_values, std::array<int, 3>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    const auto evaluate = [&] {
+        auto read = hc.read(stream);
+        std::array<const MlxArray *, 2> outputs{&read.mixed, &read.injection};
+        MlxArray::eval_all(outputs);
+        return std::pair{read.mixed.astype(MLX_FLOAT32).to_float32(),
+                         read.injection.astype(MLX_FLOAT32).to_float32()};
+    };
+    for (int i = 0; i < 3; ++i)
+        static_cast<void>(evaluate());
+    std::vector<double> samples;
+    std::pair<std::vector<float>, std::vector<float>> values;
+    for (int i = 0; i < 15; ++i) {
+        const auto started = std::chrono::steady_clock::now();
+        values = evaluate();
+        samples.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count());
+    }
+    return {std::move(values.first), std::move(values.second), median(std::move(samples))};
+}
+
+OracleResult mlx_mlp_half_oracle(const qwen38::ModelManifest &manifest,
+                                 const std::string &layer_prefix, const std::string &hc_prefix,
+                                 std::span<const float> stream_values) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::HyperConnection hc(store, hc_prefix, 2560, 4, 4, 32, 1.0e-6F, true);
+    qwen38::SparseMoe moe(store, layer_prefix, manifest.config().expert_count,
+                          manifest.config().experts_per_token, manifest.config().quantization_bits,
+                          manifest.config().quantization_group_size,
+                          manifest.config().normalize_topk_probability);
+    const auto left = store.tensor(layer_prefix + ".T_delta_left");
+    const auto right = store.tensor(layer_prefix + ".T_delta_right");
+    const auto stream =
+        MlxArray::from_float32(stream_values, std::array<int, 3>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    const auto evaluate = [&] {
+        auto read = hc.read(stream);
+        auto block = moe.forward_decode(read.mixed).astype(MLX_BFLOAT16);
+        auto correction = MlxArray::matmul(MlxArray::matmul(block, left), right);
+        auto healed = MlxArray::add(block, correction);
+        auto output = hc.write(stream, healed, read.injection);
+        output.eval();
+        return output.astype(MLX_FLOAT32).to_float32();
+    };
+    for (int i = 0; i < 3; ++i)
+        static_cast<void>(evaluate());
+    std::vector<double> samples;
+    std::vector<float> output;
+    for (int i = 0; i < 15; ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        output = evaluate();
+        samples.push_back(
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+                .count());
+    }
+    return {std::move(output), median(std::move(samples))};
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -805,6 +1181,13 @@ int main(int argc, char **argv) {
             const auto shared_down = projection(layer_prefix + ".shared_expert.down_proj");
             const auto shared_router = projection(layer_prefix + ".shared_expert_gate");
             const auto device_router = projection(layer_prefix + ".gate");
+            const std::string hc_prefix = "language_model.model.layers.3.mlp_hyper_connection";
+            const std::string hc_norm = hc_prefix + ".hc_norm.weight";
+            const auto hc_down = projection(hc_prefix + ".input_mix_weight_down");
+            const auto hc_up = projection(hc_prefix + ".input_mix_weight_up");
+            const auto hc_injection = projection(hc_prefix + ".block_inject_weight");
+            const std::string healing_left = layer_prefix + ".T_delta_left";
+            const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
             for (const std::string &name :
                  {gate.scales, gate.biases, up.weight, up.scales, up.biases, down.weight,
@@ -837,14 +1220,26 @@ int main(int argc, char **argv) {
             const auto fused_down_state = pipeline(device, library, @"fused_all_down");
             const auto router_state = pipeline(device, library, @"q8_router_logits");
             const auto select_state = pipeline(device, library, @"select_top10");
+            const auto hc_normalize_state = pipeline(device, library, @"hc_normalize");
+            const auto hc_down_state = pipeline(device, library, @"hc_down_injection");
+            const auto hc_up_state = pipeline(device, library, @"hc_up_mix");
+            const auto healing_left_state = pipeline(device, library, @"healing_left");
+            const auto healing_right_state = pipeline(device, library, @"healing_right_write");
             Shard shard(device, manifest.directory() / shard_name);
             Shard router_shard(device, manifest.directory() / router_shard_name);
+            Shard healing_shard(device,
+                                manifest.directory() / manifest.weight_map().at(healing_left));
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
                 input_f32[i] = static_cast<float>((i * 17 + 11) % 257 - 128) / 256.0F;
             std::vector<std::uint16_t> input_bf16(hidden_size);
             std::ranges::transform(input_f32, input_bf16.begin(), bf16);
+            std::vector<float> stream_f32(10240);
+            for (int i = 0; i < 10240; ++i)
+                stream_f32[i] = static_cast<float>((i * 29 + 7) % 521 - 260) / 512.0F;
+            std::vector<std::uint16_t> stream_bf16(10240);
+            std::ranges::transform(stream_f32, stream_bf16.begin(), bf16);
             const std::array<std::uint32_t, top_k> expert_ids{0,   287, 31, 129, 7,
                                                               256, 63,  17, 201, 95};
             std::array<float, top_k> route_weights{};
@@ -860,6 +1255,19 @@ int main(int argc, char **argv) {
                 [device newBufferWithBytes:input_bf16.data()
                                     length:input_bf16.size() * sizeof(std::uint16_t)
                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_stream =
+                [device newBufferWithBytes:stream_bf16.data()
+                                    length:stream_bf16.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_normalized = [device newBufferWithLength:10240 * sizeof(std::uint16_t)
+                                                              options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_activation = [device newBufferWithLength:320 * sizeof(std::uint16_t)
+                                                              options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_injection_output =
+                [device newBufferWithLength:4 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_mixed = [device newBufferWithLength:2560 * sizeof(std::uint16_t)
+                                                         options:MTLResourceStorageModeShared];
             id<MTLBuffer> experts =
                 [device newBufferWithBytes:expert_ids.data()
                                     length:expert_ids.size() * sizeof(std::uint32_t)
@@ -881,14 +1289,40 @@ int main(int argc, char **argv) {
             id<MTLBuffer> full_output =
                 [device newBufferWithLength:hidden_size * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
+            id<MTLBuffer> healing_hidden =
+                [device newBufferWithLength:64 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> hc_output_stream =
+                [device newBufferWithLength:10240 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> logits = [device newBufferWithLength:512 * sizeof(float)
                                                        options:MTLResourceStorageModeShared];
             id<MTLBuffer> cache_evict = [device newBufferWithLength:64ULL * 1024 * 1024
                                                             options:MTLResourceStorageModePrivate];
             if (input == nil || experts == nil || weights == nil || hidden == nil ||
                 output == nil || shared_hidden == nil || shared_router_output == nil ||
-                full_output == nil || logits == nil || cache_evict == nil)
+                full_output == nil || logits == nil || cache_evict == nil || hc_stream == nil ||
+                hc_normalized == nil || hc_activation == nil || hc_injection_output == nil ||
+                hc_mixed == nil || healing_hidden == nil || hc_output_stream == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
+
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_hc_read(queue, hc_normalize_state, hc_down_state, hc_up_state,
+                                              hc_stream, router_shard, hc_norm, hc_down, hc_up,
+                                              hc_injection, hc_normalized, hc_activation,
+                                              hc_injection_output, hc_mixed));
+            std::vector<double> hc_gpu, hc_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 197));
+                const auto started = std::chrono::steady_clock::now();
+                hc_gpu.push_back(run_hc_read(queue, hc_normalize_state, hc_down_state, hc_up_state,
+                                             hc_stream, router_shard, hc_norm, hc_down, hc_up,
+                                             hc_injection, hc_normalized, hc_activation,
+                                             hc_injection_output, hc_mixed));
+                hc_wall.push_back(std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count());
+            }
 
             for (int i = 0; i < 5; ++i)
                 static_cast<void>(run_joined(queue, gate_state, down_state, input, shard, gate, up,
@@ -965,12 +1399,43 @@ int main(int argc, char **argv) {
                                                  std::chrono::steady_clock::now() - started)
                                                  .count());
             }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_hc_device_routed_full(
+                    queue, hc_normalize_state, hc_down_state, hc_up_state, router_state,
+                    select_state, fused_gate_state, fused_down_state, healing_left_state,
+                    healing_right_state, hc_stream, shard, router_shard, healing_shard, hc_norm,
+                    hc_down, hc_up, hc_injection, device_router, gate, up, down, shared_gate,
+                    shared_up, shared_down, shared_router, healing_left, healing_right,
+                    hc_normalized, hc_activation, hc_injection_output, hc_mixed, logits, experts,
+                    weights, hidden, shared_hidden, shared_router_output, full_output,
+                    healing_hidden, hc_output_stream));
+            std::vector<double> hc_moe_gpu, hc_moe_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 223));
+                const auto started = std::chrono::steady_clock::now();
+                hc_moe_gpu.push_back(run_hc_device_routed_full(
+                    queue, hc_normalize_state, hc_down_state, hc_up_state, router_state,
+                    select_state, fused_gate_state, fused_down_state, healing_left_state,
+                    healing_right_state, hc_stream, shard, router_shard, healing_shard, hc_norm,
+                    hc_down, hc_up, hc_injection, device_router, gate, up, down, shared_gate,
+                    shared_up, shared_down, shared_router, healing_left, healing_right,
+                    hc_normalized, hc_activation, hc_injection_output, hc_mixed, logits, experts,
+                    weights, hidden, shared_hidden, shared_router_output, full_output,
+                    healing_hidden, hc_output_stream));
+                hc_moe_wall.push_back(std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count());
+            }
             std::array<std::uint32_t, top_k> selected_experts{};
             std::copy_n(static_cast<const std::uint32_t *>(experts.contents), top_k,
                         selected_experts.begin());
             std::array<float, top_k> selected_weights{};
             const auto *selected_bf16 = static_cast<const std::uint16_t *>(weights.contents);
             std::ranges::transform(selected_bf16, selected_bf16 + top_k, selected_weights.begin(),
+                                   from_bf16);
+            std::vector<float> hc_direct(hidden_size);
+            const auto *hc_mixed_bits = static_cast<const std::uint16_t *>(hc_mixed.contents);
+            std::ranges::transform(hc_mixed_bits, hc_mixed_bits + hidden_size, hc_direct.begin(),
                                    from_bf16);
             const auto *result = static_cast<const std::uint16_t *>(full_output.contents);
             std::uint64_t hash = 1469598103934665603ULL;
@@ -990,7 +1455,7 @@ int main(int argc, char **argv) {
                     manifest.config().quantization_group_size,
                     manifest.config().normalize_topk_probability);
                 const auto routing_input =
-                    MlxArray::from_float32(input_f32, std::array<int, 3>{1, 1, hidden_size})
+                    MlxArray::from_float32(hc_direct, std::array<int, 3>{1, 1, hidden_size})
                         .astype(MLX_BFLOAT16);
                 const auto expected = routing_moe.route_decode(routing_input);
                 router_ids_match = std::equal(expected.experts.begin(), expected.experts.end(),
@@ -1004,7 +1469,7 @@ int main(int argc, char **argv) {
             }
             const OracleResult oracle =
                 mlx_oracle(manifest, gate, up, down, shared_gate, shared_up, shared_down,
-                           shared_router, input_f32, selected_experts, selected_weights);
+                           shared_router, hc_direct, selected_experts, selected_weights);
             double dot = 0.0, aa = 0.0, bb = 0.0, squared_error = 0.0, max_abs = 0.0;
             for (int i = 0; i < hidden_size; ++i) {
                 const double a = direct[i], b = oracle.output[i], delta = a - b;
@@ -1015,6 +1480,43 @@ int main(int argc, char **argv) {
                 bb += b * b;
                 squared_error += delta * delta;
                 max_abs = std::max(max_abs, std::abs(delta));
+            }
+            const HcOracleResult hc_oracle = mlx_hc_oracle(manifest, hc_prefix, stream_f32);
+            double hc_dot = 0.0, hc_aa = 0.0, hc_bb = 0.0, hc_squared_error = 0.0;
+            double hc_max_abs = 0.0, hc_injection_max_abs = 0.0;
+            for (int i = 0; i < hidden_size; ++i) {
+                const double a = from_bf16(hc_mixed_bits[i]);
+                const double b = hc_oracle.mixed[static_cast<std::size_t>(i)];
+                const double delta = a - b;
+                hc_dot += a * b;
+                hc_aa += a * a;
+                hc_bb += b * b;
+                hc_squared_error += delta * delta;
+                hc_max_abs = std::max(hc_max_abs, std::abs(delta));
+            }
+            const auto *hc_injection_bits =
+                static_cast<const std::uint16_t *>(hc_injection_output.contents);
+            for (int i = 0; i < 4; ++i) {
+                hc_injection_max_abs = std::max(
+                    hc_injection_max_abs, std::abs(static_cast<double>(
+                                              from_bf16(hc_injection_bits[i]) -
+                                              hc_oracle.injection[static_cast<std::size_t>(i)])));
+            }
+            const OracleResult mlp_oracle =
+                mlx_mlp_half_oracle(manifest, layer_prefix, hc_prefix, stream_f32);
+            const auto *mlp_direct_bits =
+                static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            double mlp_dot = 0.0, mlp_aa = 0.0, mlp_bb = 0.0, mlp_squared_error = 0.0;
+            double mlp_max_abs = 0.0;
+            for (int i = 0; i < 10240; ++i) {
+                const double a = from_bf16(mlp_direct_bits[i]);
+                const double b = mlp_oracle.output[static_cast<std::size_t>(i)];
+                const double delta = a - b;
+                mlp_dot += a * b;
+                mlp_aa += a * a;
+                mlp_bb += b * b;
+                mlp_squared_error += delta * delta;
+                mlp_max_abs = std::max(mlp_max_abs, std::abs(delta));
             }
             std::cout << "{\"device\":\"" << device.name.UTF8String
                       << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
@@ -1028,8 +1530,21 @@ int main(int argc, char **argv) {
                       << ",\"fused_wall_median_ms\":" << median(fused_wall)
                       << ",\"device_routed_gpu_median_ms\":" << median(device_routed_gpu)
                       << ",\"device_routed_wall_median_ms\":" << median(device_routed_wall)
+                      << ",\"hc_moe_gpu_median_ms\":" << median(hc_moe_gpu)
+                      << ",\"hc_moe_wall_median_ms\":" << median(hc_moe_wall)
                       << ",\"router_ids_match\":" << (router_ids_match ? "true" : "false")
                       << ",\"router_weight_max_abs\":" << router_weight_max_abs
+                      << ",\"hc_gpu_median_ms\":" << median(hc_gpu)
+                      << ",\"hc_wall_median_ms\":" << median(hc_wall)
+                      << ",\"mlx_hc_oracle_median_ms\":" << hc_oracle.median_ms
+                      << ",\"hc_cosine\":" << hc_dot / std::sqrt(hc_aa * hc_bb)
+                      << ",\"hc_rmse\":" << std::sqrt(hc_squared_error / hidden_size)
+                      << ",\"hc_max_abs\":" << hc_max_abs
+                      << ",\"hc_injection_max_abs\":" << hc_injection_max_abs
+                      << ",\"mlx_mlp_oracle_median_ms\":" << mlp_oracle.median_ms
+                      << ",\"mlp_cosine\":" << mlp_dot / std::sqrt(mlp_aa * mlp_bb)
+                      << ",\"mlp_rmse\":" << std::sqrt(mlp_squared_error / 10240.0)
+                      << ",\"mlp_max_abs\":" << mlp_max_abs
                       << ",\"mlx_full_oracle_median_ms\":" << oracle.median_ms
                       << ",\"cosine\":" << dot / std::sqrt(aa * bb)
                       << ",\"rmse\":" << std::sqrt(squared_error / hidden_size)

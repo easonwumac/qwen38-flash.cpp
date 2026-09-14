@@ -48,13 +48,33 @@ weights matched the MLX router exactly. This removes the CPU routing barrier;
 the remaining full-output difference is in the quantized projection reduction
 order, not expert selection.
 
+The fourth gate now covers the complete MLP half-layer in one command buffer:
+MLP HyperConnection normalization/read, the device router, routed and shared
+MoE, the Niwaki rank-64 healing correction, and HyperConnection write. Across
+five independent processes, each with 31 samples and a 64 MiB device-cache
+eviction before every sample, GPU medians were 0.232--0.241 ms and
+submit-to-completion medians were 0.397--0.419 ms. The complete MLX oracle
+measured 1.335--1.888 ms under the same synthetic one-token harness. The direct
+path matched all ten router IDs and BF16 route weights exactly; complete
+half-layer cosine rounded to 1.000000, with 2.44e-4 RMSE and 3.91e-3 maximum
+absolute error. These are primitive results on Apple M5 Pro 64 GiB with real
+layer-3 Niwaki 99B Q3/group-64 routed, Q4/group-32 shared and HyperConnection,
+Q8/group-64 router, BF16 rank-64 maps/activations, deterministic input, no
+context, sampling, or MTP. They do not yet imply whole-model token throughput.
+
+Matching the generic Q4 projection's packed-slice reduction order did not
+reduce the HyperConnection error and raised its GPU median from the observed
+0.033--0.098 ms optimized range to 0.087 ms in the tested run. The optimized
+contiguous-eight affine dot path is retained; future parity work must isolate
+normalization and BF16 expression rounding rather than revisiting reduction
+partitioning.
+
 The next acceptance gates are:
 
-1. encode MLP HyperConnection read/write and rank-64 healing around this MoE;
-2. match the retained MLX token trajectory before extending beyond one layer;
-3. encode one complete full-attention layer with fixed buffers and no MLX
+1. match the retained MLX token trajectory before extending beyond one layer;
+2. encode one complete full-attention layer with fixed buffers and no MLX
    synchronization inside the layer;
-4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
+3. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 
 Run the bounded primitive probe with:
 
