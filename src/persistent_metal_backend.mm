@@ -1,6 +1,7 @@
 #include "qwen38/persistent_metal_backend.hpp"
 
 #include "persistent_metal_kernels.hpp"
+#include "qwen38/ngram.hpp"
 #include "qwen38/safetensors.hpp"
 
 #import <Foundation/Foundation.h>
@@ -10,6 +11,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -21,7 +23,7 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 29> pipeline_names{
+constexpr std::array<const char*, 30> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "fused_all_gate_up", "fused_all_down",
     "q8_router_logits", "select_top10", "qsa_score_blocks",
@@ -30,7 +32,7 @@ constexpr std::array<const char*, 29> pipeline_names{
     "attention_apply_gate", "attention_output_projection", "q4_input_projection",
     "gdn_prework", "gdn_recurrence", "gdn_norm_gate", "gdn_output_projection",
     "hc_write", "hc_normalize", "hc_down_injection", "hc_up_mix", "healing_left",
-    "healing_right_write",
+    "healing_right_write", "ple_fused_update",
 };
 
 bool has_expected_layer_split(const ModelConfig& config) noexcept {
@@ -121,9 +123,17 @@ public:
             inventory_.pipeline_count = pipelines_.size();
             inventory_.shard_count = shards_.size();
             weight_map_ = manifest.weight_map();
+            config_ = manifest.config();
             queue_ = [device_ newCommandQueue];
             if (queue_ == nil) throw std::runtime_error("cannot create persistent Metal queue");
             allocate_scratch();
+            ple_hash_ = std::make_unique<NgramHash>(config_);
+            const char* external_ngram = std::getenv("QWEN38_NGRAM_TABLE_DIR");
+            const std::filesystem::path ngram_directory =
+                external_ngram != nullptr && *external_ngram != '\0'
+                ? std::filesystem::path(external_ngram) : manifest.directory();
+            ple_table_ = std::make_unique<NgramTable>(
+                ngram_directory, ple_hash_->total_rows());
             for (std::size_t layer = 0; layer < 48; ++layer) {
                 if (layer % 4 == 3) {
                     attention_states_[layer].hot_keys =
@@ -173,6 +183,7 @@ public:
         shared_hidden_ = make_buffer(640 * sizeof(std::uint16_t));
         shared_scale_ = make_buffer(sizeof(std::uint16_t));
         moe_output_ = make_buffer(2560 * sizeof(std::uint16_t));
+        zero_output_ = make_buffer(2560 * sizeof(std::uint16_t));
         healing_hidden_ = make_buffer(64 * sizeof(std::uint16_t));
         output_stream_ = make_buffer(10240 * sizeof(std::uint16_t));
         router_logits_ = make_buffer(512 * sizeof(float));
@@ -193,6 +204,10 @@ public:
         temp_ids_a_ = make_buffer(32768 * sizeof(std::uint32_t), false);
         temp_ids_b_ = make_buffer(32768 * sizeof(std::uint32_t), false);
         q8_dummy_ = make_buffer(16);
+        ple_embedding_ = make_buffer(2560 * sizeof(std::uint16_t));
+        ple_projected_ = make_buffer(12800 * sizeof(std::uint16_t));
+        ple_stream_ = make_buffer(10240 * sizeof(std::uint16_t));
+        ple_convolution_ = make_buffer(9ULL * 10240 * sizeof(std::uint16_t));
     }
 
     id<MTLComputePipelineState> pipeline(const char* name) const {
@@ -359,7 +374,6 @@ public:
         encode_hc_read(command, post_attention_, layer + ".mlp_hyper_connection");
         id<MTLComputeCommandEncoder> encoder;
         if (shared_only) {
-            std::memset(moe_output_.contents, 0, 2560 * sizeof(std::uint16_t));
             encoder = [command computeCommandEncoder];
             [encoder setComputePipelineState:pipeline("q4_shared_gate_up")];
             [encoder setBuffer:mixed_ offset:0 atIndex:0];
@@ -382,7 +396,7 @@ public:
             [encoder setBuffer:shared_hidden_ offset:0 atIndex:0];
             bind_projection(encoder, mlp + ".shared_expert.down_proj", 1);
             [encoder setBuffer:shared_scale_ offset:0 atIndex:4];
-            [encoder setBuffer:moe_output_ offset:0 atIndex:5];
+            [encoder setBuffer:zero_output_ offset:0 atIndex:5];
             [encoder setBuffer:moe_output_ offset:0 atIndex:6];
             [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -663,6 +677,146 @@ public:
         return {begin, begin + 10240};
     }
 
+    void encode_ple(id<MTLCommandBuffer> command, std::uint32_t token,
+                    id<MTLBuffer> input) {
+        const auto rows = ple_hash_->row_ids(token, ple_ngram_state_);
+        const std::vector<float> gathered = ple_table_->gather(rows);
+        if (gathered.size() != 2560) throw std::runtime_error("PLE gather width mismatch");
+        auto* embedding = static_cast<std::uint16_t*>(ple_embedding_.contents);
+        for (std::size_t index = 0; index < gathered.size(); ++index) {
+            embedding[index] = bf16(gathered[index]);
+        }
+        const std::string base = "language_model.model.layers.1.ple";
+        const auto project = [&](const char* suffix, std::uint32_t rows_count,
+                                 NSUInteger output_offset) {
+            id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline("q4_input_projection")];
+            [encoder setBuffer:ple_embedding_ offset:0 atIndex:0];
+            bind_projection(encoder, base + suffix, 1);
+            [encoder setBuffer:ple_projected_
+                        offset:output_offset * sizeof(std::uint16_t) atIndex:4];
+            [encoder setBytes:&rows_count length:sizeof(rows_count) atIndex:5];
+            [encoder dispatchThreadgroups:MTLSizeMake((rows_count + 3) / 4, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [encoder endEncoding];
+        };
+        project(".key_proj", 10240, 0);
+        project(".value_proj", 2560, 10240);
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("ple_fused_update")];
+        [encoder setBuffer:ple_projected_ offset:0 atIndex:0];
+        [encoder setBuffer:input offset:0 atIndex:1];
+        bind(encoder, base + ".norm_key.weight", 2);
+        bind(encoder, base + ".norm_query.weight", 3);
+        bind(encoder, base + ".norm_conv.weight", 4);
+        bind(encoder, base + ".conv1d.weight", 5);
+        [encoder setBuffer:ple_convolution_ offset:0 atIndex:6];
+        [encoder setBuffer:ple_stream_ offset:0 atIndex:7];
+        [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+    }
+
+    std::vector<std::uint16_t> decode_ple(
+        std::uint32_t token, std::span<const std::uint16_t> stream,
+        bool reset, double* gpu_ms) {
+        if (stream.size() != 10240) throw std::runtime_error("PLE stream width mismatch");
+        if (reset) {
+            std::memset(ple_convolution_.contents, 0, 9ULL * 10240 * sizeof(std::uint16_t));
+            ple_ngram_state_ = {};
+        }
+        std::memcpy(stream_.contents, stream.data(), stream.size_bytes());
+        id<MTLCommandBuffer> command = [queue_ commandBuffer];
+        encode_ple(command, token, stream_);
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            throw std::runtime_error(command.error.localizedDescription.UTF8String);
+        }
+        if (gpu_ms != nullptr) *gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+        const auto* begin = static_cast<const std::uint16_t*>(ple_stream_.contents);
+        return {begin, begin + 10240};
+    }
+
+    void reset_all_state() {
+        for (std::size_t layer = 0; layer < 48; ++layer) {
+            if (layer % 4 == 3) {
+                attention_states_[layer].token_count = 0;
+                std::memset(attention_states_[layer].hot_keys.contents, 0,
+                            2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+                std::memset(attention_states_[layer].hot_values.contents, 0,
+                            2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+                std::memset(attention_states_[layer].pending.contents, 0,
+                            4 * 128 * sizeof(std::uint16_t));
+            } else {
+                std::memset(gdn_states_[layer].convolution.contents, 0,
+                            3 * 10240 * sizeof(std::uint16_t));
+                std::memset(gdn_states_[layer].recurrent.contents, 0,
+                            48ULL * 128 * 128 * sizeof(std::uint16_t));
+            }
+        }
+        std::memset(ple_convolution_.contents, 0, 9ULL * 10240 * sizeof(std::uint16_t));
+        ple_ngram_state_ = {};
+    }
+
+    std::vector<std::uint16_t> decode_trunk(
+        std::uint32_t token, std::span<const std::uint16_t> initial_stream,
+        bool reset, double* gpu_ms) {
+        if (initial_stream.size() != 10240) {
+            throw std::runtime_error("persistent stream width mismatch");
+        }
+        if (reset) reset_all_state();
+        std::memcpy(stream_.contents, initial_stream.data(), initial_stream.size_bytes());
+        std::size_t group_size = 3;
+        if (const char* configured = std::getenv("QWEN38_PERSISTENT_LAYER_GROUP")) {
+            char* end = nullptr;
+            const unsigned long parsed = std::strtoul(configured, &end, 10);
+            if (end == configured || *end != '\0' || parsed < 1 || parsed > 48) {
+                throw std::runtime_error("persistent layer group must be 1..48");
+            }
+            group_size = static_cast<std::size_t>(parsed);
+        }
+        std::vector<id<MTLCommandBuffer>> commands;
+        commands.reserve((48 + group_size - 1) / group_size);
+        id<MTLCommandBuffer> command = nil;
+        for (std::size_t index = 0; index < 48; ++index) {
+            if (index % group_size == 0) command = [queue_ commandBuffer];
+            id<MTLBuffer> layer_input = index == 0 ? stream_ : output_stream_;
+            if (index == 1) {
+                encode_ple(command, token, layer_input);
+                layer_input = ple_stream_;
+            }
+            const std::string layer =
+                "language_model.model.layers." + std::to_string(index);
+            encode_hc_read(command, layer_input, layer + ".attn_hyper_connection");
+            if (index % 4 == 3) {
+                if (attention_states_[index].token_count >= hot_capacity) {
+                    throw std::runtime_error("persistent attention hot slab requires Q8 flush");
+                }
+                encode_attention(command, layer + ".self_attn", attention_states_[index]);
+            } else {
+                encode_gdn(command, layer + ".linear_attn", gdn_states_[index]);
+            }
+            encode_hc_write(command, layer_input, block_output_, post_attention_);
+            encode_mlp(command, layer, index >= 10 && index <= 33);
+            if ((index + 1) % group_size == 0 || index + 1 == 48) {
+                [command commit];
+                commands.push_back(command);
+            }
+        }
+        [commands.back() waitUntilCompleted];
+        double total_gpu_ms = 0.0;
+        for (id<MTLCommandBuffer> completed : commands) {
+            if (completed.status != MTLCommandBufferStatusCompleted) {
+                throw std::runtime_error(completed.error.localizedDescription.UTF8String);
+            }
+            total_gpu_ms += (completed.GPUEndTime - completed.GPUStartTime) * 1000.0;
+        }
+        if (gpu_ms != nullptr) *gpu_ms = total_gpu_ms;
+        const auto* begin = static_cast<const std::uint16_t*>(output_stream_.contents);
+        return {begin, begin + 10240};
+    }
+
     Inventory inventory_;
     id<MTLDevice> device_{nil};
     id<MTLLibrary> library_{nil};
@@ -670,6 +824,10 @@ public:
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipelines_;
     std::unordered_map<std::string, std::unique_ptr<Shard>> shards_;
     std::unordered_map<std::string, std::string> weight_map_;
+    ModelConfig config_;
+    std::unique_ptr<NgramHash> ple_hash_;
+    std::unique_ptr<NgramTable> ple_table_;
+    NgramState ple_ngram_state_;
     std::array<GdnState, 48> gdn_states_;
     std::array<AttentionState, 48> attention_states_;
     static constexpr std::uint32_t hot_capacity = 2048;
@@ -678,12 +836,15 @@ public:
     id<MTLBuffer> recurrent_output_{nil}, gated_{nil}, block_output_{nil};
     id<MTLBuffer> post_attention_{nil}, expert_ids_{nil}, route_weights_{nil};
     id<MTLBuffer> routed_hidden_{nil}, shared_hidden_{nil}, shared_scale_{nil};
-    id<MTLBuffer> moe_output_{nil}, healing_hidden_{nil}, output_stream_{nil}, router_logits_{nil};
+    id<MTLBuffer> moe_output_{nil}, zero_output_{nil}, healing_hidden_{nil};
+    id<MTLBuffer> output_stream_{nil}, router_logits_{nil};
     id<MTLBuffer> attention_projected_{nil}, selector_query_{nil}, attention_query_{nil};
     id<MTLBuffer> attention_key_{nil}, attention_values_{nil}, attention_gated_{nil};
     id<MTLBuffer> rope_cos_{nil}, rope_sin_{nil}, pool_rope_cos_{nil}, pool_rope_sin_{nil};
     id<MTLBuffer> qsa_scores_{nil}, selected_{nil}, temp_scores_a_{nil}, temp_scores_b_{nil};
     id<MTLBuffer> temp_ids_a_{nil}, temp_ids_b_{nil}, q8_dummy_{nil};
+    id<MTLBuffer> ple_embedding_{nil}, ple_projected_{nil}, ple_stream_{nil};
+    id<MTLBuffer> ple_convolution_{nil};
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
@@ -728,6 +889,18 @@ std::vector<std::uint16_t> PersistentMetalBackend::decode_attention_layer(
     const std::size_t layer, const std::span<const std::uint16_t> stream,
     const bool reset_state, double* gpu_ms) {
     return impl_->decode_attention_layer(layer, stream, reset_state, gpu_ms);
+}
+
+std::vector<std::uint16_t> PersistentMetalBackend::decode_trunk(
+    const std::uint32_t token, const std::span<const std::uint16_t> initial_stream,
+    const bool reset_state, double* gpu_ms) {
+    return impl_->decode_trunk(token, initial_stream, reset_state, gpu_ms);
+}
+
+std::vector<std::uint16_t> PersistentMetalBackend::decode_ple(
+    const std::uint32_t token, const std::span<const std::uint16_t> stream,
+    const bool reset_state, double* gpu_ms) {
+    return impl_->decode_ple(token, stream, reset_state, gpu_ms);
 }
 
 } // namespace qwen38

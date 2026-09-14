@@ -41,6 +41,16 @@ public:
         std::span<const std::uint16_t> stream,
         bool reset_state = false,
         double* gpu_ms = nullptr);
+    [[nodiscard]] std::vector<std::uint16_t> decode_trunk(
+        std::uint32_t token,
+        std::span<const std::uint16_t> initial_stream,
+        bool reset_state = false,
+        double* gpu_ms = nullptr);
+    [[nodiscard]] std::vector<std::uint16_t> decode_ple(
+        std::uint32_t token,
+        std::span<const std::uint16_t> stream,
+        bool reset_state = false,
+        double* gpu_ms = nullptr);
 
 private:
     class Impl;

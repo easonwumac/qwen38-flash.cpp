@@ -247,6 +247,25 @@ generalization. Production attention currently owns a 2,048-token BF16 hot
 slab and fails closed at its boundary; Q8 cold-state import/flush is the next
 required gate, not an implicit precision downgrade.
 
+The fourteenth gate implements the sole PLE layer and connects all 48 layers.
+The SSD-backed n-gram gather stays on the CPU; its Q4 key/value projections,
+four-stream norms and gates, dilated convolution, residual add and state shift
+run on Metal. PLE alone matched MLX at 0.999999 cosine, 3.33e-4 RMSE and
+3.91e-3 maximum error. A layer-by-layer oracle then decayed smoothly rather
+than showing a broken boundary: cosine was 0.999998 after layer 0, 0.999992
+after PLE/layer 1 and 0.998981 after layer 47.
+
+The backend uses three layers per command buffer by default. One giant command
+retained references to the complete 36.7 GB weight set and caused a 1.3 second
+residency storm; groups 1--5 all reached roughly the same warm device frontier,
+while three was narrowly best. With real Niwaki-99B weights, the external REAP
+Q4 n-gram AoS table, a deterministic BF16 four-stream input, token 9419, empty
+state, greedy/no-sampling and no MTP, 11 warm samples measured 16.37 ms median
+GPU and 17.15 ms submit-to-completion for the full trunk. This is about
+58.3 trunk calls/s before embedding, final mixer, LM head and argmax. It is not
+yet an end-to-end token/s claim, but it leaves about 7.85 ms/token for those
+stages while retaining the 40 token/s target.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;

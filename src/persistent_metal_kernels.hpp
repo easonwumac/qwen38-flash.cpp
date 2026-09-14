@@ -1021,6 +1021,101 @@ kernel void healing_right_write(
         }
     }
 }
+
+kernel void ple_fused_update(
+    const device bfloat* projected [[buffer(0)]], const device bfloat* stream [[buffer(1)]],
+    const device uchar* norm_key [[buffer(2)]], const device uchar* norm_query [[buffer(3)]],
+    const device uchar* norm_conv [[buffer(4)]], const device uchar* conv_weight [[buffer(5)]],
+    device bfloat* conv_state [[buffer(6)]], device bfloat* output [[buffer(7)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint hc [[threadgroup_position_in_grid]]) {
+    threadgroup float reduction[8];
+    threadgroup float inverse_key, inverse_query, gate_value, inverse_conv;
+    threadgroup bfloat normalized[2560];
+    float key_square = 0.0f, query_square = 0.0f;
+    const uint stream_base = hc * 2560;
+    for (uint column = tid; column < 2560; column += 256) {
+        const float key = float(projected[stream_base + column]);
+        const float query = float(stream[stream_base + column]);
+        key_square += key * key;
+        query_square += query * query;
+    }
+    key_square = simd_sum(key_square);
+    query_square = simd_sum(query_square);
+    if (lane == 0) reduction[simd] = key_square;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += reduction[i];
+        inverse_key = rsqrt(sum / 2560.0f + 1.0e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) reduction[simd] = query_square;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += reduction[i];
+        inverse_query = rsqrt(sum / 2560.0f + 1.0e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float dot = 0.0f;
+    for (uint column = tid; column < 2560; column += 256) {
+        const float key = float(projected[stream_base + column]) * inverse_key *
+            (float(load_bf16_unaligned(norm_key, stream_base + column)) + 1.0f);
+        const float query = float(stream[stream_base + column]) * inverse_query *
+            (float(load_bf16_unaligned(norm_query, stream_base + column)) + 1.0f);
+        dot += key * query;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) reduction[simd] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += reduction[i];
+        sum /= sqrt(2560.0f);
+        const float signed_root = copysign(sqrt(max(abs(sum), 1.0e-6f)), sum);
+        gate_value = 1.0f / (1.0f + metal::exp(-signed_root));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float gated_square = 0.0f;
+    for (uint column = tid; column < 2560; column += 256) {
+        const bfloat gated = bfloat(gate_value * float(projected[10240 + column]));
+        output[stream_base + column] = gated;
+        gated_square += float(gated) * float(gated);
+    }
+    gated_square = simd_sum(gated_square);
+    if (lane == 0) reduction[simd] = gated_square;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += reduction[i];
+        inverse_conv = rsqrt(sum / 2560.0f + 1.0e-6f);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint column = tid; column < 2560; column += 256) {
+        const uint component = stream_base + column;
+        normalized[column] = bfloat(float(output[component]) * inverse_conv *
+            (float(load_bf16_unaligned(norm_conv, component)) + 1.0f));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint column = tid; column < 2560; column += 256) {
+        const uint component = stream_base + column;
+        float conv = 0.0f;
+        conv += float(conv_state[component]) *
+            float(load_bf16_unaligned(conv_weight, component * 4));
+        conv += float(conv_state[3 * 10240 + component]) *
+            float(load_bf16_unaligned(conv_weight, component * 4 + 1));
+        conv += float(conv_state[6 * 10240 + component]) *
+            float(load_bf16_unaligned(conv_weight, component * 4 + 2));
+        conv += float(normalized[column]) *
+            float(load_bf16_unaligned(conv_weight, component * 4 + 3));
+        const float silu = conv / (1.0f + metal::exp(-conv));
+        output[component] = bfloat(float(output[component]) + silu + float(stream[component]));
+        for (uint row = 0; row < 8; ++row)
+            conv_state[row * 10240 + component] = conv_state[(row + 1) * 10240 + component];
+        conv_state[8 * 10240 + component] = normalized[column];
+    }
+}
 )metal";
 
 } // namespace qwen38::persistent_metal

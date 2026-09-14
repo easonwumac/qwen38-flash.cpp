@@ -2,12 +2,15 @@
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
 #include "qwen38/persistent_metal_backend.hpp"
+#include "qwen38/ple.hpp"
 
 #include <bit>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -159,6 +162,132 @@ void check_attention_layer(qwen38::PersistentMetalBackend& backend,
     }
 }
 
+void check_trunk(qwen38::PersistentMetalBackend& backend,
+                 qwen38::MlxTensorStore& tensors,
+                 const std::vector<float>& input_f32,
+                 const std::vector<std::uint16_t>& input_bf16) {
+    double gpu_ms = 0.0;
+    const std::vector<std::uint16_t> actual =
+        backend.decode_trunk(9419, input_bf16, true, &gpu_ms);
+    std::vector<std::unique_ptr<qwen38::DecoderLayer>> layers;
+    std::vector<qwen38::DecoderLayerState> states(48);
+    layers.reserve(48);
+    for (std::size_t index = 0; index < 48; ++index) {
+        layers.push_back(std::make_unique<qwen38::DecoderLayer>(
+            tensors, index, tensors.manifest().config()));
+    }
+    qwen38::MlxArray oracle = qwen38::MlxArray::from_float32(
+        input_f32, std::vector<int>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    for (std::size_t index = 0; index < 48; ++index) {
+        oracle = layers[index]->forward_decode(oracle, 9419, states[index]);
+    }
+    const std::vector<float> expected = oracle.astype(MLX_FLOAT32).to_float32();
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        static_cast<void>(backend.decode_trunk(9419, input_bf16, true));
+    }
+    std::vector<double> trunk_samples;
+    std::vector<double> trunk_wall_samples;
+    trunk_samples.reserve(11);
+    for (int sample = 0; sample < 11; ++sample) {
+        double measured = 0.0;
+        const auto started = std::chrono::steady_clock::now();
+        static_cast<void>(backend.decode_trunk(9419, input_bf16, true, &measured));
+        trunk_wall_samples.push_back(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count());
+        trunk_samples.push_back(measured);
+    }
+    std::ranges::sort(trunk_samples);
+    std::ranges::sort(trunk_wall_samples);
+    gpu_ms = trunk_samples[trunk_samples.size() / 2];
+    double dot = 0.0, aa = 0.0, bb = 0.0, squared = 0.0, max_abs = 0.0;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        const double lhs = from_bf16(actual[index]);
+        const double rhs = expected[index];
+        const double delta = lhs - rhs;
+        dot += lhs * rhs;
+        aa += lhs * lhs;
+        bb += rhs * rhs;
+        squared += delta * delta;
+        max_abs = std::max(max_abs, std::abs(delta));
+    }
+    const double cosine = dot / std::sqrt(aa * bb);
+    const double rmse = std::sqrt(squared / static_cast<double>(actual.size()));
+    std::cout << "trunk_gpu_ms " << gpu_ms << " trunk_wall_ms "
+              << trunk_wall_samples[trunk_wall_samples.size() / 2]
+              << " trunk_cosine " << cosine
+              << " trunk_rmse " << rmse << " trunk_max_abs " << max_abs << '\n';
+    if (cosine < 0.99 || !std::isfinite(rmse)) {
+        throw std::runtime_error("persistent trunk parity failed");
+    }
+}
+
+void trace_trunk_layers(qwen38::PersistentMetalBackend& backend,
+                        qwen38::MlxTensorStore& tensors,
+                        const std::vector<float>& input_f32,
+                        const std::vector<std::uint16_t>& input_bf16) {
+    std::vector<std::unique_ptr<qwen38::DecoderLayer>> layers;
+    std::vector<qwen38::DecoderLayerState> states(48);
+    layers.reserve(48);
+    for (std::size_t index = 0; index < 48; ++index) {
+        layers.push_back(std::make_unique<qwen38::DecoderLayer>(
+            tensors, index, tensors.manifest().config()));
+    }
+    qwen38::MlxArray oracle = qwen38::MlxArray::from_float32(
+        input_f32, std::vector<int>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    std::vector<std::uint16_t> direct = input_bf16;
+    for (std::size_t index = 0; index < 48; ++index) {
+        if (index == 1) direct = backend.decode_ple(9419, direct, true);
+        direct = index % 4 == 3
+            ? backend.decode_attention_layer(index, direct, true)
+            : backend.decode_gdn_layer(index, direct, true);
+        oracle = layers[index]->forward_decode(oracle, 9419, states[index]);
+        const std::vector<float> expected = oracle.astype(MLX_FLOAT32).to_float32();
+        double dot = 0.0, aa = 0.0, bb = 0.0;
+        for (std::size_t component = 0; component < direct.size(); ++component) {
+            const double lhs = from_bf16(direct[component]);
+            const double rhs = expected[component];
+            dot += lhs * rhs;
+            aa += lhs * lhs;
+            bb += rhs * rhs;
+        }
+        const double cosine = dot / std::sqrt(aa * bb);
+        std::cout << "trunk_layer " << index << " cosine " << cosine << '\n';
+    }
+}
+
+void check_ple(qwen38::PersistentMetalBackend& backend,
+               qwen38::MlxTensorStore& tensors,
+               const std::vector<float>& input_f32,
+               const std::vector<std::uint16_t>& input_bf16) {
+    qwen38::Ple ple(tensors, "language_model.model.layers.1.ple",
+                    tensors.manifest().config());
+    qwen38::PleState state;
+    qwen38::MlxArray input = qwen38::MlxArray::from_float32(
+        input_f32, std::vector<int>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    qwen38::MlxArray ple_output = ple.forward_decode(input, 9419, state);
+    const std::vector<float> expected = qwen38::MlxArray::add(input, ple_output)
+        .astype(MLX_FLOAT32).to_float32();
+    double gpu_ms = 0.0;
+    const std::vector<std::uint16_t> actual =
+        backend.decode_ple(9419, input_bf16, true, &gpu_ms);
+    double dot = 0.0, aa = 0.0, bb = 0.0, squared = 0.0, max_abs = 0.0;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        const double lhs = from_bf16(actual[index]);
+        const double rhs = expected[index];
+        const double delta = lhs - rhs;
+        dot += lhs * rhs;
+        aa += lhs * lhs;
+        bb += rhs * rhs;
+        squared += delta * delta;
+        max_abs = std::max(max_abs, std::abs(delta));
+    }
+    const double cosine = dot / std::sqrt(aa * bb);
+    const double rmse = std::sqrt(squared / static_cast<double>(actual.size()));
+    std::cout << "ple_gpu_ms " << gpu_ms << " ple_cosine " << cosine
+              << " ple_rmse " << rmse << " ple_max_abs " << max_abs << '\n';
+    if (cosine < 0.999 || rmse > 0.05) throw std::runtime_error("persistent PLE parity failed");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -187,7 +316,10 @@ int main(int argc, char** argv) {
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 11, input_f32, input_bf16);
-        return inventory.pipeline_count == 29 && inventory.shard_count != 0 ? 0 : 1;
+        check_ple(*backend, tensors, input_f32, input_bf16);
+        trace_trunk_layers(*backend, tensors, input_f32, input_bf16);
+        check_trunk(*backend, tensors, input_f32, input_bf16);
+        return inventory.pipeline_count == 30 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
