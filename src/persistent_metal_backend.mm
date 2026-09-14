@@ -1,6 +1,7 @@
 #include "qwen38/persistent_metal_backend.hpp"
 
 #include "persistent_metal_kernels.hpp"
+#include "qwen38/model.hpp"
 #include "qwen38/ngram.hpp"
 #include "qwen38/safetensors.hpp"
 
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -75,9 +77,17 @@ public:
     struct AttentionState {
         id<MTLBuffer> hot_keys{nil};
         id<MTLBuffer> hot_values{nil};
+        id<MTLBuffer> key_weights{nil};
+        id<MTLBuffer> key_scales{nil};
+        id<MTLBuffer> key_biases{nil};
+        id<MTLBuffer> value_weights{nil};
+        id<MTLBuffer> value_scales{nil};
+        id<MTLBuffer> value_biases{nil};
         id<MTLBuffer> pending{nil};
         id<MTLBuffer> pooled{nil};
         std::uint32_t token_count{0};
+        std::uint32_t position_base{0};
+        std::uint32_t cold_count{0};
     };
 
     explicit Impl(const ModelManifest& manifest) {
@@ -565,13 +575,14 @@ public:
 
     void encode_attention(id<MTLCommandBuffer> command, const std::string& base,
                           AttentionState& state) {
-        update_rope(rope_cos_, rope_sin_, state.token_count);
+        update_rope(rope_cos_, rope_sin_, state.position_base + state.token_count);
         const std::uint32_t pending_index = state.token_count % 4;
         const std::uint32_t old_blocks = state.token_count / 4;
         const std::uint32_t resulting_tokens = state.token_count + 1;
         const std::uint32_t block_count = resulting_tokens / 4;
         const std::uint32_t complete_block = block_count > old_blocks ? 1 : 0;
-        update_rope(pool_rope_cos_, pool_rope_sin_, old_blocks * 4);
+        update_rope(pool_rope_cos_, pool_rope_sin_,
+                    state.position_base + old_blocks * 4);
 
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline("attention_qkv_index")];
@@ -611,7 +622,8 @@ public:
         bind(encoder, base + ".indexer.k_layernorm.weight", 6);
         [encoder setBuffer:pool_rope_cos_ offset:0 atIndex:7];
         [encoder setBuffer:pool_rope_sin_ offset:0 atIndex:8];
-        [encoder setBytes:&state.token_count length:sizeof(state.token_count) atIndex:9];
+        const std::uint32_t hot_index = state.token_count - state.cold_count;
+        [encoder setBytes:&hot_index length:sizeof(hot_index) atIndex:9];
         [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:10];
         [encoder setBytes:&pending_index length:sizeof(pending_index) atIndex:11];
         [encoder setBytes:&old_blocks length:sizeof(old_blocks) atIndex:12];
@@ -625,19 +637,25 @@ public:
         encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline("qsa_attention_q8_blocks")];
         [encoder setBuffer:attention_query_ offset:0 atIndex:0];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:1];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:2];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:3];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:4];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:5];
-        [encoder setBuffer:q8_dummy_ offset:0 atIndex:6];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.key_weights)
+                    offset:0 atIndex:1];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.key_scales)
+                    offset:0 atIndex:2];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.key_biases)
+                    offset:0 atIndex:3];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.value_weights)
+                    offset:0 atIndex:4];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.value_scales)
+                    offset:0 atIndex:5];
+        [encoder setBuffer:(state.cold_count == 0 ? q8_dummy_ : state.value_biases)
+                    offset:0 atIndex:6];
         [encoder setBuffer:selected_ offset:0 atIndex:7];
         [encoder setBuffer:attention_values_ offset:0 atIndex:8];
-        const std::uint32_t cold_count = 0;
-        [encoder setBytes:&cold_count length:sizeof(cold_count) atIndex:9];
+        [encoder setBytes:&state.cold_count length:sizeof(state.cold_count) atIndex:9];
         [encoder setBuffer:state.hot_keys offset:0 atIndex:10];
         [encoder setBuffer:state.hot_values offset:0 atIndex:11];
-        [encoder setBytes:&resulting_tokens length:sizeof(resulting_tokens) atIndex:12];
+        const std::uint32_t hot_count = resulting_tokens - state.cold_count;
+        [encoder setBytes:&hot_count length:sizeof(hot_count) atIndex:12];
         [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
         [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
         [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
@@ -677,7 +695,7 @@ public:
                         2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
             std::memset(state.pending.contents, 0, 4 * 128 * sizeof(std::uint16_t));
         }
-        if (state.token_count >= hot_capacity) {
+        if (state.token_count - state.cold_count >= hot_capacity) {
             throw std::runtime_error("persistent attention hot slab requires Q8 flush");
         }
         std::memcpy(stream_.contents, stream.data(), stream.size_bytes());
@@ -762,6 +780,8 @@ public:
         for (std::size_t layer = 0; layer < 48; ++layer) {
             if (layer % 4 == 3) {
                 attention_states_[layer].token_count = 0;
+                attention_states_[layer].position_base = 0;
+                attention_states_[layer].cold_count = 0;
                 std::memset(attention_states_[layer].hot_keys.contents, 0,
                             2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
                 std::memset(attention_states_[layer].hot_values.contents, 0,
@@ -777,6 +797,111 @@ public:
         }
         std::memset(ple_convolution_.contents, 0, 9ULL * 10240 * sizeof(std::uint16_t));
         ple_ngram_state_ = {};
+    }
+
+    static void copy_array(const MlxArray& source, id<MTLBuffer> target,
+                           std::size_t offset = 0) {
+        const std::vector<std::uint8_t> bytes = source.to_bytes();
+        if (offset > target.length || bytes.size() > target.length - offset) {
+            throw std::runtime_error("persistent state buffer is too small");
+        }
+        if (!bytes.empty()) {
+            std::memcpy(static_cast<std::uint8_t*>(target.contents) + offset,
+                        bytes.data(), bytes.size());
+        }
+    }
+
+    id<MTLBuffer> buffer_from_array(const MlxArray& source) {
+        const std::vector<std::uint8_t> bytes = source.to_bytes();
+        if (bytes.empty()) throw std::runtime_error("cannot import an empty state array");
+        id<MTLBuffer> result = make_buffer(bytes.size(), false);
+        std::memcpy(result.contents, bytes.data(), bytes.size());
+        return result;
+    }
+
+    void import_state(const ModelDecodeState& source) {
+        if (source.layers.size() != 48) {
+            throw std::runtime_error("persistent state layer count mismatch");
+        }
+        for (std::size_t layer = 0; layer < 48; ++layer) {
+            const DecoderLayerState& input = source.layers[layer];
+            if (layer % 4 != 3) {
+                if (!input.linear_attention.initialized) {
+                    throw std::runtime_error("cannot import uninitialized GDN state");
+                }
+                copy_array(input.linear_attention.convolution,
+                           gdn_states_[layer].convolution);
+                copy_array(input.linear_attention.recurrent,
+                           gdn_states_[layer].recurrent);
+                continue;
+            }
+            const SelfAttentionState& attention = input.full_attention;
+            if (attention.token_count > std::numeric_limits<std::uint32_t>::max() ||
+                attention.position_base > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error("persistent attention state is too large");
+            }
+            const std::size_t cold_tokens = attention.kv_q8
+                ? attention.kv_q8_cold_tokens : 0;
+            if (cold_tokens > attention.token_count ||
+                attention.token_count - cold_tokens > hot_capacity) {
+                throw std::runtime_error("persistent attention hot state is too large");
+            }
+            AttentionState& output = attention_states_[layer];
+            output.token_count = static_cast<std::uint32_t>(attention.token_count);
+            output.position_base = static_cast<std::uint32_t>(attention.position_base);
+            output.cold_count = static_cast<std::uint32_t>(cold_tokens);
+            if (attention.kv_q8) {
+                output.key_weights = buffer_from_array(attention.key_weights);
+                output.key_scales = buffer_from_array(attention.key_scales);
+                output.key_biases = buffer_from_array(attention.key_biases);
+                output.value_weights = buffer_from_array(attention.value_weights);
+                output.value_scales = buffer_from_array(attention.value_scales);
+                output.value_biases = buffer_from_array(attention.value_biases);
+            }
+            std::memset(output.hot_keys.contents, 0, output.hot_keys.length);
+            std::memset(output.hot_values.contents, 0, output.hot_values.length);
+            const std::size_t hot_tokens = attention.token_count - cold_tokens;
+            if (hot_tokens != 0) {
+                const std::vector<std::uint8_t> keys = attention.keys.to_bytes();
+                const std::vector<std::uint8_t> values = attention.values.to_bytes();
+                const std::size_t head_bytes =
+                    hot_tokens * 256 * sizeof(std::uint16_t);
+                if (keys.size() != 2 * head_bytes || values.size() != 2 * head_bytes) {
+                    throw std::runtime_error("persistent BF16 KV geometry mismatch");
+                }
+                const std::size_t target_head_bytes =
+                    hot_capacity * 256 * sizeof(std::uint16_t);
+                for (std::size_t head = 0; head < 2; ++head) {
+                    std::memcpy(static_cast<std::uint8_t*>(output.hot_keys.contents) +
+                                    head * target_head_bytes,
+                                keys.data() + head * head_bytes, head_bytes);
+                    std::memcpy(static_cast<std::uint8_t*>(output.hot_values.contents) +
+                                    head * target_head_bytes,
+                                values.data() + head * head_bytes, head_bytes);
+                }
+            }
+            std::memset(output.pending.contents, 0, output.pending.length);
+            const std::size_t pending_rows = attention.token_count % 4;
+            if (pending_rows != 0) {
+                const std::vector<std::uint8_t> raw = attention.qsa_raw_keys.to_bytes();
+                const std::size_t row_bytes = 128 * sizeof(std::uint16_t);
+                if (raw.size() < pending_rows * row_bytes) {
+                    throw std::runtime_error("persistent QSA raw state is truncated");
+                }
+                std::memcpy(output.pending.contents,
+                            raw.data() + raw.size() - pending_rows * row_bytes,
+                            pending_rows * row_bytes);
+            }
+            if (attention.qsa_pooled_count != 0) {
+                copy_array(attention.qsa_pooled_keys, output.pooled);
+            }
+        }
+        const PleState& ple = source.layers[1].ple;
+        if (!ple.convolution_initialized) {
+            throw std::runtime_error("cannot import uninitialized PLE state");
+        }
+        copy_array(ple.convolution, ple_convolution_);
+        ple_ngram_state_ = ple.ngram;
     }
 
     std::vector<std::uint16_t> decode_trunk(
@@ -810,7 +935,8 @@ public:
                 "language_model.model.layers." + std::to_string(index);
             encode_hc_read(command, layer_input, layer + ".attn_hyper_connection");
             if (index % 4 == 3) {
-                if (attention_states_[index].token_count >= hot_capacity) {
+                if (attention_states_[index].token_count -
+                        attention_states_[index].cold_count >= hot_capacity) {
                     throw std::runtime_error("persistent attention hot slab requires Q8 flush");
                 }
                 encode_attention(command, layer + ".self_attn", attention_states_[index]);
@@ -949,7 +1075,7 @@ public:
     NgramState ple_ngram_state_;
     std::array<GdnState, 48> gdn_states_;
     std::array<AttentionState, 48> attention_states_;
-    static constexpr std::uint32_t hot_capacity = 2048;
+    static constexpr std::uint32_t hot_capacity = 8192;
     id<MTLBuffer> stream_{nil}, normalized_{nil}, activation_{nil}, injection_{nil}, mixed_{nil};
     id<MTLBuffer> projected_{nil}, query_{nil}, key_{nil}, value_{nil}, decay_{nil}, beta_{nil};
     id<MTLBuffer> recurrent_output_{nil}, gated_{nil}, block_output_{nil};
@@ -1036,6 +1162,10 @@ std::vector<std::uint16_t> PersistentMetalBackend::embed(
 PersistentMetalBackend::GreedyResult PersistentMetalBackend::greedy_head(
     const std::span<const std::uint16_t> stream) {
     return impl_->head(stream);
+}
+
+void PersistentMetalBackend::import_state(const ModelDecodeState& state) {
+    impl_->import_state(state);
 }
 
 } // namespace qwen38

@@ -7,12 +7,15 @@
 
 #include <bit>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -346,6 +349,71 @@ void check_greedy(qwen38::PersistentMetalBackend& backend,
     }
 }
 
+void check_state_import(qwen38::PersistentMetalBackend& backend,
+                        qwen38::MlxTensorStore& tensors) {
+    qwen38::QwenModel model(tensors);
+    qwen38::ModelDecodeState state = model.make_state();
+    const std::array<std::uint32_t, 3> prefix{9419, 11, 353};
+    static_cast<void>(model.prefill_chunk(prefix, state));
+    backend.import_state(state);
+    const qwen38::GreedyStep expected = model.greedy_decode(2688, state);
+    const auto actual = backend.greedy_decode(2688, false);
+    std::cout << "imported_state_token " << actual.token << " mlx_token "
+              << expected.token << " imported_state_logit " << actual.logit
+              << " mlx_logit " << expected.logit << '\n';
+    if (actual.token != expected.token) {
+        throw std::runtime_error("persistent imported-state token parity failed");
+    }
+}
+
+void check_q8_state_import(qwen38::PersistentMetalBackend& backend,
+                           qwen38::MlxTensorStore& tensors,
+                           const std::vector<float>& input_f32,
+                           const std::vector<std::uint16_t>& input_bf16) {
+    qwen38::QwenModel model(tensors);
+    qwen38::ModelDecodeState state = model.make_state();
+    const std::vector<std::uint32_t> prefix(2050, 9419);
+    constexpr std::size_t chunk = 64;
+    for (std::size_t offset = 0; offset < prefix.size(); offset += chunk) {
+        const std::size_t count = std::min(chunk, prefix.size() - offset);
+        static_cast<void>(model.prefill_chunk(
+            std::span<const std::uint32_t>(prefix.data() + offset, count), state));
+    }
+    std::cout << "q8_prefill_token_count " << state.layers[3].full_attention.token_count
+              << " q8_enabled " << state.layers[3].full_attention.kv_q8
+              << " q8_cold " << state.layers[3].full_attention.kv_q8_cold_tokens << '\n';
+    if (!state.layers[3].full_attention.kv_q8) {
+        throw std::runtime_error("Q8 import smoke did not create Q8 KV state");
+    }
+    backend.import_state(state);
+    qwen38::DecoderLayer layer(tensors, 3, tensors.manifest().config());
+    qwen38::DecoderLayerState layer_state =
+        qwen38::snapshot_decoder_layer_state(state.layers[3]);
+    qwen38::MlxArray input = qwen38::MlxArray::from_float32(
+        input_f32, std::vector<int>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    const std::vector<float> expected =
+        layer.forward_decode(input, 9419, layer_state).astype(MLX_FLOAT32).to_float32();
+    const std::vector<std::uint16_t> actual =
+        backend.decode_attention_layer(3, input_bf16, false);
+    double dot = 0.0, aa = 0.0, bb = 0.0, squared = 0.0;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        const double lhs = from_bf16(actual[index]);
+        const double rhs = expected[index];
+        const double delta = lhs - rhs;
+        dot += lhs * rhs;
+        aa += lhs * lhs;
+        bb += rhs * rhs;
+        squared += delta * delta;
+    }
+    const double cosine = dot / std::sqrt(aa * bb);
+    const double rmse = std::sqrt(squared / actual.size());
+    std::cout << "q8_import_tokens 2050 q8_import_cosine " << cosine
+              << " q8_import_rmse " << rmse << '\n';
+    if (cosine < 0.999 || rmse > 0.05) {
+        throw std::runtime_error("persistent Q8 imported-state parity failed");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -378,6 +446,11 @@ int main(int argc, char** argv) {
         trace_trunk_layers(*backend, tensors, input_f32, input_bf16);
         check_trunk(*backend, tensors, input_f32, input_bf16);
         check_greedy(*backend, tensors);
+        check_state_import(*backend, tensors);
+        if (const char* q8_import = std::getenv("QWEN38_TEST_Q8_IMPORT");
+            q8_import != nullptr && std::string_view(q8_import) == "1") {
+            check_q8_state_import(*backend, tensors, input_f32, input_bf16);
+        }
         return inventory.pipeline_count == 33 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -930,6 +930,20 @@ std::vector<float> MlxArray::to_float32() const {
     return {data, data + contiguous.size()};
 }
 
+std::vector<std::uint8_t> MlxArray::to_bytes() const {
+    MlxArray contiguous;
+    const Stream stream;
+    check(mlx_contiguous(&contiguous.value_, value_, false, stream.get()), "contiguous");
+    contiguous.eval();
+    const auto* data = mlx_array_data_uint8(contiguous.value_);
+    const std::size_t bytes = mlx_array_nbytes(contiguous.value_);
+    if (data == nullptr && bytes != 0) {
+        throw std::runtime_error("MLX returned null byte array data");
+    }
+    if (bytes == 0) return {};
+    return {data, data + bytes};
+}
+
 std::uint32_t MlxArray::item_uint32() const {
     eval();
     std::uint32_t result = 0;

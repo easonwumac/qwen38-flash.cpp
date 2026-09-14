@@ -278,11 +278,22 @@ it is retained as a regression floor, not claimed as exact trajectory parity.
 Long-context quality remains gated on state import and needle retrieval before
 this backend can replace the MLX decode path.
 
+The sixteenth gate imports a materialized MLX prefill state without replaying
+the prompt. GDN convolution/recurrent tensors, PLE convolution and n-gram
+history, QSA pooled/pending keys, BF16 hot KV and affine-Q8 cold KV are copied
+once into backend-owned Metal buffers. A three-token BF16 batch-prefill handoff
+selected the same next token (`264`) as MLX. The Q8 gate used 2,050 repeated
+tokens, 64-row chunks, a 512-token QSA budget, Q8 transition at 2,049 and a
+2,048-token flush interval; the imported layer-3 continuation matched MLX at
+0.999935 cosine and 4.53e-3 RMSE. This validates cold/hot addressing and pooled
+QSA handoff. The 8,192-token hot tail still fails closed when full; in-backend
+Q8 flushing remains required for very long generation after prefill.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;
 2. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
-3. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate;
+3. add long-run Q8 hot-slab flushes and enforce the 40 GiB memory gate;
 4. move MTP verification onto the persistent backend and measure 60 token/s.
 
 Run the bounded primitive probe with:

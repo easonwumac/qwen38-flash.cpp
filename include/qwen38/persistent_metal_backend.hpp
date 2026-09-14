@@ -11,6 +11,8 @@
 
 namespace qwen38 {
 
+struct ModelDecodeState;
+
 class PersistentMetalBackend final {
 public:
     struct GreedyResult {
@@ -61,6 +63,7 @@ public:
         std::uint32_t token, double* gpu_ms = nullptr);
     [[nodiscard]] GreedyResult greedy_head(std::span<const std::uint16_t> stream);
     [[nodiscard]] GreedyResult greedy_decode(std::uint32_t token, bool reset_state = false);
+    void import_state(const ModelDecodeState& state);
 
 private:
     class Impl;

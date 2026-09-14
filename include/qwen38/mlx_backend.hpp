@@ -180,6 +180,7 @@ public:
     static void clear_cache();
     [[nodiscard]] static std::size_t set_cache_limit(std::size_t bytes);
     [[nodiscard]] std::vector<float> to_float32() const;
+    [[nodiscard]] std::vector<std::uint8_t> to_bytes() const;
     [[nodiscard]] std::uint32_t item_uint32() const;
     [[nodiscard]] float item_float32() const;
     [[nodiscard]] std::vector<int> shape() const;
