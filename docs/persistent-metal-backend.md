@@ -100,12 +100,21 @@ directional context, the existing guarded MLX synthetic 128K layer probe had
 per-process medians of 1.231--2.284 ms in five adjacent runs. This is not yet a
 production speedup claim: the direct path uses different deterministic content,
 does not persist the appended hot K/V or QSA raw/pooled state, and still needs a
-complete-layer MLX parity oracle plus token-trajectory and needle gates.
+token-trajectory and needle gates.
+
+A subsequent complete-layer oracle used the identical 10,240-wide BF16 input,
+arbitrary but identical 131,072-token affine-Q8 K/V bytes/scales/biases, pooled
+QSA bank, current BF16 K/V tail, and real layer-3 Niwaki weights on both paths.
+The persistent output matched MLX at 0.999990 cosine, 1.38e-3 RMSE and 7.81e-3
+maximum absolute error. The oracle's first lazy/compile evaluation took 20.6 ms
+and is reported only for parity, not as a performance control. The remaining
+correctness risk is recursive accumulation across tokens and layers, not a
+large one-layer numerical mismatch.
 
 The next acceptance gates are:
 
 1. persist the appended hot K/V and QSA raw/pooled state in the fixed buffers;
-2. add a complete-layer MLX oracle and match the retained token trajectory;
+2. match the retained multi-token trajectory and bound accumulated drift;
 3. extend the same backend contract to GDN layers;
 4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 

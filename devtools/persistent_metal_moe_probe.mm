@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include "qwen38/decoder_layer.hpp"
 #include "qwen38/hyper_connection.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
@@ -1699,6 +1700,56 @@ mlx_attention_projection_oracle(const qwen38::ModelManifest &manifest, const Pro
     return result;
 }
 
+OracleResult mlx_full_layer_oracle(const qwen38::ModelManifest &manifest,
+                                   std::span<const std::uint16_t> stream_values,
+                                   std::span<const std::uint16_t> pooled_values,
+                                   const std::uint32_t *key_weight, const std::uint16_t *key_scale,
+                                   const std::uint16_t *key_bias, const std::uint32_t *value_weight,
+                                   const std::uint16_t *value_scale,
+                                   const std::uint16_t *value_bias,
+                                   const std::uint32_t token_count) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
+    setenv("QWEN38_QSA_RAW_WINDOW", "64", 1);
+    const auto raw = [](const void *data, const std::span<const int> shape, const mlx_dtype dtype) {
+        return MlxArray(
+            mlx_array_new_data(data, shape.data(), static_cast<int>(shape.size()), dtype));
+    };
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::DecoderLayer layer(store, 3, manifest.config());
+    const std::array<int, 3> stream_shape{1, 1, 10240};
+    MlxArray stream = raw(stream_values.data(), stream_shape, MLX_BFLOAT16);
+    qwen38::DecoderLayerState state;
+    auto &attention = state.full_attention;
+    const std::array<int, 4> weight_shape{1, 2, static_cast<int>(token_count), 64};
+    const std::array<int, 4> affine_shape{1, 2, static_cast<int>(token_count), 4};
+    attention.key_weights = raw(key_weight, weight_shape, MLX_UINT32);
+    attention.key_scales = raw(key_scale, affine_shape, MLX_BFLOAT16);
+    attention.key_biases = raw(key_bias, affine_shape, MLX_BFLOAT16);
+    attention.value_weights = raw(value_weight, weight_shape, MLX_UINT32);
+    attention.value_scales = raw(value_scale, affine_shape, MLX_BFLOAT16);
+    attention.value_biases = raw(value_bias, affine_shape, MLX_BFLOAT16);
+    attention.keys = MlxArray::zeros(std::array<int, 4>{1, 2, 0, 256}, MLX_BFLOAT16);
+    attention.values = MlxArray::zeros(std::array<int, 4>{1, 2, 0, 256}, MLX_BFLOAT16);
+    attention.qsa_raw_keys = MlxArray::zeros(std::array<int, 3>{1, 64, 128}, MLX_BFLOAT16);
+    attention.qsa_raw_start = token_count - 64;
+    attention.qsa_pooled_keys =
+        raw(pooled_values.data(), std::array<int, 3>{1, static_cast<int>(token_count / 4), 128},
+            MLX_BFLOAT16);
+    attention.qsa_pooled_count = token_count / 4;
+    attention.token_count = token_count;
+    attention.kv_q8 = true;
+    attention.kv_q8_cold_tokens = token_count;
+    const auto started = std::chrono::steady_clock::now();
+    MlxArray output = layer.forward_decode(stream, 9419, state);
+    output.eval();
+    const double elapsed =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+    return {output.astype(MLX_FLOAT32).to_float32(), elapsed};
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -2288,11 +2339,14 @@ int main(int argc, char **argv) {
             std::uint64_t persistent_layer_hash = 1469598103934665603ULL;
             const auto *persistent_layer_bits =
                 static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            std::vector<float> persistent_layer_output(10240);
             for (int i = 0; i < 10240; ++i) {
                 if (!std::isfinite(from_bf16(persistent_layer_bits[i])))
                     throw std::runtime_error("non-finite persistent layer output");
                 persistent_layer_hash ^= persistent_layer_bits[i];
                 persistent_layer_hash *= 1099511628211ULL;
+                persistent_layer_output[static_cast<std::size_t>(i)] =
+                    from_bf16(persistent_layer_bits[i]);
             }
 
             for (int i = 0; i < 5; ++i)
@@ -2719,6 +2773,20 @@ int main(int argc, char **argv) {
                 mlp_squared_error += delta * delta;
                 mlp_max_abs = std::max(mlp_max_abs, std::abs(delta));
             }
+            const OracleResult layer_oracle = mlx_full_layer_oracle(
+                manifest, stream_bf16, qsa_pooled_values, qkw, qks, qkb, qvw, qvs, qvb, qsa_tokens);
+            double layer_dot = 0.0, layer_aa = 0.0, layer_bb = 0.0;
+            double layer_squared_error = 0.0, layer_max_abs = 0.0;
+            for (int i = 0; i < 10240; ++i) {
+                const double actual = persistent_layer_output[static_cast<std::size_t>(i)];
+                const double expected = layer_oracle.output[static_cast<std::size_t>(i)];
+                const double delta = actual - expected;
+                layer_dot += actual * expected;
+                layer_aa += actual * actual;
+                layer_bb += expected * expected;
+                layer_squared_error += delta * delta;
+                layer_max_abs = std::max(layer_max_abs, std::abs(delta));
+            }
             std::cout
                 << "{\"device\":\"" << device.name.UTF8String
                 << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
@@ -2751,6 +2819,10 @@ int main(int argc, char **argv) {
                 << ",\"persistent_layer_gpu_median_ms\":" << median(persistent_layer_gpu)
                 << ",\"persistent_layer_wall_median_ms\":" << median(persistent_layer_wall)
                 << ",\"persistent_layer_hash\":\"" << persistent_layer_hash << "\""
+                << ",\"mlx_layer_oracle_ms\":" << layer_oracle.median_ms
+                << ",\"persistent_layer_cosine\":" << layer_dot / std::sqrt(layer_aa * layer_bb)
+                << ",\"persistent_layer_rmse\":" << std::sqrt(layer_squared_error / 10240.0)
+                << ",\"persistent_layer_max_abs\":" << layer_max_abs
                 << ",\"split_gpu_median_ms\":" << median(split)
                 << ",\"joined_wall_median_ms\":" << median(joined_wall)
                 << ",\"split_wall_median_ms\":" << median(split_wall)
