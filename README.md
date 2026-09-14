@@ -97,6 +97,7 @@ Long-context distributions below use independent cold server starts.
 
 | Workload | Configuration | Result |
 |---|---|---:|
+| Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
@@ -121,6 +122,8 @@ checkpoint and machine.
 The deterministic 30-request serial quality suite scored 22/30 with zero
 request or parse errors, matching the retained model baseline. This measures the
 checkpoint and request lifecycle; it is not a claim of universal model accuracy.
+The public IFBench result and its comparability limits are documented in the
+[public quality evaluation](docs/public-quality-evaluation.md).
 
 Full workload definitions, hashes, distributions, guard reports, and rejected
 experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
@@ -145,6 +148,9 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   product claim is therefore not made.
 - The Q8 drafter increases admission pressure. `--mtp-depth off` is retained as
   a resource-limit override for smaller machines.
+- Four HTTP connections can queue concurrently, but inference is serialized.
+  Replicating four MLX engines exceeded 49 GiB in a short-request probe; true
+  four-way service under 40 GiB requires single-model continuous batching.
 - Multimodal input is not supported.
 - The server currently exposes Chat Completions, not the Responses API required
   by current Codex custom providers.
