@@ -46,6 +46,8 @@ struct GenerationResult {
     std::size_t context_copy_proposed{0};
     std::size_t context_copy_accepted{0};
     std::size_t context_copy_suspensions{0};
+    std::size_t thinking_budget_tokens{0};
+    bool thinking_budget_forced{false};
 };
 
 struct SamplingOptions {
@@ -53,6 +55,11 @@ struct SamplingOptions {
     float top_p{1.0F};
     std::size_t top_k{0};
     std::uint64_t seed{0};
+    float frequency_penalty{0.0F};
+    // Zero disables lifecycle intervention. A positive value caps generated
+    // reasoning before the engine forces Qwen's early-stop phrase and
+    // </think>, then continues the final answer in the same decode state.
+    std::size_t thinking_budget_tokens{0};
 };
 
 class InferenceEngine {

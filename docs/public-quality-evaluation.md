@@ -109,6 +109,20 @@ decode was 34.84 tok/s (per-request median 34.66, range 33.86--36.06), with a
 used as quality evidence. The corrected run instead exposes the need for an
 explicit thinking budget and final-answer continuation.
 
+That lifecycle is now implemented inside the engine. For a 4,096-token xhigh
+request it reserves the final third and allows 2,730 generated reasoning tokens.
+If the budget is reached, or EOS is sampled while reasoning is still open, the
+engine replaces the stop with Qwen's documented early-stop phrase and closing
+marker, then continues from the same KV state. The injected tokens do not
+consume RNG draws. Thinking requests that omit sampling fields now inherit the
+checkpoint defaults: temperature 1.0, top-p 0.95, and top-k 20.
+
+On the same REAP-288 three-prompt pilot, all three requests required the
+intervention and returned final answers. Strict and loose accuracy recovered to
+**2/3**, aggregate decode was 35.81 tok/s (range 35.35--36.27), and the guarded
+peak footprint was 39.0 GiB. This validates the lifecycle mechanism; three
+prompts remain too small for a model-quality estimate.
+
 ### Niwaki 113B pilot
 
 `Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx` was tested on the same first
@@ -132,6 +146,14 @@ A low-effort control closed all three thinking blocks in 335--521 tokens but
 still scored 0/3; lowering temperature to 0.6 made all three requests exhaust
 4,096 tokens. These tiny controls establish lifecycle sensitivity, not an
 accuracy estimate.
+
+The bounded lifecycle made all three Niwaki requests return final answers, but
+the official strict and loose scores remained 0/3. Aggregate decode was 40.07
+tok/s and guarded peak footprint was 26.7 GiB. A separate 0.3 frequency-penalty
+probe shortened the three completions from 7,793 to 1,919 total tokens, but also
+remained 0/3. Frequency penalty is therefore exposed as a request option but is
+not an automatic default, especially because IFBench deliberately requires
+exact keyword repetition.
 
 A stock `mlx-vlm` 0.7.0 / MLX 0.32.2 control used the checkpoint's native
 2-bit PLE on the first prompt. Sampled xhigh thinking did not emit

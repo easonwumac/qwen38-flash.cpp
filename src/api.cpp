@@ -35,8 +35,13 @@ std::size_t max_tokens(const Json& body) {
     return static_cast<std::size_t>(parsed);
 }
 
-SamplingOptions sampling_options(const Json& body) {
+SamplingOptions sampling_options(const Json& body, const bool thinking) {
     SamplingOptions options;
+    if (thinking) {
+        options.temperature = 1.0F;
+        options.top_p = 0.95F;
+        options.top_k = 20;
+    }
     if (const Json* value = body.find("temperature"); value != nullptr) {
         options.temperature = static_cast<float>(value->as_number());
     }
@@ -53,14 +58,34 @@ SamplingOptions sampling_options(const Json& body) {
         if (parsed < 0) throw std::runtime_error("seed must not be negative");
         options.seed = static_cast<std::uint64_t>(parsed);
     }
+    if (const Json* value = body.find("frequency_penalty"); value != nullptr) {
+        options.frequency_penalty = static_cast<float>(value->as_number());
+    }
     if (options.temperature < 0.0F || options.top_p <= 0.0F ||
         options.top_p > 1.0F ||
+        options.frequency_penalty < 0.0F || options.frequency_penalty > 2.0F ||
         (options.temperature > 0.0F &&
             (options.top_k == 0 || options.top_k > 256))) {
         throw std::runtime_error(
-            "sampling requires temperature >= 0, top_p in (0, 1], and top_k in 1..256");
+            "sampling requires temperature >= 0, top_p in (0, 1], top_k in 1..256, "
+            "and frequency_penalty in [0, 2]");
     }
     return options;
+}
+
+std::size_t automatic_thinking_budget(
+    const std::size_t max_tokens,
+    const ReasoningEffort effort) {
+    // Very small responses cannot fit both the official early-stop phrase and
+    // a useful final answer. For normal requests, reserve progressively more
+    // of the allowance for reasoning without ever starving the final answer.
+    if (max_tokens < 512) return 0;
+    switch (effort) {
+    case ReasoningEffort::low: return max_tokens / 4;
+    case ReasoningEffort::medium: return max_tokens / 2;
+    case ReasoningEffort::xhigh: return max_tokens * 2 / 3;
+    }
+    throw std::runtime_error("unsupported reasoning effort");
 }
 
 bool streaming_enabled(const Json& body) {
@@ -283,6 +308,9 @@ std::string completion_json(
         << ",\"proposed\":" << result.context_copy_proposed
         << ",\"accepted\":" << result.context_copy_accepted
         << ",\"suspensions\":" << result.context_copy_suspensions << "}"
+        << ",\"thinking\":{\"budget_tokens\":" << result.thinking_budget_tokens
+        << ",\"forced\":" << (result.thinking_budget_forced ? "true" : "false")
+        << "}"
         << "}}";
     return out.str();
 }
@@ -435,7 +463,12 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                 prompt = body.at("prompt").as_string();
             }
             const std::size_t requested_tokens = max_tokens(body);
-            const SamplingOptions sampling = sampling_options(body);
+            SamplingOptions sampling = sampling_options(
+                body, chat && template_options.enable_thinking);
+            if (chat && template_options.enable_thinking) {
+                sampling.thinking_budget_tokens = automatic_thinking_budget(
+                    requested_tokens, template_options.reasoning_effort);
+            }
             if (stream) {
                 return {
                     .status = 200,

@@ -107,12 +107,13 @@ void run_api_tests() {
     QWEN38_CHECK(engine.last_max_tokens == 512);
     const auto sampled_completion = inference_api.handle(post(
         "/v1/completions",
-        R"({"prompt":"hello","temperature":0.6,"top_p":0.95,"top_k":20,"seed":42})"));
+        R"({"prompt":"hello","temperature":0.6,"top_p":0.95,"top_k":20,"seed":42,"frequency_penalty":0.3})"));
     QWEN38_CHECK(sampled_completion.status == 200);
     QWEN38_CHECK(engine.last_sampling.temperature == 0.6F);
     QWEN38_CHECK(engine.last_sampling.top_p == 0.95F);
     QWEN38_CHECK(engine.last_sampling.top_k == 20);
     QWEN38_CHECK(engine.last_sampling.seed == 42);
+    QWEN38_CHECK(engine.last_sampling.frequency_penalty == 0.3F);
     QWEN38_CHECK(inference_api.handle(post(
         "/v1/completions",
         R"({"prompt":"hello","temperature":0.6,"top_p":0.95,"top_k":0})"))
@@ -120,6 +121,10 @@ void run_api_tests() {
     QWEN38_CHECK(inference_api.handle(post(
         "/v1/completions",
         R"({"prompt":"hello","temperature":-1,"top_k":20})"))
+        .status == 400);
+    QWEN38_CHECK(inference_api.handle(post(
+        "/v1/completions",
+        R"({"prompt":"hello","frequency_penalty":2.1})"))
         .status == 400);
     const auto invalid_token_limit = inference_api.handle(post(
         "/v1/completions", R"({"prompt":"hello","max_tokens":0})"));
@@ -129,6 +134,20 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"max_completion_tokens":2})"));
     QWEN38_CHECK(chat.status == 200);
     QWEN38_CHECK(engine.last_prompt.find("<|im_start|>user") != std::string::npos);
+    QWEN38_CHECK(engine.last_sampling.temperature == 1.0F);
+    QWEN38_CHECK(engine.last_sampling.top_p == 0.95F);
+    QWEN38_CHECK(engine.last_sampling.top_k == 20);
+    QWEN38_CHECK(engine.last_sampling.thinking_budget_tokens == 0);
+    const auto budgeted_chat = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":4096,"reasoning_effort":"xhigh"})"));
+    QWEN38_CHECK(budgeted_chat.status == 200);
+    QWEN38_CHECK(engine.last_sampling.thinking_budget_tokens == 2730);
+    const auto low_budget_chat = inference_api.handle(post(
+        "/v1/chat/completions",
+        R"({"messages":[{"role":"user","content":"hello"}],"max_tokens":4096,"reasoning_effort":"low"})"));
+    QWEN38_CHECK(low_budget_chat.status == 200);
+    QWEN38_CHECK(engine.last_sampling.thinking_budget_tokens == 1024);
     const auto tool_followup = inference_api.handle(post(
         "/v1/chat/completions",
         R"({"tools":[{"type":"function","function":{"name":"read","description":"Read a file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}],"messages":[{"role":"user","content":"read it"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"/tmp/a\"}"}}]},{"role":"tool","tool_call_id":"call_1","content":"done"}]})"));
@@ -171,6 +190,8 @@ void run_api_tests() {
         R"({"messages":[{"role":"user","content":"hello"}],"enable_thinking":false})"));
     QWEN38_CHECK(no_think.status == 200);
     QWEN38_CHECK(engine.last_prompt.ends_with("<think>\n\n</think>\n\n"));
+    QWEN38_CHECK(engine.last_sampling.temperature == 0.0F);
+    QWEN38_CHECK(engine.last_sampling.thinking_budget_tokens == 0);
     const auto no_think_compat = inference_api.handle(post(
         "/v1/chat/completions",
         R"({"messages":[{"role":"user","content":"hello"}],"thinking":false})"));
@@ -248,7 +269,7 @@ void run_api_tests() {
         [](const std::string_view) { return false; });
     QWEN38_CHECK(engine.stream_calls == stream_calls_before_early_disconnect);
     QWEN38_CHECK(runtime.snapshot().requests_cancelled == 2);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 26);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 30);
     QWEN38_CHECK(inference_api.handle(get("/v1/status")).body.find(
         "\"cancelled\":2") != std::string::npos);
     QWEN38_CHECK(inference_api.handle(get("/metrics")).body.find(

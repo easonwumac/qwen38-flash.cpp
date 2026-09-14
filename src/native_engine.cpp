@@ -77,15 +77,22 @@ std::uint32_t sample_token(
     const MlxArray& logits,
     const ModelDecodeState& state,
     const SamplingOptions& options,
-    std::mt19937_64& random) {
+    std::mt19937_64& random,
+    const std::span<const std::uint32_t> generated_tokens) {
     if (options.temperature <= 0.0F) return argmax_token(logits, state);
     const std::vector<int> shape = logits.shape();
     if (shape.empty() || shape.back() <= 0) {
         throw std::runtime_error("sampling requires a vocabulary axis");
     }
     const int vocabulary = shape.back();
+    // A modest frequency penalty can move a recent token out of the requested
+    // top-k. Inspect a bounded wider frontier so replacements can enter without
+    // transferring a full vocabulary to the CPU.
+    const std::size_t frontier = options.frequency_penalty == 0.0F
+        ? options.top_k
+        : std::max<std::size_t>(options.top_k, 256);
     const int count = static_cast<int>(std::min<std::size_t>(
-        options.top_k, static_cast<std::size_t>(vocabulary)));
+        frontier, static_cast<std::size_t>(vocabulary)));
     if (count <= 0) throw std::runtime_error("sampling requires top_k to be positive");
 
     std::vector<int> start(shape.size(), 0);
@@ -102,9 +109,35 @@ std::uint32_t sample_token(
                                  .reshape(std::vector<int>{count})
                                  .astype(MLX_FLOAT32);
     eval_with_decode_state(values, state);
-    const std::vector<float> candidate_values = values.to_float32();
-    const std::vector<float> candidate_probabilities = probabilities.to_float32();
+    std::vector<float> candidate_values = values.to_float32();
+    std::vector<float> candidate_probabilities = probabilities.to_float32();
     const std::vector<float> candidate_indices = indices.astype(MLX_FLOAT32).to_float32();
+    if (options.frequency_penalty != 0.0F && !generated_tokens.empty()) {
+        constexpr std::size_t context_size = 64;
+        const std::size_t begin = generated_tokens.size() > context_size
+            ? generated_tokens.size() - context_size
+            : 0;
+        double normalization = 1.0;
+        for (std::size_t candidate = 0; candidate < candidate_values.size(); ++candidate) {
+            const std::uint32_t token = static_cast<std::uint32_t>(candidate_indices[candidate]);
+            const std::size_t occurrences = static_cast<std::size_t>(std::count(
+                generated_tokens.begin() + static_cast<std::ptrdiff_t>(begin),
+                generated_tokens.end(), token));
+            if (occurrences == 0) continue;
+            const double penalty = static_cast<double>(options.frequency_penalty) *
+                static_cast<double>(occurrences);
+            const double multiplier = std::exp(-penalty);
+            candidate_values[candidate] -= static_cast<float>(penalty);
+            normalization += static_cast<double>(candidate_probabilities[candidate]) *
+                (multiplier - 1.0);
+            candidate_probabilities[candidate] *= static_cast<float>(multiplier);
+        }
+        if (normalization > 0.0) {
+            for (float& probability : candidate_probabilities) {
+                probability /= static_cast<float>(normalization);
+            }
+        }
+    }
     std::vector<std::size_t> order(static_cast<std::size_t>(count));
     for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
     std::ranges::sort(order, {}, [&](const std::size_t index) {
@@ -124,7 +157,8 @@ std::uint32_t sample_token(
     // the probability mass strictly above it is below top_p.
     double higher_probability = 0.0;
     std::size_t retained_count = 0;
-    while (retained_count < weights.size() && higher_probability < options.top_p) {
+    const std::size_t top_k_count = std::min(options.top_k, weights.size());
+    while (retained_count < top_k_count && higher_probability < options.top_p) {
         higher_probability += candidate_probabilities[order[retained_count]];
         ++retained_count;
     }
@@ -475,12 +509,15 @@ GenerationResult NativeEngine::complete_impl(
     }
     if (sampling.temperature < 0.0F || sampling.top_p <= 0.0F ||
         sampling.top_p > 1.0F ||
+        sampling.frequency_penalty < 0.0F || sampling.frequency_penalty > 2.0F ||
         (sampling.temperature > 0.0F &&
             (sampling.top_k == 0 || sampling.top_k > 256))) {
         throw std::runtime_error(
-            "sampling requires temperature >= 0, top_p in (0, 1], and top_k in 1..256");
+            "sampling requires temperature >= 0, top_p in (0, 1], top_k in 1..256, "
+            "and frequency_penalty in [0, 2]");
     }
     const bool sampling_enabled = sampling.temperature > 0.0F;
+    const bool serial_only = sampling_enabled || sampling.thinking_budget_tokens != 0;
     std::mt19937_64 sampling_random(sampling.seed);
     std::scoped_lock lock(inference_mutex_);
     if (persistent_backend_ != nullptr) {
@@ -766,7 +803,7 @@ GenerationResult NativeEngine::complete_impl(
         persistent_active = true;
         persistent_reset = false;
     };
-    if (!sampling_enabled && persistent_backend_ != nullptr && mtp_head_ == nullptr &&
+    if (!serial_only && persistent_backend_ != nullptr && mtp_head_ == nullptr &&
         persistent_anchor_remaining == 0) {
         const auto prepare_started = std::chrono::steady_clock::now();
         if (!persistent_reset) {
@@ -786,11 +823,11 @@ GenerationResult NativeEngine::complete_impl(
                   ? HistoryDraftMode::disabled
                   : HistoryDraftMode::forced);
     HistoryDraftPolicy history_draft_policy(history_draft_mode);
-    const bool history_draft_enabled = !sampling_enabled && history_draft_policy.enabled();
+    const bool history_draft_enabled = !serial_only && history_draft_policy.enabled();
     HistoryDraftCache history_draft;
     if (history_draft_enabled) history_draft.append(prompt_tokens);
     const char* context_copy_environment = std::getenv("QWEN38_CONTEXT_COPY");
-    const bool context_copy_enabled = !sampling_enabled && context_copy_environment != nullptr &&
+    const bool context_copy_enabled = !serial_only && context_copy_environment != nullptr &&
         std::string_view(context_copy_environment) == "1" && mtp_head_ != nullptr;
     std::size_t context_copy_max_tokens = 16;
     if (const char* value = std::getenv("QWEN38_CONTEXT_COPY_MAX_TOKENS")) {
@@ -815,7 +852,7 @@ GenerationResult NativeEngine::complete_impl(
     std::size_t context_copy_backoff = 64;
     double context_copy_acceptance_ema = 0.5;
     MtpProfitabilityGuard profitability_guard;
-    bool mtp_profitable = !sampling_enabled && mtp_head_ != nullptr &&
+    bool mtp_profitable = !serial_only && mtp_head_ != nullptr &&
         cached_mtp_profitability.value_or(true);
     result.mtp_profitability_cache_skip =
         cached_mtp_profitability.has_value() && !*cached_mtp_profitability;
@@ -828,7 +865,7 @@ GenerationResult NativeEngine::complete_impl(
         }
     }
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
-    result.mtp_final_depth = sampling_enabled ? 0 : depth_policy.depth();
+    result.mtp_final_depth = serial_only ? 0 : depth_policy.depth();
     bool stopped_on_terminator = false;
     const auto is_stop_token = [&](const std::uint32_t token) {
         return token == tensors_.manifest().config().end_of_sequence_token ||
@@ -877,7 +914,39 @@ GenerationResult NativeEngine::complete_impl(
         std::clog << "]\n";
     }
     const auto generation_started = std::chrono::steady_clock::now();
+    result.thinking_budget_tokens = sampling.thinking_budget_tokens;
+    const std::vector<std::uint32_t> thinking_close_tokens =
+        sampling.thinking_budget_tokens == 0
+        ? std::vector<std::uint32_t>{}
+        : tokenizer_.encode("</think>");
+    if (sampling.thinking_budget_tokens != 0 && thinking_close_tokens.size() != 1) {
+        throw std::runtime_error("Qwen thinking close marker must encode to one token");
+    }
+    const std::vector<std::uint32_t> forced_thinking_suffix =
+        sampling.thinking_budget_tokens == 0
+        ? std::vector<std::uint32_t>{}
+        : tokenizer_.encode(
+              "\n\nConsidering the limited time by the user, I have to give the solution "
+              "based on the thinking directly now.\n</think>\n\n");
+    std::deque<std::uint32_t> forced_tokens;
+    bool thinking_closed = false;
+    bool thinking_intervention_attempted = false;
+    const auto begin_thinking_intervention = [&] {
+        if (thinking_intervention_attempted || thinking_closed ||
+            forced_thinking_suffix.empty()) return;
+        thinking_intervention_attempted = true;
+        // Keep at least one model-generated final-answer token available.
+        if (result.tokens.size() + forced_thinking_suffix.size() >= max_tokens) return;
+        forced_tokens.insert(
+            forced_tokens.end(), forced_thinking_suffix.begin(), forced_thinking_suffix.end());
+        result.thinking_budget_forced = true;
+    };
     while (result.tokens.size() < max_tokens) {
+        if (!thinking_closed && forced_tokens.empty() &&
+            sampling.thinking_budget_tokens != 0 &&
+            result.tokens.size() >= sampling.thinking_budget_tokens) {
+            begin_thinking_intervention();
+        }
         const std::size_t remaining = max_tokens - result.tokens.size();
         if (!mtp_profitable || !previous_target_stream.has_value() ||
             remaining == 1 || (extend_cache_enabled && remaining == 2)) {
@@ -915,9 +984,18 @@ GenerationResult NativeEngine::complete_impl(
                 ++state.token_count;
             } else {
                 TargetDecodeStep step = model_.forward_decode_capture(current, state);
-                const std::uint32_t token = sample_token(
-                    step.logits, state, sampling, sampling_random);
+                std::uint32_t token = forced_tokens.empty()
+                    ? sample_token(
+                          step.logits, state, sampling, sampling_random, result.tokens)
+                    : forced_tokens.front();
                 previous_target_stream = std::move(step.pre_mixer_stream);
+                if (forced_tokens.empty() && !thinking_closed && is_stop_token(token)) {
+                    begin_thinking_intervention();
+                }
+                if (!forced_tokens.empty()) {
+                    token = forced_tokens.front();
+                    forced_tokens.pop_front();
+                }
                 current = token;
                 if (persistent_anchor_remaining != 0 &&
                     --persistent_anchor_remaining == 0 && !is_stop_token(current)) {
@@ -931,6 +1009,10 @@ GenerationResult NativeEngine::complete_impl(
                 break;
             }
             result.tokens.push_back(current);
+            if (!thinking_closed && !thinking_close_tokens.empty() &&
+                current == thinking_close_tokens.front()) {
+                thinking_closed = true;
+            }
             if (!emit_new_tokens()) {
                 result.finish_reason = "cancelled";
                 break;
@@ -1092,7 +1174,7 @@ GenerationResult NativeEngine::complete_impl(
         if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
-            if (!sampling_enabled && persistent_backend_ != nullptr && !persistent_active) {
+            if (!serial_only && persistent_backend_ != nullptr && !persistent_active) {
                 activate_persistent();
             }
         }

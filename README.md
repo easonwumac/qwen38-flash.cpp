@@ -89,6 +89,10 @@ reference. Full conditions are in the
 - **Correct thinking sampling:** OpenAI-compatible temperature, top-p, top-k,
   and seed controls use device-side top-k selection and a bounded CPU draw.
   Sampling automatically bypasses greedy-only speculative and persistent paths.
+- **Bounded thinking lifecycle:** thinking requests automatically use the
+  checkpoint's sampled defaults and reserve final-answer capacity. If the
+  reasoning budget or a premature EOS is reached before `</think>`, the engine
+  inserts Qwen's early-stop instruction and continues from the same KV state.
 
 ## Final evaluation
 
@@ -101,9 +105,9 @@ Long-context distributions below use independent cold server starts.
 | Workload | Configuration | Result |
 |---|---|---:|
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
-| Niwaki 113B hybrid IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; MTP off; corrected sampled xhigh thinking, temp 1.0, top-p .95, top-k 20, seed 0, max 4,096 | **0/3 strict and loose**; 1 length, 1 EOS inside unclosed thinking, 1 final answer; **36.72 aggregate decode tok/s**; 26.8 GiB peak footprint across the corrected-sampling session |
+| REAP-288 bounded-thinking IFBench pilot, 3 prompts | corrected sampled xhigh thinking; automatic 2,730-token reasoning budget within max 4,096; MTP off | **2/3 strict and loose**; all three forced a close and returned a final answer; **35.81 aggregate decode tok/s**; 39.0 GiB peak footprint |
+| Niwaki 113B bounded-thinking IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; same protocol; MTP off | **0/3 strict and loose** despite three final answers; **40.07 aggregate decode tok/s**; 26.7 GiB peak footprint |
 | Niwaki 113B stock control, first pilot prompt | stock `mlx-vlm` 0.7.0/MLX 0.32.2 and native 2-bit PLE; sampled xhigh thinking, max 4,096 | no `</think>` or final answer; 29.13 tok/s; 43.58 GB MLX peak / 41.3 GiB guarded footprint |
-| REAP-288 corrected-sampling IFBench pilot, 3 prompts | Q4 target, MTP off; sampled xhigh thinking with the same parameters and limit | **0/3 strict and loose**; all 3 exhausted 4,096 tokens inside thinking; **34.84 aggregate decode tok/s**; 39.1 GiB peak footprint |
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |

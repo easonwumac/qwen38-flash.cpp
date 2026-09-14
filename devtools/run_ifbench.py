@@ -51,6 +51,7 @@ def main() -> int:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--frequency-penalty", type=float, default=0.0)
     args = parser.parse_args()
     temperature = args.temperature
     if temperature is None:
@@ -90,7 +91,12 @@ def main() -> int:
             body["thinking"] = False
         else:
             body["reasoning_effort"] = args.reasoning_effort
-            body.update(top_p=args.top_p, top_k=args.top_k, seed=args.seed)
+            body.update(
+                top_p=args.top_p,
+                top_k=args.top_k,
+                seed=args.seed,
+                frequency_penalty=args.frequency_penalty,
+            )
         request = urllib.request.Request(
             args.url.rstrip("/") + "/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -150,6 +156,7 @@ def main() -> int:
             "top_p": None if args.no_thinking else args.top_p,
             "top_k": None if args.no_thinking else args.top_k,
             "seed": None if args.no_thinking else args.seed,
+            "frequency_penalty": None if args.no_thinking else args.frequency_penalty,
             "thinking": not args.no_thinking,
             "reasoning_effort": None if args.no_thinking else args.reasoning_effort,
             "max_tokens": args.max_tokens,

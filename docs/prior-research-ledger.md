@@ -367,8 +367,19 @@ The invalid 2/3 result is retired. Sampled generation intentionally bypasses
 greedy MTP, history/context drafts, and the persistent greedy backend. Future
 acceleration requires stochastic speculative acceptance; re-enabling greedy
 verification for sampled requests is a rejected shortcut. The next quality
-gate is a bounded two-stage thinking lifecycle, not a larger run of an
+gate was a bounded two-stage thinking lifecycle, not a larger run of an
 unbounded configuration.
+
+2026-09-14 bounded-thinking result: the runtime now derives a reasoning budget
+from effort and total output capacity, intercepts EOS before `</think>`, and
+feeds Qwen's early-stop suffix through the existing decode state before
+continuing the final answer. Corrected-sampling REAP-288 recovered from 0/3
+with three length failures to 2/3 strict and loose with three final answers;
+aggregate decode was 35.81 tok/s and peak footprint 39.0 GiB. Niwaki 113B moved
+from missing finals to three finals but remained 0/3 at 40.07 tok/s and 26.7
+GiB, isolating the remaining pilot gap to checkpoint behavior rather than the
+common inference lifecycle. A bounded 0.3 frequency-penalty probe reduced
+Niwaki output length but remained 0/3 and is not promoted automatically.
 
 The implementation order is deliberately narrow:
 
