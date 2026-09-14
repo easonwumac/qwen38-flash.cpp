@@ -38,15 +38,17 @@ copying or linking either asset:
   --profile speed --mtp-depth off
 ```
 
-Directional single-run results on the same M5 Pro 64 GiB Mac were 34.81 tok/s
-steady short decode with the dense-injection candidate, and 600.45 PP tok/s for
-an 8,192-token developer corpus with 1,024-row chunks. Short-model footprint was
-20.9 GiB. At 131,140 tokens, Q8 KV plus a 64-row raw-QSA window used 20.6 GiB RSS
-and produced 12.44 tok/s with the full 2,048-token decode attention budget; the
-remaining 32--35 tok/s long-context target still requires the planned QSA/Metal
-backend work. These are performance/capacity probes, not a Niwaki quality or
-needle-retrieval qualification. Full conditions are in
-[the Niwaki 99B bring-up report](docs/niwaki-99b-bringup.md).
+Niwaki's dense BF16 healing matrices have the form `I + delta`. A deterministic
+rank-64 delta sidecar reduces their runtime work to two narrow projections per
+layer. Directional runs on the same M5 Pro 64 GiB Mac reached 41.16 tok/s on a
+natural short trajectory while matching all 16 full-map tokens. With Q8 KV, a
+64-row raw-QSA window, and a 256-token decode selection, the 131,140-token needle
+run recovered `V1-NEBULA-128` at **671.82 PP tok/s and 29.38 decode tok/s**, with
+a 23.2 GiB guarded peak footprint. This is a candidate, not yet the production
+model: broad quality and three-run cold validation remain, and the no-MTP 40
+tok/s long-context goal is not met. Full conditions are in the
+[bring-up](docs/niwaki-99b-bringup.md) and
+[low-rank map report](docs/niwaki-lowrank-maps.md).
 
 ## What improved
 

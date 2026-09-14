@@ -99,7 +99,10 @@ private:
     std::unique_ptr<Ple> ple_;
     SparseMoe mlp_;
     bool has_mlp_output_map_{false};
+    bool has_low_rank_mlp_output_map_{false};
     MlxArray mlp_output_map_;
+    MlxArray mlp_output_map_left_;
+    MlxArray mlp_output_map_right_;
     mutable std::once_flag compile_once_;
     mutable mlx_closure compiled_{};
 };

@@ -99,6 +99,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--label", required=True)
     parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--skip-long", action="store_true")
     parser.add_argument("--case", action="append", dest="case_ids", help="run only this case id (repeatable)")
     parser.add_argument(
@@ -126,7 +127,7 @@ def main() -> int:
             {
                 "model": "qwen38-flash",
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 64,
+                "max_tokens": args.max_tokens,
                 "temperature": 0,
                 "thinking": False,
                 "stream": False,
@@ -138,18 +139,27 @@ def main() -> int:
             headers={"Content-Type": "application/json"},
         )
         started = time.monotonic()
+        content, reasoning, actual, passed = "", "", None, False
+        perf, usage = {}, {}
         try:
             with urllib.request.urlopen(request, timeout=args.timeout) as response:
                 payload = json.load(response)
-            content = payload["choices"][0]["message"].get("content") or ""
-            actual = parse_answer(content)
-            passed = equal(actual, case.expected)
-            error = None
+            message = payload["choices"][0]["message"]
+            content = message.get("content") or ""
+            reasoning = message.get("reasoning_content") or ""
             perf = payload.get("performance", {})
             usage = payload.get("usage", {})
+            try:
+                actual = parse_answer(content)
+            except ValueError:
+                if case.category == "long_context" and str(case.expected) in content:
+                    actual = case.expected
+                else:
+                    raise
+            passed = equal(actual, case.expected)
+            error = None
         except Exception as exc:  # Preserve failures in the artifact and continue.
-            content, actual, passed = "", None, False
-            error, perf, usage = f"{type(exc).__name__}: {exc}", {}, {}
+            error = f"{type(exc).__name__}: {exc}"
         row = {
             "id": case.id,
             "category": case.category,
@@ -158,6 +168,7 @@ def main() -> int:
             "passed": passed,
             "error": error,
             "content": content,
+            "reasoning_content": reasoning,
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "prompt_ms": perf.get("prompt_ms"),

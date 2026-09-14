@@ -154,8 +154,30 @@ DecoderLayer::DecoderLayer(
         ple_ = std::make_unique<Ple>(tensors, prefix + ".ple", config);
     }
     if (config.niwaki_maps_unfolded) {
-        mlp_output_map_ = tensors.tensor(prefix + ".mlp.T");
         has_mlp_output_map_ = true;
+        const std::string left_name = prefix + ".mlp.T_delta_left";
+        const std::string right_name = prefix + ".mlp.T_delta_right";
+        const bool has_left = tensors.manifest().has_tensor(left_name);
+        const bool has_right = tensors.manifest().has_tensor(right_name);
+        if (has_left != has_right) {
+            throw std::runtime_error("incomplete Niwaki low-rank map pair");
+        }
+        const char* force_full = std::getenv("QWEN38_NIWAKI_FULL_MAPS");
+        if (has_left && (force_full == nullptr || std::string_view(force_full) != "1")) {
+            mlp_output_map_left_ = tensors.tensor(left_name);
+            mlp_output_map_right_ = tensors.tensor(right_name);
+            const auto left_shape = mlp_output_map_left_.shape();
+            const auto right_shape = mlp_output_map_right_.shape();
+            if (left_shape.size() != 2 || right_shape.size() != 2 ||
+                left_shape[0] != static_cast<int>(config.hidden_size) ||
+                right_shape[1] != static_cast<int>(config.hidden_size) ||
+                left_shape[1] != right_shape[0]) {
+                throw std::runtime_error("invalid Niwaki low-rank map geometry");
+            }
+            has_low_rank_mlp_output_map_ = true;
+        } else {
+            mlp_output_map_ = tensors.tensor(prefix + ".mlp.T");
+        }
     }
 }
 
@@ -173,7 +195,15 @@ bool DecoderLayer::clear_prefill_qmeta_cache() const {
 
 MlxArray DecoderLayer::apply_mlp_output_map(MlxArray output) const {
     if (!has_mlp_output_map_) return output;
+    const char* skip = std::getenv("QWEN38_SKIP_NIWAKI_MAPS");
+    if (skip != nullptr && std::string_view(skip) == "1") return output;
     const mlx_dtype dtype = output.dtype();
+    if (has_low_rank_mlp_output_map_) {
+        MlxArray correction = MlxArray::matmul(
+            MlxArray::matmul(output.astype(MLX_BFLOAT16), mlp_output_map_left_),
+            mlp_output_map_right_);
+        return MlxArray::add(output.astype(MLX_BFLOAT16), correction).astype(dtype);
+    }
     return MlxArray::matmul(output.astype(MLX_BFLOAT16), mlp_output_map_).astype(dtype);
 }
 

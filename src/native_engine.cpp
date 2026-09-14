@@ -187,7 +187,7 @@ std::string cache_compatibility_key(
         source << '|' << bytes << '|' << ticks;
         ignored.clear();
     }
-    constexpr std::array<const char*, 18> state_environment{
+    constexpr std::array<const char*, 20> state_environment{
         "QWEN38_COMPACT_QMETA",
         "QWEN38_FUSED_MOE",
         "QWEN38_DEVICE_ROUTER",
@@ -206,6 +206,8 @@ std::string cache_compatibility_key(
         "QWEN38_HC_FUSED_INJECTION",
         "QWEN38_COMPILE_LAYER",
         "QWEN38_SDPA_DECODE",
+        "QWEN38_NIWAKI_FULL_MAPS",
+        "QWEN38_SKIP_NIWAKI_MAPS",
     };
     for (const char* name : state_environment) {
         const char* value = std::getenv(name);
