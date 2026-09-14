@@ -163,9 +163,9 @@ std::size_t qsa_shared_rows() {
 
 std::size_t qsa_selection_budget(
     const std::size_t configured,
-    const int rows,
-    const std::size_t ratio) {
-    if (rows != 1) return configured;
+    const std::size_t ratio,
+    const bool decode) {
+    if (!decode) return configured;
     const char* value = std::getenv("QWEN38_QSA_DECODE_BUDGET");
     if (value == nullptr) return configured;
     char* end = nullptr;
@@ -598,7 +598,8 @@ MlxArray SelfAttention::apply_rope_rows(
 SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const MlxArray& input,
     SelfAttentionState& state,
-    const bool packed) const {
+    const bool packed,
+    const bool decode_verification) const {
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1) {
         throw std::runtime_error("QSA requires a single [1,S,hidden] sequence");
@@ -608,7 +609,8 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const int index_dimension = dimension(indexer_head_dimension_, "indexer dimension");
     const int ratio = dimension(indexer_compress_ratio_, "indexer ratio");
     const int budget = dimension(
-        qsa_selection_budget(indexer_budget_, rows, indexer_compress_ratio_),
+        qsa_selection_budget(
+            indexer_budget_, indexer_compress_ratio_, decode_verification),
         "indexer budget");
     const int block_topk = budget / ratio;
     const std::vector<int> strides3{1, 1, 1};
@@ -701,59 +703,6 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         state.qsa_raw_start = retained_start;
     }
 
-    MlxArray queries = qk.slice(
-        std::vector<int>{0, 0, 0},
-        std::vector<int>{1, rows, index_heads * index_dimension},
-        strides3)
-                           .reshape(std::vector<int>{1, rows, index_heads, index_dimension})
-                           .rms_norm(indexer_query_norm_weight_, epsilon_)
-                           .swapaxes(1, 2);
-    queries = apply_rope_rows(
-        queries,
-        state.position_base + state.token_count,
-        1,
-        indexer_head_dimension_);
-#ifdef QWEN38_QSA_PEAK_RESEARCH
-    if (selection_profile) queries.eval();
-    const auto query_done = std::chrono::steady_clock::now();
-#endif
-    const std::size_t shared_rows = packed && rows >= 16 ? qsa_shared_rows() : 1;
-    if (shared_rows > 1) queries = sample_qsa_queries(queries, shared_rows);
-    MlxArray pooled_transposed = state.qsa_pooled_keys
-                                     .reshape(std::vector<int>{
-                                         1, 1, dimension(block_count, "QSA blocks"),
-                                         index_dimension})
-                                     .swapaxes(2, 3);
-#ifdef QWEN38_QSA_PEAK_RESEARCH
-    const char* tiled_scores = std::getenv("QWEN38_QSA_TILED_SCORES");
-    const bool use_tiled_scores = rows >= 256 && index_heads == 4 && index_dimension == 128 &&
-        tiled_scores != nullptr && std::string_view(tiled_scores) != "0";
-    MlxArray scores;
-    if (use_tiled_scores) {
-        const std::string_view mode(tiled_scores);
-        if (mode != "1" && mode != "128" && mode != "256" && mode != "async")
-            throw std::runtime_error("invalid research QSA tile mode");
-        scores = qsa_tiled_scores(queries, pooled_transposed, mode == "128" ? 128 : 256,
-                                  mode == "1" || mode == "async");
-    } else {
-        scores = MlxArray::matmul(
-            queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
-        const char* score_reduce = std::getenv("QWEN38_QSA_SCORE_REDUCE");
-        scores = rows > 8 && index_heads == 4 && block_count <= 65536 &&
-            score_reduce != nullptr && std::string_view(score_reduce) == "1"
-            ? qsa_score_reduce(scores)
-            : MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
-    }
-#else
-    MlxArray scores = MlxArray::matmul(
-        queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
-    scores = MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
-#endif
-#ifdef QWEN38_QSA_PEAK_RESEARCH
-    if (selection_profile) scores.eval();
-    const auto scores_done = std::chrono::steady_clock::now();
-#endif
-
     MlxArray positions = MlxArray::arange(
         static_cast<double>(state.token_count),
         static_cast<double>(total),
@@ -765,35 +714,95 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         static_cast<double>(ratio),
         MLX_INT32).reshape(std::vector<int>{1, dimension(block_count, "QSA blocks")});
     MlxArray visible = MlxArray::less_equal(block_ends, positions).expand_dims(0);
-    MlxArray selection_visible;
-    if (shared_rows == 1) {
-        selection_visible = visible.share();
-    } else {
-        MlxArray selection_positions = MlxArray::arange(
-            static_cast<double>(state.token_count),
-            static_cast<double>(total),
-            static_cast<double>(shared_rows),
-            MLX_INT32).reshape(std::vector<int>{queries.shape()[2], 1});
-        selection_visible = MlxArray::less_equal(
-            block_ends, selection_positions).expand_dims(0);
-    }
-    MlxArray block_indices = MlxArray::arange(
-        0.0, static_cast<double>(block_count), 1.0, MLX_FLOAT32);
-    MlxArray tie_bias = MlxArray::multiply(
-        block_indices, scalar(1.0e-7F, MLX_FLOAT32));
-    MlxArray biased_scores = MlxArray::subtract(scores, tie_bias);
-    MlxArray masked_scores = MlxArray::where(
-        selection_visible,
-        biased_scores,
-        scalar(-std::numeric_limits<float>::infinity(), MLX_FLOAT32));
-    const int first_top = dimension(block_count, "QSA blocks") - block_topk;
-    MlxArray partition = masked_scores.argpartition_axis(first_top, -1);
-    MlxArray top_indices = partition.slice(
-        std::vector<int>{0, 0, first_top},
-        std::vector<int>{1, queries.shape()[2], dimension(block_count, "QSA blocks")},
-        strides3);
-    if (shared_rows > 1) {
-        top_indices = expand_qsa_blocks(top_indices, rows, block_topk, shared_rows);
+    MlxArray top_indices;
+    std::size_t shared_rows = 1;
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+    auto query_done = selection_started;
+    auto scores_done = selection_started;
+#endif
+    {
+        MlxArray queries = qk.slice(
+            std::vector<int>{0, 0, 0},
+            std::vector<int>{1, rows, index_heads * index_dimension},
+            strides3)
+                               .reshape(std::vector<int>{1, rows, index_heads, index_dimension})
+                               .rms_norm(indexer_query_norm_weight_, epsilon_)
+                               .swapaxes(1, 2);
+        queries = apply_rope_rows(
+            queries,
+            state.position_base + state.token_count,
+            1,
+            indexer_head_dimension_);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+        if (selection_profile) queries.eval();
+        query_done = std::chrono::steady_clock::now();
+#endif
+        shared_rows = packed && rows >= 16 ? qsa_shared_rows() : 1;
+        if (shared_rows > 1) queries = sample_qsa_queries(queries, shared_rows);
+        MlxArray pooled_transposed = state.qsa_pooled_keys
+                                         .reshape(std::vector<int>{
+                                             1, 1, dimension(block_count, "QSA blocks"),
+                                             index_dimension})
+                                         .swapaxes(2, 3);
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+        const char* tiled_scores = std::getenv("QWEN38_QSA_TILED_SCORES");
+        const bool use_tiled_scores = rows >= 256 && index_heads == 4 && index_dimension == 128 &&
+            tiled_scores != nullptr && std::string_view(tiled_scores) != "0";
+        MlxArray scores;
+        if (use_tiled_scores) {
+            const std::string_view mode(tiled_scores);
+            if (mode != "1" && mode != "128" && mode != "256" && mode != "async")
+                throw std::runtime_error("invalid research QSA tile mode");
+            scores = qsa_tiled_scores(queries, pooled_transposed, mode == "128" ? 128 : 256,
+                                      mode == "1" || mode == "async");
+        } else {
+            scores = MlxArray::matmul(
+                queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
+            const char* score_reduce = std::getenv("QWEN38_QSA_SCORE_REDUCE");
+            scores = rows > 8 && index_heads == 4 && block_count <= 65536 &&
+                score_reduce != nullptr && std::string_view(score_reduce) == "1"
+                ? qsa_score_reduce(scores)
+                : MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
+        }
+#else
+        MlxArray scores = MlxArray::matmul(
+            queries.astype(MLX_FLOAT32), pooled_transposed.astype(MLX_FLOAT32));
+        scores = MlxArray::maximum(scores, scalar(0.0F, MLX_FLOAT32)).sum_axis(1);
+#endif
+#ifdef QWEN38_QSA_PEAK_RESEARCH
+        if (selection_profile) scores.eval();
+        scores_done = std::chrono::steady_clock::now();
+#endif
+        MlxArray selection_visible;
+        if (shared_rows == 1) {
+            selection_visible = visible.share();
+        } else {
+            MlxArray selection_positions = MlxArray::arange(
+                static_cast<double>(state.token_count),
+                static_cast<double>(total),
+                static_cast<double>(shared_rows),
+                MLX_INT32).reshape(std::vector<int>{queries.shape()[2], 1});
+            selection_visible = MlxArray::less_equal(
+                block_ends, selection_positions).expand_dims(0);
+        }
+        MlxArray block_indices = MlxArray::arange(
+            0.0, static_cast<double>(block_count), 1.0, MLX_FLOAT32);
+        MlxArray tie_bias = MlxArray::multiply(
+            block_indices, scalar(1.0e-7F, MLX_FLOAT32));
+        MlxArray biased_scores = MlxArray::subtract(scores, tie_bias);
+        MlxArray masked_scores = MlxArray::where(
+            selection_visible,
+            biased_scores,
+            scalar(-std::numeric_limits<float>::infinity(), MLX_FLOAT32));
+        const int first_top = dimension(block_count, "QSA blocks") - block_topk;
+        MlxArray partition = masked_scores.argpartition_axis(first_top, -1);
+        top_indices = partition.slice(
+            std::vector<int>{0, 0, first_top},
+            std::vector<int>{1, queries.shape()[2], dimension(block_count, "QSA blocks")},
+            strides3);
+        if (shared_rows > 1) {
+            top_indices = expand_qsa_blocks(top_indices, rows, block_topk, shared_rows);
+        }
     }
 #ifdef QWEN38_QSA_PEAK_RESEARCH
     if (selection_profile) top_indices.eval();
@@ -1128,7 +1137,7 @@ MlxArray SelfAttention::forward_decode(
     const std::size_t resulting_tokens = state.token_count + 1;
     const bool want_q8 = state.kv_q8 ||
         (q8_kv_requested() && resulting_tokens >= q8_kv_min_tokens());
-    QsaSelection qsa = update_qsa_and_build_mask(input, state, want_q8);
+    QsaSelection qsa = update_qsa_and_build_mask(input, state, want_q8, true);
 #ifdef QWEN38_QSA_PEAK_RESEARCH
     if (phase_profile) {
         const std::array<const MlxArray*, 4> selection_outputs{
@@ -1245,8 +1254,81 @@ MlxArray SelfAttention::forward_verify(
         throw std::runtime_error("attention batch requires shape [1,S,hidden], S=1..512");
     }
     const std::size_t rows = static_cast<std::size_t>(input_shape[1]);
+    const int heads = dimension(attention_heads_, "attention heads");
+    const int kv_heads = dimension(key_value_heads_, "key/value heads");
+    const int head_dimension = dimension(head_dimension_, "head dimension");
+    MlxArray query_gate_batch = project(input, query_projection_).reshape(
+        std::vector<int>{1, input_shape[1], heads, 2 * head_dimension});
+    MlxArray key_batch = project(input, key_projection_).reshape(
+        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
+    MlxArray value_batch = project(input, value_projection_).reshape(
+        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
     if (origin.kv_q8 || (q8_kv_requested() &&
             origin.token_count + rows >= q8_kv_min_tokens())) {
+        const char* batch_q8_verify = std::getenv("QWEN38_BATCH_Q8_VERIFY");
+        const bool batch_q8_enabled = rows > 1 && origin.kv_q8 &&
+            (batch_q8_verify == nullptr || std::string_view(batch_q8_verify) != "0");
+        if (batch_q8_enabled) {
+            static std::once_flag announced_batch_q8;
+            std::call_once(announced_batch_q8, [rows, origin_tokens = origin.token_count] {
+                std::clog << "qwen38: batched affine-Q8 verifier engaged with "
+                          << rows << " rows at " << origin_tokens << " cached tokens\n";
+            });
+            const std::vector<int> strides{1, 1, 1, 1};
+            SelfAttentionState complete = share_attention_state(origin);
+            QsaSelection qsa = update_qsa_and_build_mask(input, complete, true, true);
+            MlxArray query = query_gate_batch.slice(
+                std::vector<int>{0, 0, 0, 0},
+                std::vector<int>{1, input_shape[1], heads, head_dimension},
+                strides).rms_norm(query_norm_weight_, epsilon_).swapaxes(1, 2);
+            MlxArray gate = query_gate_batch.slice(
+                std::vector<int>{0, 0, 0, head_dimension},
+                std::vector<int>{1, input_shape[1], heads, 2 * head_dimension},
+                strides);
+            MlxArray new_keys = key_batch.rms_norm(
+                key_norm_weight_, epsilon_).swapaxes(1, 2);
+            MlxArray new_values = value_batch.swapaxes(1, 2);
+            const std::size_t position = origin.position_base + origin.token_count;
+            query = apply_rope_prefill(query, position);
+            new_keys = apply_rope_prefill(new_keys, position);
+            const bool has_hot_origin =
+                origin.token_count != origin.kv_q8_cold_tokens;
+            complete.keys = has_hot_origin
+                ? MlxArray::concatenate(origin.keys, new_keys, 2)
+                : new_keys.share();
+            complete.values = has_hot_origin
+                ? MlxArray::concatenate(origin.values, new_values, 2)
+                : new_values.share();
+            complete.token_count = origin.token_count + rows;
+
+            checkpoints.clear();
+            checkpoints.resize(rows);
+            const int origin_hot = dimension(
+                origin.token_count - origin.kv_q8_cold_tokens,
+                "Q8 verifier hot origin");
+            for (std::size_t row = 0; row < rows; ++row) {
+                SelfAttentionState checkpoint = share_attention_state(complete);
+                const int hot_stop = origin_hot +
+                    dimension(row + 1, "Q8 verifier row");
+                checkpoint.keys = complete.keys.slice(
+                    std::vector<int>{0, 0, 0, 0},
+                    std::vector<int>{1, kv_heads, hot_stop, head_dimension},
+                    strides);
+                checkpoint.values = complete.values.slice(
+                    std::vector<int>{0, 0, 0, 0},
+                    std::vector<int>{1, kv_heads, hot_stop, head_dimension},
+                    strides);
+                checkpoint.token_count = origin.token_count + row + 1;
+                copy_qsa_checkpoint(complete, checkpoint.token_count, checkpoint);
+                checkpoints[row] = std::move(checkpoint);
+            }
+            MlxArray attended = packed_qsa_attention_q8(query, complete, qsa);
+            const std::vector<int> flat_shape{
+                1, input_shape[1], heads * head_dimension};
+            MlxArray gated = MlxArray::multiply(
+                attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid());
+            return project(gated, output_projection_);
+        }
         SelfAttentionState working = share_attention_state(origin);
         checkpoints.clear();
         checkpoints.resize(rows);
@@ -1258,16 +1340,6 @@ MlxArray SelfAttention::forward_verify(
         }
         return concatenate_sequence_rows(outputs);
     }
-    const int heads = dimension(attention_heads_, "attention heads");
-    const int kv_heads = dimension(key_value_heads_, "key/value heads");
-    const int head_dimension = dimension(head_dimension_, "head dimension");
-    MlxArray query_gate_batch = project(input, query_projection_).reshape(
-        std::vector<int>{1, input_shape[1], heads, 2 * head_dimension});
-    MlxArray key_batch = project(input, key_projection_).reshape(
-        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
-    MlxArray value_batch = project(input, value_projection_).reshape(
-        std::vector<int>{1, input_shape[1], kv_heads, head_dimension});
-
     const char* batch_sdpa_verify = std::getenv("QWEN38_BATCH_SDPA_VERIFY");
     const bool batch_sdpa_enabled = batch_sdpa_verify == nullptr ||
         std::string_view(batch_sdpa_verify) != "0";
@@ -1290,7 +1362,7 @@ MlxArray SelfAttention::forward_verify(
                 complete.qsa_pooled_keys = origin.qsa_pooled_keys.share();
             }
         }
-        QsaSelection qsa = update_qsa_and_build_mask(input, complete);
+        QsaSelection qsa = update_qsa_and_build_mask(input, complete, false, true);
         MlxArray query = query_gate_batch.slice(
             std::vector<int>{0, 0, 0, 0},
             std::vector<int>{1, input_shape[1], heads, head_dimension},
@@ -1390,7 +1462,7 @@ MlxArray SelfAttention::forward_verify(
     }
     for (std::size_t row = 0; row < rows; ++row) {
         QsaSelection qsa = update_qsa_and_build_mask(
-            slice_sequence_row(input, row), working);
+            slice_sequence_row(input, row), working, false, true);
         MlxArray query_gate = slice_sequence_row(query_gate_batch, row);
         MlxArray query = query_gate.slice(
             std::vector<int>{0, 0, 0, 0},

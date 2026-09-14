@@ -5,8 +5,9 @@ Flash Next on Apple Silicon. It owns model loading, tokenization, the complete
 48-layer forward pass, hybrid attention state, speculative verification,
 caching, HTTP serving, streaming, and runtime observability.
 
-The current v1 milestone is suitable for daily serial inference. MTP is
-available as an explicit workload-dependent option, not the default.
+The default server configuration is intended for daily inference. It selects
+the validated Q8 KV, sparse-attention, prefill, MTP, and persistent-Metal paths
+from the supplied model assets; tuning profiles are not required.
 
 ## Final retained model
 
@@ -33,12 +34,17 @@ reuse the retained tokenizer and higher-precision SSD Q4 n-gram table without
 copying or linking either asset:
 
 ```bash
-QWEN38_PERSISTENT_METAL=1 \
 ./build/qwen38-server --model "$NIWAKI_MODEL_DIR" \
   --tokenizer-dir "$REAP_MODEL_DIR" --ngram-table-dir "$REAP_MODEL_DIR" \
-  --profile speed --mtp-depth off --kv-cache q8 \
-  --kv-q8-min-tokens 8192 --kv-q8-flush-tokens 2048
+  --max-generation-tokens 4096
 ```
+
+Niwaki contains no MTP tensors. When the supplied n-gram/tokenizer package also
+contains the compatible retained REAP Q8 drafter, the server detects it and
+uses depth 4 automatically. Profitable requests stay on batched MTP; after two
+zero-accept rounds an unprofitable request imports its committed state into the
+persistent Metal backend and continues there. `--mtp-depth off` remains an
+explicit resource-limit override when the drafter allocation is undesirable.
 
 Niwaki's dense BF16 healing matrices are executed as deterministic rank-64
 deltas. The persistent Metal path directly reuses MLX's tensor allocations, so
@@ -96,6 +102,9 @@ Long-context distributions below use independent cold server starts.
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
 | Niwaki persistent Metal 128K needle, 131,140 tokens | Niwaki 99B Q3 routed/Q4 backbone, `speed`, Q8 KV at 8,192 with 2,048-token slabs, QSA budget 512, external REAP Q4 n-gram, greedy/no-thinking, MTP off, min output 8; one directional run | expected `V1-NEBULA-128` recovered; **610.74 PP tok/s; 41.60 decode tok/s; 39.30 GiB observed peak** |
+| Niwaki + external REAP Q8 MTP, 16K coding fixture | `speed`, depth 4, Q8 KV, QSA decode budget 512, greedy/no-thinking, 128 output tokens; one directional run | 96/128 drafts accepted; **70.08 tok/s**; 872 PP tok/s |
+| Zero-tuning automatic path, 16K favorable/losing pair | default CLI above, fresh server, greedy/no-thinking, 128 output tokens each; one directional pair | coding stayed on MTP at **62.63 tok/s** (96/128 accepted, 702 PP); repeat fell back after 0/8 accepted and completed on persistent Metal at **40.51 tok/s** (856 PP) |
+| Niwaki + external REAP Q8 MTP, 128K coding fixture | same settings, 131,107 prompt tokens and 128 output tokens; one directional run | 96/128 accepted; **55.34 tok/s**; 587 PP tok/s; valid deterministic implementation |
 | 128K needle retrieval, 131,140 tokens | `memory`, Q8 KV, shared-row QSA, MTP/prefix cache off; 3 cold runs; expected `V1-NEBULA-128` recovered | 581.40 / 550.92 / 538.23 PP tok/s; median **550.92**; median decode 20.56 tok/s; 40.0 GiB median peak footprint |
 | 128K BF16 KV control, 131,140 tokens | same build, prompt and selector policy; one cold run; needle recovered | 529.19 PP tok/s; 10.56 decode tok/s; 41.5 GiB peak footprint |
 | 192K needle retrieval, 196,675 tokens | `memory`, MTP/cache off; expected `S4-PULSAR-192` recovered | 281.17 PP tok/s; 4.19 decode tok/s; 42.14 GiB footprint, 26.93 GiB RSS |
@@ -126,12 +135,16 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   selection is an explicit long-context approximation and remains opt-in.
 - The 192K capacity result predates the shared-row QSA recipe; it has not yet
   been requalified with this faster policy.
-- Auto MTP improves aggregate mixed-workload results but can still lose on an
-  individual prompt. It must be enabled deliberately.
-- Persistent Metal currently supports Niwaki geometry with MTP off. Moving MTP
-  verification onto the same direct backend is required for the 60 tok/s gate.
-- The Q8 drafter increases admission pressure on a 64 GB machine. Normal daily
-  startup therefore uses `--mtp-depth off`.
+- Automatic MTP can still lose on an individual prompt, so the runtime probes
+  acceptance and switches losing requests to persistent Metal.
+- Persistent Metal handles serial continuation after MTP fallback. Moving the
+  profitable batched verifier itself onto that backend is still required for a
+  stable 60 tok/s result at 128K.
+- The external Q8 drafter now works with Niwaki and exceeds 60 tok/s at 16K,
+  but the retained 128K directional result is 55.34 tok/s. A 60 tok/s 128K
+  product claim is therefore not made.
+- The Q8 drafter increases admission pressure. `--mtp-depth off` is retained as
+  a resource-limit override for smaller machines.
 - Multimodal input is not supported.
 - The server currently exposes Chat Completions, not the Responses API required
   by current Codex custom providers.

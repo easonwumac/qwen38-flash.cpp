@@ -85,6 +85,7 @@ private:
     Tokenizer tokenizer_;
     QwenModel model_;
     std::unique_ptr<PersistentMetalBackend> persistent_backend_;
+    std::unique_ptr<MlxTensorStore> mtp_tensors_;
     std::unique_ptr<QwenMtpHead> mtp_head_;
     std::unique_ptr<PrefixCacheEntry> prefix_cache_;
     std::unique_ptr<PrefixCacheStore> ssd_prefix_cache_;

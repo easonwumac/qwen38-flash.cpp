@@ -30,11 +30,18 @@ bool has_mtp_weights(const ModelManifest& manifest) {
     return manifest.weight_map().contains("language_model.mtp.fc_embedding.weight");
 }
 
+const char* external_mtp_model_directory() {
+    const char* directory = std::getenv("QWEN38_MTP_MODEL_DIR");
+    return directory != nullptr && *directory != '\0' ? directory : nullptr;
+}
+
 std::size_t resolved_mtp_depth(
     const ModelManifest& manifest,
     const NativeEngineOptions& options) {
-    const bool available = has_mtp_weights(manifest);
-    const std::size_t depth = options.mtp_depth.value_or(available ? 3 : 0);
+    const bool available = has_mtp_weights(manifest) ||
+        external_mtp_model_directory() != nullptr;
+    const std::size_t depth = options.mtp_depth.value_or(
+        external_mtp_model_directory() != nullptr ? 4 : available ? 3 : 0);
     if (depth != 0 && (depth < 2 || depth > 4)) {
         throw std::runtime_error("MTP depth must be 0 or between 2 and 4");
     }
@@ -187,6 +194,24 @@ std::string cache_compatibility_key(
         source << '|' << bytes << '|' << ticks;
         ignored.clear();
     }
+    if (const char* external_value = external_mtp_model_directory()) {
+        const std::filesystem::path external(external_value);
+        source << "|mtp="
+               << std::filesystem::weakly_canonical(external, ignored).string();
+        ignored.clear();
+        for (const char* file : {"config.json", "model.safetensors.index.json"}) {
+            const std::filesystem::path path = external / file;
+            std::uintmax_t bytes = std::filesystem::file_size(path, ignored);
+            if (ignored) bytes = 0;
+            ignored.clear();
+            const auto modified = std::filesystem::last_write_time(path, ignored);
+            const auto ticks = ignored ? 0LL
+                : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      modified.time_since_epoch()).count();
+            source << '|' << bytes << '|' << ticks;
+            ignored.clear();
+        }
+    }
     constexpr std::array<const char*, 20> state_environment{
         "QWEN38_COMPACT_QMETA",
         "QWEN38_FUSED_MOE",
@@ -294,10 +319,10 @@ NativeEngine::NativeEngine(
     static_cast<void>(MlxArray::set_cache_limit(
         options_.allocator_cache_limit_bytes));
     const char* persistent = std::getenv("QWEN38_PERSISTENT_METAL");
-    if (persistent != nullptr && std::string_view(persistent) == "1") {
-        if (mtp_depth_ != 0) {
-            throw std::runtime_error("persistent Metal currently requires MTP depth 0");
-        }
+    const bool persistent_explicit = persistent != nullptr;
+    const bool persistent_enabled = persistent == nullptr ||
+        std::string_view(persistent) != "0";
+    if (persistent_enabled) {
         MlxTensorStore* shared_weights = &tensors_;
         if (const char* share = std::getenv("QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS");
             share != nullptr && std::string_view(share) == "0") {
@@ -305,16 +330,37 @@ NativeEngine::NativeEngine(
         }
         persistent_backend_ = PersistentMetalBackend::create(
             tensors_.manifest(), shared_weights);
-        if (persistent_backend_ == nullptr) {
+        if (persistent_backend_ == nullptr && persistent_explicit &&
+            std::string_view(persistent) == "1") {
             throw std::runtime_error("model is not eligible for persistent Metal");
         }
-        std::clog << "qwen38-server: persistent Metal decode enabled\n";
+        if (persistent_backend_ != nullptr) {
+            std::clog << "qwen38-server: persistent Metal decode enabled\n";
+        }
     }
     if (mtp_depth_ != 0) {
         if (options_.zero_accept_fallback_rounds == 0) {
             throw std::runtime_error("MTP fallback window must be positive");
         }
-        mtp_head_ = std::make_unique<QwenMtpHead>(tensors_);
+        MlxTensorStore* mtp_tensors = &tensors_;
+        if (!has_mtp_weights(tensors_.manifest())) {
+            const char* external = external_mtp_model_directory();
+            if (external == nullptr) {
+                throw std::runtime_error("MTP was requested but no sidecar is available");
+            }
+            ModelManifest manifest = ModelManifest::load(external);
+            const ModelConfig& target = tensors_.manifest().config();
+            const ModelConfig& draft = manifest.config();
+            if (!has_mtp_weights(manifest) || draft.hidden_size != target.hidden_size ||
+                draft.hyper_connection_count != target.hyper_connection_count ||
+                draft.vocabulary_size != target.vocabulary_size) {
+                throw std::runtime_error("external MTP model is incompatible with the target");
+            }
+            mtp_tensors_ = std::make_unique<MlxTensorStore>(std::move(manifest));
+            mtp_tensors = mtp_tensors_.get();
+            std::clog << "qwen38-server: external MTP model=" << external << '\n';
+        }
+        mtp_head_ = std::make_unique<QwenMtpHead>(*mtp_tensors);
     }
     if (options_.ssd_prefix_cache_max_bytes != 0) {
         const std::filesystem::path directory =
@@ -613,6 +659,7 @@ GenerationResult NativeEngine::complete_impl(
         persistent_anchor_remaining = std::min<std::size_t>(parsed, max_tokens);
     }
     bool persistent_reset = prefill_rows == 0 && persistent_anchor_remaining == 0;
+    bool persistent_active = false;
     const char* shared_weights_environment =
         std::getenv("QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS");
     const bool persistent_shared_weights = shared_weights_environment == nullptr ||
@@ -631,14 +678,18 @@ GenerationResult NativeEngine::complete_impl(
         state.token_count = imported_token_count;
         previous_target_stream.reset();
         MlxArray::clear_cache();
+        persistent_active = true;
+        persistent_reset = false;
     };
-    if (persistent_backend_ != nullptr && persistent_anchor_remaining == 0) {
+    if (persistent_backend_ != nullptr && mtp_head_ == nullptr &&
+        persistent_anchor_remaining == 0) {
         const auto prepare_started = std::chrono::steady_clock::now();
         if (!persistent_reset) {
             activate_persistent();
         } else if (persistent_shared_weights) {
             persistent_backend_->prepare_shared_weights();
             static_cast<void>(persistent_backend_->greedy_decode(0, true));
+            persistent_active = true;
         }
         result.prompt_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - prepare_started).count();
@@ -763,7 +814,7 @@ GenerationResult NativeEngine::complete_impl(
                     mtp_cache_extendable = false;
                 }
             }
-            if (persistent_backend_ != nullptr && persistent_anchor_remaining == 0) {
+            if (persistent_active && persistent_anchor_remaining == 0) {
                 const PersistentMetalBackend::GreedyResult step =
                     persistent_backend_->greedy_decode(current, persistent_reset);
                 if (const char* trace = std::getenv("QWEN38_PERSISTENT_TRACE");
@@ -955,6 +1006,9 @@ GenerationResult NativeEngine::complete_impl(
         if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
+            if (persistent_backend_ != nullptr && !persistent_active) {
+                activate_persistent();
+            }
         }
     }
     result.generation_ms = std::chrono::duration<double, std::milli>(

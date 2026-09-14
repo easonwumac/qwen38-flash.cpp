@@ -382,7 +382,8 @@ SparseMoe::QuantizedProjection SparseMoe::load_projection(
     const QuantizationSpec quantization = tensors.manifest().quantization_for(base);
     const int bits = infer_affine_quantization_bits(
         weight.shape(), scales.shape(), quantization.group_size, "MoE");
-    if (bits != static_cast<int>(quantization.bits)) {
+    if (bits != static_cast<int>(quantization.bits) &&
+        !std::string_view(base).starts_with("language_model.mtp.")) {
         throw std::runtime_error("MoE tensor disagrees with quantization metadata for " + base);
     }
     CompactQmeta qmeta;

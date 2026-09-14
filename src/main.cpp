@@ -34,18 +34,13 @@ void print_usage(const char* program) {
         << "Usage: " << program
         << " [--host IPv4] [--port PORT] [--model PATH]"
         << " [--ngram-table-dir PATH] [--tokenizer-dir PATH]"
-        << " [--profile safe|speed|turbo|latency|long-context|memory]"
-        << " [--prefill-chunk 1..1024] [--prefill-chunk-fixed]"
         << " [--prefix-cache-tokens N]"
-        << " [--qmeta-cache-max-prompt-tokens N] [--qmeta-cache-layers 0..48]"
-        << " [--qsa-packed-min-tokens N] [--qsa-shared-rows 1|2|4|8]"
         << " [--ssd-prefix-cache-gib N] [--ssd-prefix-cache-dir PATH]"
-        << " [--allocator-cache-mib N]"
         << " [--max-generation-tokens N]"
-        << " [--kv-cache bf16|q8] [--kv-q8-min-tokens N] [--kv-q8-flush-tokens N]"
         << " [--mtp-depth auto|off|2|3|4]\n"
         << "\n"
-        << "qwen38-flash.cpp native inference server.\n";
+        << "qwen38-flash.cpp native inference server. Runtime tuning is automatic;\n"
+        << "the remaining sizing flags are resource limits.\n";
 }
 
 std::optional<std::size_t> parse_mtp_depth(const std::string& value) {
@@ -102,11 +97,10 @@ std::string environment_or(const char* name, const char* fallback) {
 int main(int argc, char** argv) {
     try {
         qwen38::ServerConfig config;
-        std::string profile = "safe";
-        // Stable serial execution is the server default. Loading and executing a
-        // companion drafter is opt-in because its memory and throughput benefit
-        // depend on both the checkpoint and the request trajectory.
-        std::optional<std::size_t> mtp_depth = 0;
+        std::string profile = "speed";
+        // The runtime selects MTP only when the target or an explicitly supplied
+        // external sidecar contains compatible weights.
+        std::optional<std::size_t> mtp_depth = std::nullopt;
         bool mtp_depth_explicit = false;
         std::size_t prefill_chunk_rows = 64;
         bool prefill_chunk_explicit = false;
@@ -123,9 +117,9 @@ int main(int argc, char** argv) {
         std::size_t allocator_cache_limit_bytes = 256ULL * 1024ULL * 1024ULL;
         bool allocator_cache_explicit = false;
         std::size_t max_generation_tokens = 4096;
-        std::string kv_cache = "bf16";
-        std::size_t kv_q8_min_tokens = 65536;
-        std::size_t kv_q8_flush_tokens = 8192;
+        std::string kv_cache = "q8";
+        std::size_t kv_q8_min_tokens = 8192;
+        std::size_t kv_q8_flush_tokens = 2048;
         std::optional<std::string> model_path;
         std::optional<std::string> ngram_table_directory;
         std::optional<std::string> tokenizer_directory;
@@ -240,6 +234,23 @@ int main(int argc, char** argv) {
         if (ngram_table_directory.has_value() &&
             setenv("QWEN38_NGRAM_TABLE_DIR", ngram_table_directory->c_str(), 1) != 0) {
             throw std::runtime_error("cannot configure external n-gram table directory");
+        }
+        if (!mtp_depth_explicit && ngram_table_directory.has_value() &&
+            std::getenv("QWEN38_MTP_MODEL_DIR") == nullptr) {
+            bool companion_has_mtp = false;
+            try {
+                const qwen38::ModelManifest companion =
+                    qwen38::ModelManifest::load(*ngram_table_directory);
+                companion_has_mtp = companion.weight_map().contains(
+                    "language_model.mtp.fc_embedding.weight");
+            } catch (const std::runtime_error&) {
+                // A standalone n-gram directory need not contain a model
+                // manifest. Native n-gram loading remains authoritative.
+            }
+            if (companion_has_mtp && setenv("QWEN38_MTP_MODEL_DIR",
+                    ngram_table_directory->c_str(), 1) != 0) {
+                throw std::runtime_error("cannot configure detected MTP sidecar");
+            }
         }
         if (tokenizer_directory.has_value() &&
             setenv("QWEN38_TOKENIZER_DIR", tokenizer_directory->c_str(), 1) != 0) {

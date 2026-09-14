@@ -78,7 +78,8 @@ private:
     [[nodiscard]] QsaSelection update_qsa_and_build_mask(
         const MlxArray& input,
         SelfAttentionState& state,
-        bool packed = false) const;
+        bool packed = false,
+        bool decode_verification = false) const;
     [[nodiscard]] MlxArray packed_qsa_attention(
         const MlxArray& query,
         const MlxArray& keys,

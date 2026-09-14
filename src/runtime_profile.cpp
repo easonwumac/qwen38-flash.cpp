@@ -66,6 +66,7 @@ void apply_runtime_profile(const std::string_view profile) {
         {"QWEN38_Q8_EXACT_MOE", "1"},
         {"QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE", "1"},
         {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
+        {"QWEN38_QSA_DECODE_BUDGET", "512"},
     };
     for (const auto& [name, value] : settings) set_environment_default(name, value);
     if (config.memory_efficient) {
