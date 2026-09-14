@@ -12,11 +12,13 @@
 namespace qwen38 {
 
 struct ModelDecodeState;
+class MlxTensorStore;
 
 class PersistentMetalBackend final {
 public:
     struct GreedyResult {
         std::uint32_t token{0};
+        std::uint32_t alternative_token{0};
         float logit{0.0F};
         double gpu_ms{0.0};
         double wall_ms{0.0};
@@ -29,7 +31,7 @@ public:
 
     [[nodiscard]] static bool supports(const ModelConfig& config) noexcept;
     [[nodiscard]] static std::unique_ptr<PersistentMetalBackend> create(
-        const ModelManifest& manifest);
+        const ModelManifest& manifest, MlxTensorStore* shared_weights = nullptr);
 
     ~PersistentMetalBackend();
     PersistentMetalBackend(PersistentMetalBackend&&) noexcept;
@@ -63,6 +65,8 @@ public:
         std::uint32_t token, double* gpu_ms = nullptr);
     [[nodiscard]] GreedyResult greedy_head(std::span<const std::uint16_t> stream);
     [[nodiscard]] GreedyResult greedy_decode(std::uint32_t token, bool reset_state = false);
+    void prepare_shared_weights();
+    void release_shared_weights();
     void import_state(const ModelDecodeState& state);
 
 private:

@@ -24,7 +24,7 @@ table. `ngram_table.bin.aos` stores each requested row contiguously, so one
 bounded `pread` retrieves its packed weights, scales, and biases without loading
 the table into RAM.
 
-### Niwaki 99B candidate
+### Niwaki 99B fast path
 
 The engine also loads `Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx` natively:
 mixed Q3/Q4/Q8 quantization, 24 shared-only layers, BF16 output-healing maps,
@@ -33,20 +33,24 @@ reuse the retained tokenizer and higher-precision SSD Q4 n-gram table without
 copying or linking either asset:
 
 ```bash
+QWEN38_PERSISTENT_METAL=1 \
 ./build/qwen38-server --model "$NIWAKI_MODEL_DIR" \
   --tokenizer-dir "$REAP_MODEL_DIR" --ngram-table-dir "$REAP_MODEL_DIR" \
-  --profile speed --mtp-depth off
+  --profile speed --mtp-depth off --kv-cache q8 \
+  --kv-q8-min-tokens 8192 --kv-q8-flush-tokens 2048
 ```
 
-Niwaki's dense BF16 healing matrices have the form `I + delta`. A deterministic
-rank-64 delta sidecar reduces their runtime work to two narrow projections per
-layer. Directional runs on the same M5 Pro 64 GiB Mac reached 41.16 tok/s on a
-natural short trajectory while matching all 16 full-map tokens. With Q8 KV, a
-64-row raw-QSA window, and a 256-token decode selection, the 131,140-token needle
-run recovered `V1-NEBULA-128` at **671.82 PP tok/s and 29.38 decode tok/s**, with
-a 23.2 GiB guarded peak footprint. This is a candidate, not yet the production
-model: broad quality and three-run cold validation remain, and the no-MTP 40
-tok/s long-context goal is not met. Full conditions are in the
+Niwaki's dense BF16 healing matrices are executed as deterministic rank-64
+deltas. The persistent Metal path directly reuses MLX's tensor allocations, so
+prefill and decode no longer maintain or page between duplicate weight
+resources. Direct buffers are released during prefill, rebuilt from the already
+materialized allocations at handoff, and warmed before streaming begins.
+
+On the M5 Pro 64 GiB validation Mac, the 131,140-token needle recovered
+`V1-NEBULA-128` at **610.74 PP tok/s and 41.60 decode tok/s** without MTP. The
+observed peak was 42,204,886,920 bytes (**39.30 GiB**). This is the retained fast
+configuration for Niwaki; the REAP-288 checkpoint remains the higher-quality
+reference. Full conditions are in the
 [bring-up](docs/niwaki-99b-bringup.md) and
 [low-rank map report](docs/niwaki-lowrank-maps.md).
 
@@ -91,6 +95,7 @@ Long-context distributions below use independent cold server starts.
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
+| Niwaki persistent Metal 128K needle, 131,140 tokens | Niwaki 99B Q3 routed/Q4 backbone, `speed`, Q8 KV at 8,192 with 2,048-token slabs, QSA budget 512, external REAP Q4 n-gram, greedy/no-thinking, MTP off, min output 8; one directional run | expected `V1-NEBULA-128` recovered; **610.74 PP tok/s; 41.60 decode tok/s; 39.30 GiB observed peak** |
 | 128K needle retrieval, 131,140 tokens | `memory`, Q8 KV, shared-row QSA, MTP/prefix cache off; 3 cold runs; expected `V1-NEBULA-128` recovered | 581.40 / 550.92 / 538.23 PP tok/s; median **550.92**; median decode 20.56 tok/s; 40.0 GiB median peak footprint |
 | 128K BF16 KV control, 131,140 tokens | same build, prompt and selector policy; one cold run; needle recovered | 529.19 PP tok/s; 10.56 decode tok/s; 41.5 GiB peak footprint |
 | 192K needle retrieval, 196,675 tokens | `memory`, MTP/cache off; expected `S4-PULSAR-192` recovered | 281.17 PP tok/s; 4.19 decode tok/s; 42.14 GiB footprint, 26.93 GiB RSS |
@@ -114,7 +119,8 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 ## Known limits
 
-- Exact serial decode is stable around 41 tok/s; the 45 tok/s target is not met.
+- The Niwaki persistent path reaches the 40 tok/s no-MTP long-context gate, but
+  still needs a mixed-corpus quality comparison and repeated cold-run distribution.
 - Exact 8K prefill exceeds 600 PP tok/s, but 32K remains around 572 PP tok/s.
 - The validated 128K Q8 recipe exceeds 500 PP tok/s, but its four-row QSA
   selection is an explicit long-context approximation and remains opt-in.
@@ -122,6 +128,8 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   been requalified with this faster policy.
 - Auto MTP improves aggregate mixed-workload results but can still lose on an
   individual prompt. It must be enabled deliberately.
+- Persistent Metal currently supports Niwaki geometry with MTP off. Moving MTP
+  verification onto the same direct backend is required for the 60 tok/s gate.
 - The Q8 drafter increases admission pressure on a 64 GB machine. Normal daily
   startup therefore uses `--mtp-depth off`.
 - Multimodal input is not supported.

@@ -944,6 +944,19 @@ std::vector<std::uint8_t> MlxArray::to_bytes() const {
     return {data, data + bytes};
 }
 
+const void* MlxArray::data_bytes() const {
+    eval();
+    const void* data = mlx_array_data_uint8(value_);
+    if (data == nullptr && byte_size() != 0) {
+        throw std::runtime_error("MLX returned null array byte data");
+    }
+    return data;
+}
+
+std::size_t MlxArray::byte_size() const noexcept {
+    return mlx_array_nbytes(value_);
+}
+
 std::uint32_t MlxArray::item_uint32() const {
     eval();
     std::uint32_t result = 0;

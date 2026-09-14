@@ -69,6 +69,12 @@ public:
         id<MTLBuffer> buffer{nil};
     };
 
+    struct SharedTensor {
+        MlxArray array;
+        const void* data{nullptr};
+        id<MTLBuffer> buffer{nil};
+    };
+
     struct GdnState {
         id<MTLBuffer> convolution{nil};
         id<MTLBuffer> recurrent{nil};
@@ -90,7 +96,7 @@ public:
         std::uint32_t cold_count{0};
     };
 
-    explicit Impl(const ModelManifest& manifest) {
+    explicit Impl(const ModelManifest& manifest, MlxTensorStore* shared_weights) {
         @autoreleasepool {
             device_ = MTLCreateSystemDefaultDevice();
             if (device_ == nil) throw std::runtime_error("Metal device is unavailable");
@@ -132,6 +138,16 @@ public:
                 inventory_.mapped_weight_bytes += file->file.mapped_bytes();
                 shards_.emplace(name, std::move(file));
             }
+            if (shared_weights != nullptr) {
+                shared_tensors_.reserve(manifest.weight_map().size());
+                for (const auto& [tensor, shard] : manifest.weight_map()) {
+                    static_cast<void>(shard);
+                    MlxArray array = shared_weights->tensor(tensor);
+                    const void* data = array.data_bytes();
+                    shared_tensors_.emplace(
+                        tensor, SharedTensor{std::move(array), data, nil});
+                }
+            }
             inventory_.pipeline_count = pipelines_.size();
             inventory_.shard_count = shards_.size();
             weight_map_ = manifest.weight_map();
@@ -171,6 +187,27 @@ public:
         if (value == nil) throw std::bad_alloc();
         if (clear) std::memset(value.contents, 0, bytes);
         return value;
+    }
+
+    void prepare_shared_weights() {
+        for (auto& [name, shared] : shared_tensors_) {
+            static_cast<void>(name);
+            if (shared.buffer != nil) continue;
+            shared.buffer = [device_ newBufferWithBytesNoCopy:const_cast<void*>(shared.data)
+                                                       length:shared.array.byte_size()
+                                                      options:MTLResourceStorageModeShared
+                                                  deallocator:nil];
+            if (shared.buffer == nil) {
+                throw std::runtime_error("Metal rejected an MLX tensor allocation");
+            }
+        }
+    }
+
+    void release_shared_weights() {
+        for (auto& [name, shared] : shared_tensors_) {
+            static_cast<void>(name);
+            shared.buffer = nil;
+        }
     }
 
     void allocate_scratch() {
@@ -229,6 +266,10 @@ public:
 
     void bind(id<MTLComputeCommandEncoder> encoder, const std::string& tensor,
               NSUInteger index) const {
+        if (!shared_tensors_.empty()) {
+            [encoder setBuffer:shared_tensors_.at(tensor).buffer offset:0 atIndex:index];
+            return;
+        }
         const std::string& shard_name = weight_map_.at(tensor);
         const Shard& shard = *shards_.at(shard_name);
         const auto mapped = shard.file.mapped_view();
@@ -239,6 +280,18 @@ public:
 
     void bind_row(id<MTLComputeCommandEncoder> encoder, const std::string& tensor,
                   std::size_t row, NSUInteger index) const {
+        if (!shared_tensors_.empty()) {
+            const SharedTensor& shared = shared_tensors_.at(tensor);
+            const std::vector<int> shape = shared.array.shape();
+            if (shape.empty() || row >= static_cast<std::size_t>(shape.front()) ||
+                shared.array.byte_size() % static_cast<std::size_t>(shape.front()) != 0) {
+                throw std::runtime_error("invalid shared persistent row tensor geometry");
+            }
+            const std::size_t row_bytes =
+                shared.array.byte_size() / static_cast<std::size_t>(shape.front());
+            [encoder setBuffer:shared.buffer offset:row * row_bytes atIndex:index];
+            return;
+        }
         const std::string& shard_name = weight_map_.at(tensor);
         const Shard& shard = *shards_.at(shard_name);
         const auto mapped = shard.file.mapped_view();
@@ -1010,11 +1063,19 @@ public:
         }
         const auto* logits = static_cast<const float*>(head_logits_.contents);
         std::uint32_t best = 0;
-        for (std::uint32_t index = 1; index < rows; ++index) {
-            if (logits[index] > logits[best]) best = index;
+        std::uint32_t second = 1;
+        if (logits[second] > logits[best]) std::swap(best, second);
+        for (std::uint32_t index = 2; index < rows; ++index) {
+            if (logits[index] > logits[best]) {
+                second = best;
+                best = index;
+            } else if (logits[index] > logits[second]) {
+                second = index;
+            }
         }
         return {
             .token = best,
+            .alternative_token = second,
             .logit = logits[best],
             .gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0,
             .wall_ms = std::chrono::duration<double, std::milli>(
@@ -1069,6 +1130,7 @@ public:
     id<MTLCommandQueue> queue_{nil};
     std::unordered_map<std::string, id<MTLComputePipelineState>> pipelines_;
     std::unordered_map<std::string, std::unique_ptr<Shard>> shards_;
+    std::unordered_map<std::string, SharedTensor> shared_tensors_;
     std::unordered_map<std::string, std::string> weight_map_;
     ModelConfig config_;
     std::unique_ptr<NgramHash> ple_hash_;
@@ -1109,10 +1171,10 @@ bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
 }
 
 std::unique_ptr<PersistentMetalBackend> PersistentMetalBackend::create(
-    const ModelManifest& manifest) {
+    const ModelManifest& manifest, MlxTensorStore* shared_weights) {
     if (!supports(manifest.config())) return nullptr;
     return std::unique_ptr<PersistentMetalBackend>(
-        new PersistentMetalBackend(std::make_unique<Impl>(manifest)));
+        new PersistentMetalBackend(std::make_unique<Impl>(manifest, shared_weights)));
 }
 
 PersistentMetalBackend::PersistentMetalBackend(std::unique_ptr<Impl> impl) noexcept
@@ -1167,6 +1229,14 @@ PersistentMetalBackend::GreedyResult PersistentMetalBackend::greedy_head(
 
 void PersistentMetalBackend::import_state(const ModelDecodeState& state) {
     impl_->import_state(state);
+}
+
+void PersistentMetalBackend::prepare_shared_weights() {
+    impl_->prepare_shared_weights();
+}
+
+void PersistentMetalBackend::release_shared_weights() {
+    impl_->release_shared_weights();
 }
 
 } // namespace qwen38

@@ -298,7 +298,13 @@ NativeEngine::NativeEngine(
         if (mtp_depth_ != 0) {
             throw std::runtime_error("persistent Metal currently requires MTP depth 0");
         }
-        persistent_backend_ = PersistentMetalBackend::create(tensors_.manifest());
+        MlxTensorStore* shared_weights = &tensors_;
+        if (const char* share = std::getenv("QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS");
+            share != nullptr && std::string_view(share) == "0") {
+            shared_weights = nullptr;
+        }
+        persistent_backend_ = PersistentMetalBackend::create(
+            tensors_.manifest(), shared_weights);
         if (persistent_backend_ == nullptr) {
             throw std::runtime_error("model is not eligible for persistent Metal");
         }
@@ -346,6 +352,9 @@ GenerationResult NativeEngine::complete_impl(
             std::to_string(options_.max_generation_tokens) + ")");
     }
     std::scoped_lock lock(inference_mutex_);
+    if (persistent_backend_ != nullptr) {
+        persistent_backend_->release_shared_weights();
+    }
     begin_mtp_calibration_request();
     const std::vector<std::uint32_t> prompt_tokens = tokenizer_.encode(prompt);
     if (prompt_tokens.empty()) throw std::runtime_error("prompt produced no tokens");
@@ -593,16 +602,43 @@ GenerationResult NativeEngine::complete_impl(
     std::vector<MlxArray> pending_mtp_streams;
     std::vector<std::uint32_t> pending_mtp_tokens;
     std::uint32_t current = prompt_tokens.back();
-    bool persistent_reset = prefill_rows == 0;
-    if (persistent_backend_ != nullptr) {
+    std::size_t persistent_anchor_remaining = 0;
+    if (const char* configured = std::getenv("QWEN38_PERSISTENT_ANCHOR_TOKENS");
+        persistent_backend_ != nullptr && configured != nullptr) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(configured, &end, 10);
+        if (end == configured || *end != '\0' || parsed > 64) {
+            throw std::runtime_error("QWEN38_PERSISTENT_ANCHOR_TOKENS must be 0..64");
+        }
+        persistent_anchor_remaining = std::min<std::size_t>(parsed, max_tokens);
+    }
+    bool persistent_reset = prefill_rows == 0 && persistent_anchor_remaining == 0;
+    const char* shared_weights_environment =
+        std::getenv("QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS");
+    const bool persistent_shared_weights = shared_weights_environment == nullptr ||
+        std::string_view(shared_weights_environment) != "0";
+    const auto activate_persistent = [&] {
+        if (persistent_shared_weights) {
+            // The first command on the independent direct queue pays Metal's
+            // resource-registration handoff. Consume it before the imported
+            // state becomes live, then overwrite all mutated decode state.
+            persistent_backend_->prepare_shared_weights();
+            static_cast<void>(persistent_backend_->greedy_decode(0, true));
+        }
+        persistent_backend_->import_state(state);
+        const std::size_t imported_token_count = state.token_count;
+        state = model_.make_state();
+        state.token_count = imported_token_count;
+        previous_target_stream.reset();
+        MlxArray::clear_cache();
+    };
+    if (persistent_backend_ != nullptr && persistent_anchor_remaining == 0) {
         const auto prepare_started = std::chrono::steady_clock::now();
         if (!persistent_reset) {
-            persistent_backend_->import_state(state);
-            const std::size_t imported_token_count = state.token_count;
-            state = model_.make_state();
-            state.token_count = imported_token_count;
-            previous_target_stream.reset();
-            MlxArray::clear_cache();
+            activate_persistent();
+        } else if (persistent_shared_weights) {
+            persistent_backend_->prepare_shared_weights();
+            static_cast<void>(persistent_backend_->greedy_decode(0, true));
         }
         result.prompt_ms += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - prepare_started).count();
@@ -664,6 +700,17 @@ GenerationResult NativeEngine::complete_impl(
     };
     const std::array<std::uint32_t, 2> stop_tokens{
         tensors_.manifest().config().end_of_sequence_token, chat_end_token_};
+    std::size_t persistent_min_tokens = persistent_backend_ == nullptr
+        ? 0 : std::min<std::size_t>(8, max_tokens);
+    if (const char* configured = std::getenv("QWEN38_PERSISTENT_MIN_TOKENS");
+        persistent_backend_ != nullptr && configured != nullptr) {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(configured, &end, 10);
+        if (end == configured || *end != '\0' || parsed > 64) {
+            throw std::runtime_error("QWEN38_PERSISTENT_MIN_TOKENS must be 0..64");
+        }
+        persistent_min_tokens = std::min<std::size_t>(parsed, max_tokens);
+    }
     const char* profile_serial_decode = std::getenv("QWEN38_PROFILE_SERIAL_DECODE");
     if (profile_serial_decode != nullptr &&
         std::string_view(profile_serial_decode) == "1") {
@@ -716,7 +763,7 @@ GenerationResult NativeEngine::complete_impl(
                     mtp_cache_extendable = false;
                 }
             }
-            if (persistent_backend_ != nullptr) {
+            if (persistent_backend_ != nullptr && persistent_anchor_remaining == 0) {
                 const PersistentMetalBackend::GreedyResult step =
                     persistent_backend_->greedy_decode(current, persistent_reset);
                 if (const char* trace = std::getenv("QWEN38_PERSISTENT_TRACE");
@@ -726,13 +773,20 @@ GenerationResult NativeEngine::complete_impl(
                               << " wall_ms=" << step.wall_ms << '\n';
                 }
                 persistent_reset = false;
-                current = step.token;
+                current = is_stop_token(step.token) &&
+                        result.tokens.size() < persistent_min_tokens
+                    ? step.alternative_token : step.token;
                 ++state.token_count;
             } else {
                 TargetDecodeStep step = model_.forward_decode_capture(current, state);
                 const std::uint32_t token = argmax_token(step.logits, state);
                 previous_target_stream = std::move(step.pre_mixer_stream);
                 current = token;
+                if (persistent_anchor_remaining != 0 &&
+                    --persistent_anchor_remaining == 0 && !is_stop_token(current)) {
+                    activate_persistent();
+                    persistent_reset = false;
+                }
             }
             if (is_stop_token(current)) {
                 result.finish_reason = "stop";

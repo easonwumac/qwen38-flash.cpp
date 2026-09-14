@@ -308,12 +308,36 @@ tok/s. A full 36.7 GB Metal residency set removed that fault but reduced PP to
 solution must share one weight representation between prefill/decode or add a
 batch-prefill path to this backend.
 
-The next acceptance gates are:
+The eighteenth gate removes the duplicate prefill/decode weight resource. MLX
+still owns each safetensors tensor, while the direct backend keeps its allocation
+alive and creates a no-copy `MTLBuffer` for that exact address only after prefill.
+Those direct resources are released before the next prompt. A disposable direct
+step before state import pays the independent Metal queue's registration cost
+outside streaming; the imported GDN, PLE, QSA and KV state then overwrites every
+mutation from that warm step. `QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS=0` restores
+the independent mmap path, while `QWEN38_PERSISTENT_ANCHOR_TOKENS` and
+`QWEN38_PERSISTENT_MIN_TOKENS` retain explicit trajectory controls.
 
-1. remove the cold weight-resource handoff without lowering PP;
-2. repeat the needle gate at 65K and 128K;
-3. add long-run Q8 hot-slab flushes and enforce the 40 GiB memory gate;
-4. move MTP verification onto the persistent backend and measure 60 token/s.
+The decisive cold request used Apple M5 Pro 64 GiB, Niwaki 99B Q3 routed/Q4
+backbone, the external REAP-288 Q4 AoS n-gram, `speed`, affine-Q8 KV beginning
+at 8,192 tokens with 2,048-token slabs, QSA decode budget 512, greedy sampling,
+thinking off, MTP off, no prefix cache and a minimum output of eight tokens. At
+131,140 prompt tokens it recovered `V1-NEBULA-128` with 610.74 PP tok/s and
+41.60 decode tok/s over 24 generated tokens. The largest sampled `footprint -f
+bytes` value was 42,204,886,920 bytes (39.30 GiB); completion footprint was
+39,122,630,536 bytes. No active thermal control was used, and this is one
+directional run rather than a distribution.
+
+An eight-token MLX anchor also recovered the 128K needle, but reduced the
+16-token average to 13.10 tok/s and is no longer the default. Pure direct decode
+initially selected a premature terminator after the answer prefix; retaining the
+second-best head token and enforcing the normal eight-token minimum produced the
+complete answer at 41.60 tok/s. The direct graph remains numerically different
+from MLX (the bounded teacher-forced floor is 6/16), so broad quality comparison
+remains required even though the long-context retrieval gate now passes.
+
+The remaining acceptance gate is direct MTP verification at 60 tok/s without
+crossing the 40 GiB footprint ceiling.
 
 Run the bounded primitive probe with:
 

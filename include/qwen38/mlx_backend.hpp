@@ -181,6 +181,8 @@ public:
     [[nodiscard]] static std::size_t set_cache_limit(std::size_t bytes);
     [[nodiscard]] std::vector<float> to_float32() const;
     [[nodiscard]] std::vector<std::uint8_t> to_bytes() const;
+    [[nodiscard]] const void* data_bytes() const;
+    [[nodiscard]] std::size_t byte_size() const noexcept;
     [[nodiscard]] std::uint32_t item_uint32() const;
     [[nodiscard]] float item_float32() const;
     [[nodiscard]] std::vector<int> shape() const;
