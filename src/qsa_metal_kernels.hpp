@@ -19,6 +19,7 @@ inline constexpr std::string_view packed_attention = R"metal(
     constexpr uint TILE = uint(TILE_SIZE);
     constexpr uint DIMS_PER_LANE = D / 32;
     constexpr uint QUERY_HEADS_PER_KV = HQ / HK;
+    const uint total_count = uint(total);
     const uint tid = thread_position_in_threadgroup.x;
     const uint lane = thread_index_in_simdgroup;
     const uint simd = simdgroup_index_in_threadgroup;
@@ -50,7 +51,7 @@ inline constexpr std::string_view packed_attention = R"metal(
             T loaded = T(0);
             if (selected_slot < uint(S) && valid[row * uint(S) + selected_slot]) {
                 const uint token = uint(indices[row * uint(S) + selected_slot]);
-                const uint source = (kv_head * uint(TOTAL) + token) * uint(D) + channel;
+                const uint source = (kv_head * total_count + token) * uint(D) + channel;
                 loaded = load_value ? values[source] : keys[source];
             }
             if (load_value) shared_v[local] = loaded;

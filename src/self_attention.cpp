@@ -69,7 +69,8 @@ MlxArray integer_scalar(const std::int32_t value) {
 
 std::shared_ptr<MlxMetalKernel> packed_qsa_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
-        const char* inputs[]{"query", "keys", "values", "indices", "valid", "scale"};
+        const char* inputs[]{
+            "query", "keys", "values", "indices", "valid", "scale", "total"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_packed_qsa_attention",
             inputs,
@@ -934,13 +935,15 @@ MlxArray SelfAttention::packed_qsa_attention(
     }
     MlxArray scale = scalar(
         1.0F / std::sqrt(static_cast<float>(head_dimension_)), MLX_FLOAT32);
-    const std::array<const MlxArray*, 6> inputs{
+    MlxArray total = integer_scalar(key_shape[2]);
+    const std::array<const MlxArray*, 7> inputs{
         &query,
         &keys,
         &values,
         &selection.packed_indices,
         &selection.packed_mask,
         &scale,
+        &total,
     };
     const int thread_count = 512;
     const std::array<int, 3> grid{thread_count, rows, kv_heads};
@@ -958,9 +961,8 @@ MlxArray SelfAttention::packed_qsa_attention(
         }
         tile_size = static_cast<int>(parsed);
     }
-    const std::array<MlxMetalIntTemplate, 8> int_templates{{
+    const std::array<MlxMetalIntTemplate, 7> int_templates{{
         {.name = "R", .value = rows},
-        {.name = "TOTAL", .value = key_shape[2]},
         {.name = "S", .value = selected},
         {.name = "HQ", .value = query_shape[1]},
         {.name = "HK", .value = kv_heads},
