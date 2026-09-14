@@ -39,6 +39,20 @@ inline float q3_dot8(const device uchar* packed, const device bfloat* x) {
     return value;
 }
 
+inline float q4_dot8(const device uchar* packed, const device bfloat* x) {
+    const uint bits = uint(packed[0]) | (uint(packed[1]) << 8) |
+        (uint(packed[2]) << 16) | (uint(packed[3]) << 24);
+    float value = 0.0f;
+    for (uint i = 0; i < 8; ++i) value += float((bits >> (4 * i)) & 15) * float(x[i]);
+    return value;
+}
+
+inline float q8_dot4(const device uchar* packed, const device bfloat* x) {
+    float value = 0.0f;
+    for (uint i = 0; i < 4; ++i) value += float(packed[i]) * float(x[i]);
+    return value;
+}
+
 kernel void q3_gate_up(
     const device bfloat* x [[buffer(0)]],
     const device uchar* gate_weight [[buffer(1)]],
@@ -114,6 +128,98 @@ kernel void q3_down_reduce(
         if (lane == 0) total += route_weights[slot] * float(bfloat(dot));
     }
     if (lane == 0) output[row] = bfloat(total);
+}
+
+kernel void q4_shared_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* gate_weight [[buffer(1)]],
+    const device bfloat* gate_scale [[buffer(2)]],
+    const device bfloat* gate_bias [[buffer(3)]],
+    const device uchar* up_weight [[buffer(4)]],
+    const device bfloat* up_scale [[buffer(5)]],
+    const device bfloat* up_bias [[buffer(6)]],
+    device bfloat* output [[buffer(7)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 640, k = 2560, row_bytes = k / 2, groups = k / 32;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    const device uchar* gw = gate_weight + row * row_bytes;
+    const device uchar* uw = up_weight + row * row_bytes;
+    const device bfloat* gs = gate_scale + row * groups;
+    const device bfloat* gb = gate_bias + row * groups;
+    const device bfloat* us = up_scale + row * groups;
+    const device bfloat* ub = up_bias + row * groups;
+    float gate = 0.0f, up = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+        const uint quant = base / 2, affine = base / 32;
+        gate += float(gs[affine]) * q4_dot8(gw + quant, x + base) + float(gb[affine]) * sum;
+        up += float(us[affine]) * q4_dot8(uw + quant, x + base) + float(ub[affine]) * sum;
+    }
+    gate = simd_sum(gate);
+    up = simd_sum(up);
+    if (lane == 0) {
+        const float rounded_gate = float(bfloat(gate));
+        const float rounded_up = float(bfloat(up));
+        output[row] = bfloat(
+            float(bfloat(rounded_gate / (1.0f + metal::exp(-rounded_gate)))) * rounded_up);
+    }
+}
+
+kernel void q8_shared_router(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]],
+    const device bfloat* scale [[buffer(2)]],
+    const device bfloat* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 2560, groups = k / 64;
+    float dot = 0.0f;
+    for (uint base = lane * 4; base < k; base += 128) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 4; ++i) sum += float(x[base + i]);
+        dot += float(scale[base / 64]) * q8_dot4(weight + base, x + base) +
+            float(bias[base / 64]) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) {
+        const float rounded = float(bfloat(dot));
+        output[0] = bfloat(1.0f / (1.0f + metal::exp(-rounded)));
+    }
+}
+
+kernel void q4_shared_down_merge(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]],
+    const device bfloat* scale [[buffer(2)]],
+    const device bfloat* bias [[buffer(3)]],
+    const device bfloat* router [[buffer(4)]],
+    const device bfloat* routed [[buffer(5)]],
+    device bfloat* output [[buffer(6)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, row_bytes = k / 2, groups = k / 32;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    const device uchar* wr = weight + row * row_bytes;
+    const device bfloat* sr = scale + row * groups;
+    const device bfloat* br = bias + row * groups;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(input[base + i]);
+        dot += float(sr[base / 32]) * q4_dot8(wr + base / 2, input + base) +
+            float(br[base / 32]) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) {
+        const bfloat shared = bfloat(float(bfloat(dot)) * float(router[0]));
+        output[row] = bfloat(float(routed[row]) + float(shared));
+    }
 }
 )metal";
 
@@ -203,6 +309,78 @@ void encode_down(id<MTLCommandBuffer> command, id<MTLComputePipelineState> state
     [encoder endEncoding];
 }
 
+void encode_shared_gate(id<MTLCommandBuffer> command, id<MTLComputePipelineState> state,
+                        id<MTLBuffer> input, const Shard &shard, const ProjectionNames &gate,
+                        const ProjectionNames &up, id<MTLBuffer> output) {
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:input offset:0 atIndex:0];
+    bind_projection(encoder, shard, gate, 1);
+    bind_projection(encoder, shard, up, 4);
+    [encoder setBuffer:output offset:0 atIndex:7];
+    [encoder dispatchThreadgroups:MTLSizeMake(160, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+}
+
+void encode_shared_router(id<MTLCommandBuffer> command, id<MTLComputePipelineState> state,
+                          id<MTLBuffer> input, const Shard &shard, const ProjectionNames &router,
+                          id<MTLBuffer> output) {
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:input offset:0 atIndex:0];
+    bind_projection(encoder, shard, router, 1);
+    [encoder setBuffer:output offset:0 atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [encoder endEncoding];
+}
+
+void encode_shared_down(id<MTLCommandBuffer> command, id<MTLComputePipelineState> state,
+                        id<MTLBuffer> hidden, const Shard &shard, const ProjectionNames &down,
+                        id<MTLBuffer> router, id<MTLBuffer> routed, id<MTLBuffer> output) {
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:hidden offset:0 atIndex:0];
+    bind_projection(encoder, shard, down, 1);
+    [encoder setBuffer:router offset:0 atIndex:4];
+    [encoder setBuffer:routed offset:0 atIndex:5];
+    [encoder setBuffer:output offset:0 atIndex:6];
+    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+}
+
+double run_full_joined(id<MTLCommandQueue> queue, id<MTLComputePipelineState> routed_gate_state,
+                       id<MTLComputePipelineState> routed_down_state,
+                       id<MTLComputePipelineState> shared_gate_state,
+                       id<MTLComputePipelineState> shared_router_state,
+                       id<MTLComputePipelineState> shared_down_state, id<MTLBuffer> input,
+                       const Shard &expert_shard, const Shard &router_shard,
+                       const ProjectionNames &routed_gate, const ProjectionNames &routed_up,
+                       const ProjectionNames &routed_down, const ProjectionNames &shared_gate,
+                       const ProjectionNames &shared_up, const ProjectionNames &shared_down,
+                       const ProjectionNames &shared_router, id<MTLBuffer> experts,
+                       id<MTLBuffer> weights, id<MTLBuffer> routed_hidden,
+                       id<MTLBuffer> routed_output, id<MTLBuffer> shared_hidden,
+                       id<MTLBuffer> router_output, id<MTLBuffer> output) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    encode_gate(command, routed_gate_state, input, expert_shard, routed_gate, routed_up, experts,
+                routed_hidden);
+    encode_shared_gate(command, shared_gate_state, input, expert_shard, shared_gate, shared_up,
+                       shared_hidden);
+    encode_shared_router(command, shared_router_state, input, router_shard, shared_router,
+                         router_output);
+    encode_down(command, routed_down_state, routed_hidden, expert_shard, routed_down, experts,
+                weights, routed_output);
+    encode_shared_down(command, shared_down_state, shared_hidden, expert_shard, shared_down,
+                       router_output, routed_output, output);
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
 double run_joined(id<MTLCommandQueue> queue, id<MTLComputePipelineState> gate_state,
                   id<MTLComputePipelineState> down_state, id<MTLBuffer> input, const Shard &shard,
                   const ProjectionNames &gate, const ProjectionNames &up,
@@ -261,6 +439,8 @@ struct OracleResult {
 
 OracleResult mlx_oracle(const qwen38::ModelManifest &manifest, const ProjectionNames &gate,
                         const ProjectionNames &up, const ProjectionNames &down,
+                        const ProjectionNames &shared_gate, const ProjectionNames &shared_up,
+                        const ProjectionNames &shared_down, const ProjectionNames &shared_router,
                         std::span<const float> input, std::span<const std::uint32_t> experts,
                         std::span<const float> route_weights) {
     qwen38::MlxTensorStore store(manifest);
@@ -281,6 +461,14 @@ OracleResult mlx_oracle(const qwen38::ModelManifest &manifest, const ProjectionN
         ups.push_back(load(up, expert));
         downs.push_back(load(down, expert));
     }
+    const auto load_full = [&](const ProjectionNames &names) {
+        return std::array<MlxArray, 3>{store.tensor(names.weight), store.tensor(names.scales),
+                                       store.tensor(names.biases)};
+    };
+    const auto shared_g = load_full(shared_gate);
+    const auto shared_u = load_full(shared_up);
+    const auto shared_d = load_full(shared_down);
+    const auto shared_r = load_full(shared_router);
     const auto evaluate = [&] {
         MlxArray sum;
         for (int slot = 0; slot < top_k; ++slot) {
@@ -299,7 +487,14 @@ OracleResult mlx_oracle(const qwen38::ModelManifest &manifest, const ProjectionN
             auto weighted = MlxArray::multiply(y, weight);
             sum = slot == 0 ? std::move(weighted) : MlxArray::add(sum, weighted);
         }
-        return sum.astype(MLX_FLOAT32).to_float32();
+        auto sg =
+            MlxArray::quantized_matmul(x, shared_g[0], shared_g[1], shared_g[2], 32, 4).silu();
+        auto su = MlxArray::quantized_matmul(x, shared_u[0], shared_u[1], shared_u[2], 32, 4);
+        auto sh = MlxArray::multiply(sg, su);
+        auto sy = MlxArray::quantized_matmul(sh, shared_d[0], shared_d[1], shared_d[2], 32, 4);
+        auto sr =
+            MlxArray::quantized_matmul(x, shared_r[0], shared_r[1], shared_r[2], 64, 8).sigmoid();
+        return MlxArray::add(sum, MlxArray::multiply(sy, sr)).astype(MLX_FLOAT32).to_float32();
     };
     for (int i = 0; i < 3; ++i)
         static_cast<void>(evaluate());
@@ -323,16 +518,25 @@ int main(int argc, char **argv) {
             if (argc != 2)
                 throw std::runtime_error("usage: qwen38-persistent-metal-moe-probe MODEL");
             const auto manifest = qwen38::ModelManifest::load(argv[1]);
-            const std::string prefix = "language_model.model.layers.3.mlp.switch_mlp";
+            const std::string layer_prefix = "language_model.model.layers.3.mlp";
+            const std::string prefix = layer_prefix + ".switch_mlp";
             const auto gate = projection(prefix + ".gate_proj");
             const auto up = projection(prefix + ".up_proj");
             const auto down = projection(prefix + ".down_proj");
+            const auto shared_gate = projection(layer_prefix + ".shared_expert.gate_proj");
+            const auto shared_up = projection(layer_prefix + ".shared_expert.up_proj");
+            const auto shared_down = projection(layer_prefix + ".shared_expert.down_proj");
+            const auto shared_router = projection(layer_prefix + ".shared_expert_gate");
             const std::string shard_name = manifest.weight_map().at(gate.weight);
-            for (const std::string &name : {gate.scales, gate.biases, up.weight, up.scales,
-                                            up.biases, down.weight, down.scales, down.biases}) {
+            for (const std::string &name :
+                 {gate.scales, gate.biases, up.weight, up.scales, up.biases, down.weight,
+                  down.scales, down.biases, shared_gate.weight, shared_gate.scales,
+                  shared_gate.biases, shared_up.weight, shared_up.scales, shared_up.biases,
+                  shared_down.weight, shared_down.scales, shared_down.biases}) {
                 if (manifest.weight_map().at(name) != shard_name)
-                    throw std::runtime_error("layer routed tensors do not share one shard");
+                    throw std::runtime_error("layer expert tensors do not share one shard");
             }
+            const std::string router_shard_name = manifest.weight_map().at(shared_router.weight);
             id<MTLDevice> device = MTLCreateSystemDefaultDevice();
             if (device == nil)
                 throw std::runtime_error("Metal device is unavailable");
@@ -348,7 +552,11 @@ int main(int argc, char **argv) {
                 throw std::runtime_error(error.localizedDescription.UTF8String);
             const auto gate_state = pipeline(device, library, @"q3_gate_up");
             const auto down_state = pipeline(device, library, @"q3_down_reduce");
+            const auto shared_gate_state = pipeline(device, library, @"q4_shared_gate_up");
+            const auto shared_router_state = pipeline(device, library, @"q8_shared_router");
+            const auto shared_down_state = pipeline(device, library, @"q4_shared_down_merge");
             Shard shard(device, manifest.directory() / shard_name);
+            Shard router_shard(device, manifest.directory() / router_shard_name);
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
@@ -380,10 +588,19 @@ int main(int argc, char **argv) {
                                     options:MTLResourceStorageModeShared];
             id<MTLBuffer> output = [device newBufferWithLength:hidden_size * sizeof(std::uint16_t)
                                                        options:MTLResourceStorageModeShared];
+            id<MTLBuffer> shared_hidden = [device newBufferWithLength:640 * sizeof(std::uint16_t)
+                                                              options:MTLResourceStorageModeShared];
+            id<MTLBuffer> shared_router_output =
+                [device newBufferWithLength:sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> full_output =
+                [device newBufferWithLength:hidden_size * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> cache_evict = [device newBufferWithLength:64ULL * 1024 * 1024
                                                             options:MTLResourceStorageModePrivate];
             if (input == nil || experts == nil || weights == nil || hidden == nil ||
-                output == nil || cache_evict == nil)
+                output == nil || shared_hidden == nil || shared_router_output == nil ||
+                full_output == nil || cache_evict == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
 
             for (int i = 0; i < 5; ++i)
@@ -406,7 +623,26 @@ int main(int argc, char **argv) {
                                          std::chrono::steady_clock::now() - started)
                                          .count());
             }
-            const auto *result = static_cast<const std::uint16_t *>(output.contents);
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_full_joined(
+                    queue, gate_state, down_state, shared_gate_state, shared_router_state,
+                    shared_down_state, input, shard, router_shard, gate, up, down, shared_gate,
+                    shared_up, shared_down, shared_router, experts, weights, hidden, output,
+                    shared_hidden, shared_router_output, full_output));
+            std::vector<double> full_gpu, full_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 77));
+                const auto started = std::chrono::steady_clock::now();
+                full_gpu.push_back(run_full_joined(
+                    queue, gate_state, down_state, shared_gate_state, shared_router_state,
+                    shared_down_state, input, shard, router_shard, gate, up, down, shared_gate,
+                    shared_up, shared_down, shared_router, experts, weights, hidden, output,
+                    shared_hidden, shared_router_output, full_output));
+                full_wall.push_back(std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - started)
+                                        .count());
+            }
+            const auto *result = static_cast<const std::uint16_t *>(full_output.contents);
             std::uint64_t hash = 1469598103934665603ULL;
             std::vector<float> direct(hidden_size);
             for (int i = 0; i < hidden_size; ++i) {
@@ -415,7 +651,8 @@ int main(int argc, char **argv) {
                 direct[i] = std::bit_cast<float>(static_cast<std::uint32_t>(result[i]) << 16);
             }
             const OracleResult oracle =
-                mlx_oracle(manifest, gate, up, down, input_f32, expert_ids, route_weights);
+                mlx_oracle(manifest, gate, up, down, shared_gate, shared_up, shared_down,
+                           shared_router, input_f32, expert_ids, route_weights);
             double dot = 0.0, aa = 0.0, bb = 0.0, squared_error = 0.0, max_abs = 0.0;
             for (int i = 0; i < hidden_size; ++i) {
                 const double a = direct[i], b = oracle.output[i], delta = a - b;
@@ -433,7 +670,9 @@ int main(int argc, char **argv) {
                       << ",\"split_gpu_median_ms\":" << median(split)
                       << ",\"joined_wall_median_ms\":" << median(joined_wall)
                       << ",\"split_wall_median_ms\":" << median(split_wall)
-                      << ",\"mlx_oracle_median_ms\":" << oracle.median_ms
+                      << ",\"full_gpu_median_ms\":" << median(full_gpu)
+                      << ",\"full_wall_median_ms\":" << median(full_wall)
+                      << ",\"mlx_full_oracle_median_ms\":" << oracle.median_ms
                       << ",\"cosine\":" << dot / std::sqrt(aa * bb)
                       << ",\"rmse\":" << std::sqrt(squared_error / hidden_size)
                       << ",\"max_abs\":" << max_abs << ",\"output_hash\":\"" << hash << "\"}\n";

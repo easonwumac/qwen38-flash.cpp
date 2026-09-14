@@ -21,13 +21,20 @@ work, while keeping dependent kernels in one command buffer removes about
 gain because shared MoE, attention, GDN, hyper-connections, healing maps and the
 LM head still execute in MLX.
 
+The second gate added the Q4/group-32 shared gate/up/down, Q8/group-64 shared
+router, and routed/shared merge to the same command buffer. Five independent
+process runs, each with 31 cache-evicted samples, measured 0.293--0.310 ms
+submit-to-completion and 0.136--0.142 ms GPU time. The warm full MLX oracle
+ranged from 0.372 to 0.788 ms. Full-output cosine was 0.999776, RMSE 6.86e-5,
+and max absolute error 2.75e-4. This clears the primitive performance gate but
+remains an approximate path until token-trajectory testing is possible.
+
 The next acceptance gates are:
 
-1. add the Q4 shared expert and Q8 shared gate to the same command buffer;
-2. match the retained MLX token trajectory before extending beyond one layer;
-3. encode one complete full-attention layer with fixed buffers and no MLX
+1. match the retained MLX token trajectory before extending beyond one layer;
+2. encode one complete full-attention layer with fixed buffers and no MLX
    synchronization inside the layer;
-4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
+3. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 
 Run the bounded primitive probe with:
 
