@@ -155,9 +155,29 @@ M5 Pro 64 GiB, real Niwaki 99B layer-0 weights, deterministic recursive BF16
 inputs, zero initial GDN state, greedy/no-sampling execution and no MTP. This is
 still a block-level result without HyperConnection, MoE or whole-model timing.
 
+The eighth gate joins that GDN block to both real layer-0 HyperConnection
+halves, the device Q8 router/top-10 path, Q3/group-64 routed experts,
+Q4/group-32 shared expert and the BF16 rank-64 healing map. Across five
+independent processes with 31 cache-evicted samples each, the complete
+single-command-buffer layer measured 0.454--0.464 ms GPU. Its output matched a
+complete MLX layer-0 oracle at 0.999998 cosine, 6.13e-4 RMSE and 3.91e-3 maximum
+absolute error. A four-token recursive complete-layer trajectory retained
+0.999985 minimum cosine, 1.62e-3 maximum RMSE and 7.81e-3 maximum absolute
+error. The same unaligned-safe BF16 loads were extended to model projection,
+HyperConnection and healing parameters; aligned scratch/state buffers remain
+native `bfloat*`.
+
+For scale only, combining the five-process upper medians for 36 routed GDN
+layers and 12 full-attention layers gives about 25.2 ms of device layer time,
+or 39.6 token/s before embedding, final head and host overhead. This is not an
+end-to-end throughput claim, but it is deliberately conservative because 24
+real layers are shared-only and should avoid routed expert work. A dedicated
+shared-only layer gate and runtime integration are required before claiming the
+40 token/s target.
+
 The next acceptance gates are:
 
-1. connect GDN, HyperConnection and the correct routed/shared-only MoE variants;
+1. validate a complete shared-only GDN and full-attention layer;
 2. integrate the persistent state and layer dispatch into the runtime;
 3. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
 4. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate.

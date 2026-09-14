@@ -68,11 +68,11 @@ inline bfloat load_bf16_unaligned(const device uchar* bytes, ulong index) {
 kernel void q3_gate_up(
     const device bfloat* x [[buffer(0)]],
     const device uchar* gate_weight [[buffer(1)]],
-    const device bfloat* gate_scale [[buffer(2)]],
-    const device bfloat* gate_bias [[buffer(3)]],
+    const device uchar* gate_scale [[buffer(2)]],
+    const device uchar* gate_bias [[buffer(3)]],
     const device uchar* up_weight [[buffer(4)]],
-    const device bfloat* up_scale [[buffer(5)]],
-    const device bfloat* up_bias [[buffer(6)]],
+    const device uchar* up_scale [[buffer(5)]],
+    const device uchar* up_bias [[buffer(6)]],
     const device uint* experts [[buffer(7)]],
     device bfloat* output [[buffer(8)]],
     uint group [[threadgroup_position_in_grid]],
@@ -85,17 +85,17 @@ kernel void q3_gate_up(
     const ulong matrix_row = ulong(expert) * rows + row;
     const device uchar* gw = gate_weight + matrix_row * row_bytes;
     const device uchar* uw = up_weight + matrix_row * row_bytes;
-    const device bfloat* gs = gate_scale + matrix_row * groups;
-    const device bfloat* gb = gate_bias + matrix_row * groups;
-    const device bfloat* us = up_scale + matrix_row * groups;
-    const device bfloat* ub = up_bias + matrix_row * groups;
     float gate = 0.0f, up = 0.0f;
     for (uint base = lane * 8; base < k; base += 256) {
         float sum = 0.0f;
         for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
         const uint quant = base / 8 * 3, affine = base / 64;
-        gate += float(gs[affine]) * q3_dot8(gw + quant, x + base) + float(gb[affine]) * sum;
-        up += float(us[affine]) * q3_dot8(uw + quant, x + base) + float(ub[affine]) * sum;
+        gate += float(load_bf16_unaligned(gate_scale, matrix_row * groups + affine)) *
+                q3_dot8(gw + quant, x + base) +
+            float(load_bf16_unaligned(gate_bias, matrix_row * groups + affine)) * sum;
+        up += float(load_bf16_unaligned(up_scale, matrix_row * groups + affine)) *
+                q3_dot8(uw + quant, x + base) +
+            float(load_bf16_unaligned(up_bias, matrix_row * groups + affine)) * sum;
     }
     gate = simd_sum(gate);
     up = simd_sum(up);
@@ -110,8 +110,8 @@ kernel void q3_gate_up(
 kernel void q3_down_reduce(
     const device bfloat* input [[buffer(0)]],
     const device uchar* weight [[buffer(1)]],
-    const device bfloat* scale [[buffer(2)]],
-    const device bfloat* bias [[buffer(3)]],
+    const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]],
     const device uint* experts [[buffer(4)]],
     const device bfloat* route_weights [[buffer(5)]],
     device bfloat* output [[buffer(6)]],
@@ -125,16 +125,15 @@ kernel void q3_down_reduce(
     for (uint slot = 0; slot < 10; ++slot) {
         const ulong matrix_row = ulong(experts[slot]) * rows + row;
         const device uchar* wr = weight + matrix_row * row_bytes;
-        const device bfloat* sr = scale + matrix_row * groups;
-        const device bfloat* br = bias + matrix_row * groups;
         const device bfloat* xv = input + slot * k;
         float dot = 0.0f;
         for (uint base = lane * 8; base < k; base += 256) {
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(xv[base + i]);
             const uint quant = base / 8 * 3, affine = base / 64;
-            dot += float(sr[affine]) * q3_dot8(wr + quant, xv + base) +
-                float(br[affine]) * sum;
+            dot += float(load_bf16_unaligned(scale, matrix_row * groups + affine)) *
+                    q3_dot8(wr + quant, xv + base) +
+                float(load_bf16_unaligned(bias, matrix_row * groups + affine)) * sum;
         }
         dot = simd_sum(dot);
         if (lane == 0) {
@@ -148,11 +147,11 @@ kernel void q3_down_reduce(
 kernel void q4_shared_gate_up(
     const device bfloat* x [[buffer(0)]],
     const device uchar* gate_weight [[buffer(1)]],
-    const device bfloat* gate_scale [[buffer(2)]],
-    const device bfloat* gate_bias [[buffer(3)]],
+    const device uchar* gate_scale [[buffer(2)]],
+    const device uchar* gate_bias [[buffer(3)]],
     const device uchar* up_weight [[buffer(4)]],
-    const device bfloat* up_scale [[buffer(5)]],
-    const device bfloat* up_bias [[buffer(6)]],
+    const device uchar* up_scale [[buffer(5)]],
+    const device uchar* up_bias [[buffer(6)]],
     device bfloat* output [[buffer(7)]],
     uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -162,17 +161,17 @@ kernel void q4_shared_gate_up(
     if (row >= rows) return;
     const device uchar* gw = gate_weight + row * row_bytes;
     const device uchar* uw = up_weight + row * row_bytes;
-    const device bfloat* gs = gate_scale + row * groups;
-    const device bfloat* gb = gate_bias + row * groups;
-    const device bfloat* us = up_scale + row * groups;
-    const device bfloat* ub = up_bias + row * groups;
     float gate = 0.0f, up = 0.0f;
     for (uint base = lane * 8; base < k; base += 256) {
         float sum = 0.0f;
         for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
         const uint quant = base / 2, affine = base / 32;
-        gate += float(gs[affine]) * q4_dot8(gw + quant, x + base) + float(gb[affine]) * sum;
-        up += float(us[affine]) * q4_dot8(uw + quant, x + base) + float(ub[affine]) * sum;
+        gate += float(load_bf16_unaligned(gate_scale, row * groups + affine)) *
+                q4_dot8(gw + quant, x + base) +
+            float(load_bf16_unaligned(gate_bias, row * groups + affine)) * sum;
+        up += float(load_bf16_unaligned(up_scale, row * groups + affine)) *
+                q4_dot8(uw + quant, x + base) +
+            float(load_bf16_unaligned(up_bias, row * groups + affine)) * sum;
     }
     gate = simd_sum(gate);
     up = simd_sum(up);
@@ -187,8 +186,8 @@ kernel void q4_shared_gate_up(
 kernel void q8_shared_router(
     const device bfloat* x [[buffer(0)]],
     const device uchar* weight [[buffer(1)]],
-    const device bfloat* scale [[buffer(2)]],
-    const device bfloat* bias [[buffer(3)]],
+    const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]],
     device bfloat* output [[buffer(4)]],
     uint lane [[thread_index_in_simdgroup]]) {
     constexpr uint k = 2560, groups = k / 64;
@@ -196,8 +195,9 @@ kernel void q8_shared_router(
     for (uint base = lane * 4; base < k; base += 128) {
         float sum = 0.0f;
         for (uint i = 0; i < 4; ++i) sum += float(x[base + i]);
-        dot += float(scale[base / 64]) * q8_dot4(weight + base, x + base) +
-            float(bias[base / 64]) * sum;
+        dot += float(load_bf16_unaligned(scale, base / 64)) *
+                q8_dot4(weight + base, x + base) +
+            float(load_bf16_unaligned(bias, base / 64)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) {
@@ -209,8 +209,8 @@ kernel void q8_shared_router(
 kernel void q4_shared_down_merge(
     const device bfloat* input [[buffer(0)]],
     const device uchar* weight [[buffer(1)]],
-    const device bfloat* scale [[buffer(2)]],
-    const device bfloat* bias [[buffer(3)]],
+    const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]],
     const device bfloat* router [[buffer(4)]],
     const device bfloat* routed [[buffer(5)]],
     device bfloat* output [[buffer(6)]],
@@ -221,14 +221,13 @@ kernel void q4_shared_down_merge(
     const uint row = group * 4 + simd;
     if (row >= rows) return;
     const device uchar* wr = weight + row * row_bytes;
-    const device bfloat* sr = scale + row * groups;
-    const device bfloat* br = bias + row * groups;
     float dot = 0.0f;
     for (uint base = lane * 8; base < k; base += 256) {
         float sum = 0.0f;
         for (uint i = 0; i < 8; ++i) sum += float(input[base + i]);
-        dot += float(sr[base / 32]) * q4_dot8(wr + base / 2, input + base) +
-            float(br[base / 32]) * sum;
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 32)) *
+                q4_dot8(wr + base / 2, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 32)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) {
@@ -239,15 +238,15 @@ kernel void q4_shared_down_merge(
 
 kernel void fused_all_gate_up(
     const device bfloat* x [[buffer(0)]],
-    const device uchar* rgw [[buffer(1)]], const device bfloat* rgs [[buffer(2)]],
-    const device bfloat* rgb [[buffer(3)]], const device uchar* ruw [[buffer(4)]],
-    const device bfloat* rus [[buffer(5)]], const device bfloat* rub [[buffer(6)]],
+    const device uchar* rgw [[buffer(1)]], const device uchar* rgs [[buffer(2)]],
+    const device uchar* rgb [[buffer(3)]], const device uchar* ruw [[buffer(4)]],
+    const device uchar* rus [[buffer(5)]], const device uchar* rub [[buffer(6)]],
     const device uint* experts [[buffer(7)]], device bfloat* routed [[buffer(8)]],
-    const device uchar* sgw [[buffer(9)]], const device bfloat* sgs [[buffer(10)]],
-    const device bfloat* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
-    const device bfloat* sus [[buffer(13)]], const device bfloat* sub [[buffer(14)]],
+    const device uchar* sgw [[buffer(9)]], const device uchar* sgs [[buffer(10)]],
+    const device uchar* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
+    const device uchar* sus [[buffer(13)]], const device uchar* sub [[buffer(14)]],
     device bfloat* shared [[buffer(15)]], const device uchar* srw [[buffer(16)]],
-    const device bfloat* srs [[buffer(17)]], const device bfloat* srb [[buffer(18)]],
+    const device uchar* srs [[buffer(17)]], const device uchar* srb [[buffer(18)]],
     device bfloat* router [[buffer(19)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint linear = group * 4 + simd;
@@ -260,12 +259,12 @@ kernel void fused_all_gate_up(
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
             const uint quant = base / 8 * 3, affine = base / 64;
-            gate += float(rgs[matrix_row * groups + affine]) *
+            gate += float(load_bf16_unaligned(rgs, matrix_row * groups + affine)) *
                     q3_dot8(rgw + matrix_row * row_bytes + quant, x + base) +
-                float(rgb[matrix_row * groups + affine]) * sum;
-            up += float(rus[matrix_row * groups + affine]) *
+                float(load_bf16_unaligned(rgb, matrix_row * groups + affine)) * sum;
+            up += float(load_bf16_unaligned(rus, matrix_row * groups + affine)) *
                     q3_dot8(ruw + matrix_row * row_bytes + quant, x + base) +
-                float(rub[matrix_row * groups + affine]) * sum;
+                float(load_bf16_unaligned(rub, matrix_row * groups + affine)) * sum;
         }
         gate = simd_sum(gate); up = simd_sum(up);
         if (lane == 0) {
@@ -280,12 +279,12 @@ kernel void fused_all_gate_up(
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
             const uint quant = base / 2, affine = base / 32;
-            gate += float(sgs[row * groups + affine]) *
+            gate += float(load_bf16_unaligned(sgs, row * groups + affine)) *
                     q4_dot8(sgw + row * row_bytes + quant, x + base) +
-                float(sgb[row * groups + affine]) * sum;
-            up += float(sus[row * groups + affine]) *
+                float(load_bf16_unaligned(sgb, row * groups + affine)) * sum;
+            up += float(load_bf16_unaligned(sus, row * groups + affine)) *
                     q4_dot8(suw + row * row_bytes + quant, x + base) +
-                float(sub[row * groups + affine]) * sum;
+                float(load_bf16_unaligned(sub, row * groups + affine)) * sum;
         }
         gate = simd_sum(gate); up = simd_sum(up);
         if (lane == 0) {
@@ -297,8 +296,9 @@ kernel void fused_all_gate_up(
         for (uint base = lane * 4; base < 2560; base += 128) {
             float sum = 0.0f;
             for (uint i = 0; i < 4; ++i) sum += float(x[base + i]);
-            dot += float(srs[base / 64]) * q8_dot4(srw + base, x + base) +
-                float(srb[base / 64]) * sum;
+            dot += float(load_bf16_unaligned(srs, base / 64)) *
+                    q8_dot4(srw + base, x + base) +
+                float(load_bf16_unaligned(srb, base / 64)) * sum;
         }
         dot = simd_sum(dot);
         if (lane == 0) {
@@ -310,12 +310,12 @@ kernel void fused_all_gate_up(
 
 kernel void fused_all_down(
     const device bfloat* routed_hidden [[buffer(0)]],
-    const device uchar* rw [[buffer(1)]], const device bfloat* rs [[buffer(2)]],
-    const device bfloat* rb [[buffer(3)]], const device uint* experts [[buffer(4)]],
+    const device uchar* rw [[buffer(1)]], const device uchar* rs [[buffer(2)]],
+    const device uchar* rb [[buffer(3)]], const device uint* experts [[buffer(4)]],
     const device bfloat* route_weights [[buffer(5)]],
     const device bfloat* shared_hidden [[buffer(6)]],
-    const device uchar* sw [[buffer(7)]], const device bfloat* ss [[buffer(8)]],
-    const device bfloat* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
+    const device uchar* sw [[buffer(7)]], const device uchar* ss [[buffer(8)]],
+    const device uchar* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
     device bfloat* output [[buffer(11)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     constexpr uint rows = 2560;
@@ -330,9 +330,9 @@ kernel void fused_all_down(
         for (uint base = lane * 8; base < k; base += 256) {
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
-            dot += float(rs[matrix_row * groups + base / 64]) *
+            dot += float(load_bf16_unaligned(rs, matrix_row * groups + base / 64)) *
                     q3_dot8(rw + matrix_row * row_bytes + base / 8 * 3, x + base) +
-                float(rb[matrix_row * groups + base / 64]) * sum;
+                float(load_bf16_unaligned(rb, matrix_row * groups + base / 64)) * sum;
         }
         dot = simd_sum(dot);
         if (lane == 0) {
@@ -344,9 +344,9 @@ kernel void fused_all_down(
     for (uint base = lane * 8; base < 640; base += 256) {
         float sum = 0.0f;
         for (uint i = 0; i < 8; ++i) sum += float(shared_hidden[base + i]);
-        shared_dot += float(ss[row * 20 + base / 32]) *
+        shared_dot += float(load_bf16_unaligned(ss, row * 20 + base / 32)) *
                 q4_dot8(sw + row * 320 + base / 2, shared_hidden + base) +
-            float(sb[row * 20 + base / 32]) * sum;
+            float(load_bf16_unaligned(sb, row * 20 + base / 32)) * sum;
     }
     shared_dot = simd_sum(shared_dot);
     if (lane == 0) {
@@ -357,7 +357,7 @@ kernel void fused_all_down(
 
 kernel void q8_router_logits(
     const device bfloat* x [[buffer(0)]], const device uchar* weight [[buffer(1)]],
-    const device bfloat* scale [[buffer(2)]], const device bfloat* bias [[buffer(3)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
     device float* logits [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint row = group * 4 + simd;
@@ -366,9 +366,9 @@ kernel void q8_router_logits(
     for (uint base = lane * 4; base < 2560; base += 128) {
         float sum = 0.0f;
         for (uint i = 0; i < 4; ++i) sum += float(x[base + i]);
-        dot += float(scale[row * 40 + base / 64]) *
+        dot += float(load_bf16_unaligned(scale, row * 40 + base / 64)) *
                 q8_dot4(weight + row * 2560 + base, x + base) +
-            float(bias[row * 40 + base / 64]) * sum;
+            float(load_bf16_unaligned(bias, row * 40 + base / 64)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) logits[row] = float(bfloat(dot));
@@ -637,19 +637,19 @@ kernel void qsa_attention_q8_blocks(
 
 kernel void attention_qkv_index(
     const device bfloat* input [[buffer(0)]],
-    const device uchar* iw [[buffer(1)]], const device bfloat* is [[buffer(2)]],
-    const device bfloat* ib [[buffer(3)]], const device uchar* qw [[buffer(4)]],
-    const device bfloat* qs [[buffer(5)]], const device bfloat* qb [[buffer(6)]],
-    const device uchar* kw [[buffer(7)]], const device bfloat* ks [[buffer(8)]],
-    const device bfloat* kb [[buffer(9)]], const device uchar* vw [[buffer(10)]],
-    const device bfloat* vs [[buffer(11)]], const device bfloat* vb [[buffer(12)]],
+    const device uchar* iw [[buffer(1)]], const device uchar* is [[buffer(2)]],
+    const device uchar* ib [[buffer(3)]], const device uchar* qw [[buffer(4)]],
+    const device uchar* qs [[buffer(5)]], const device uchar* qb [[buffer(6)]],
+    const device uchar* kw [[buffer(7)]], const device uchar* ks [[buffer(8)]],
+    const device uchar* kb [[buffer(9)]], const device uchar* vw [[buffer(10)]],
+    const device uchar* vs [[buffer(11)]], const device uchar* vb [[buffer(12)]],
     device bfloat* output [[buffer(13)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint linear = group * 4 + simd;
     if (linear >= 13952) return;
     const device uchar* weight;
-    const device bfloat* scale;
-    const device bfloat* bias;
+    const device uchar* scale;
+    const device uchar* bias;
     uint row;
     if (linear < 640) {
         row = linear; weight = iw; scale = is; bias = ib;
@@ -665,9 +665,9 @@ kernel void attention_qkv_index(
         float sum = 0.0f;
         for (uint component = 0; component < 8; ++component)
             sum += float(input[base + component]);
-        dot += float(scale[row * 80 + base / 32]) *
+        dot += float(load_bf16_unaligned(scale, row * 80 + base / 32)) *
                 q4_dot8(weight + row * 1280 + base / 2, input + base) +
-            float(bias[row * 80 + base / 32]) * sum;
+            float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) output[linear] = bfloat(dot);
@@ -726,7 +726,7 @@ kernel void attention_apply_gate(
 
 kernel void attention_output_projection(
     const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
-    const device bfloat* scale [[buffer(2)]], const device bfloat* bias [[buffer(3)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
     device bfloat* output [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint row = group * 4 + simd;
@@ -736,9 +736,9 @@ kernel void attention_output_projection(
         float sum = 0.0f;
         for (uint component = 0; component < 8; ++component)
             sum += float(input[base + component]);
-        dot += float(scale[row * 192 + base / 32]) *
+        dot += float(load_bf16_unaligned(scale, row * 192 + base / 32)) *
                 q4_dot8(weight + row * 3072 + base / 2, input + base) +
-            float(bias[row * 192 + base / 32]) * sum;
+            float(load_bf16_unaligned(bias, row * 192 + base / 32)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) output[row] = bfloat(dot);
@@ -915,7 +915,7 @@ kernel void hc_write(
 }
 
 kernel void hc_normalize(
-    const device bfloat* stream [[buffer(0)]], const device bfloat* norm [[buffer(1)]],
+    const device bfloat* stream [[buffer(0)]], const device uchar* norm [[buffer(1)]],
     device bfloat* normalized [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
     uint hc [[threadgroup_position_in_grid]]) {
@@ -937,7 +937,7 @@ kernel void hc_normalize(
     for (uint i = 0; i < 10; ++i) {
         const uint index = base + tid + i * 256;
         const bfloat value = bfloat(values[i] * inverse_rms);
-        const bfloat weight = bfloat(float(norm[index]) + 1.0f);
+        const bfloat weight = bfloat(float(load_bf16_unaligned(norm, index)) + 1.0f);
         normalized[index] = bfloat(float(value) * float(weight));
     }
 }
@@ -945,11 +945,11 @@ kernel void hc_normalize(
 kernel void hc_down_injection(
     const device bfloat* x [[buffer(0)]],
     const device uchar* down_weight [[buffer(1)]],
-    const device bfloat* down_scale [[buffer(2)]],
-    const device bfloat* down_bias [[buffer(3)]],
+    const device uchar* down_scale [[buffer(2)]],
+    const device uchar* down_bias [[buffer(3)]],
     const device uchar* injection_weight [[buffer(4)]],
-    const device bfloat* injection_scale [[buffer(5)]],
-    const device bfloat* injection_bias [[buffer(6)]],
+    const device uchar* injection_scale [[buffer(5)]],
+    const device uchar* injection_bias [[buffer(6)]],
     device bfloat* activation [[buffer(7)]], device bfloat* injection [[buffer(8)]],
     uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
@@ -957,13 +957,13 @@ kernel void hc_down_injection(
     const bool is_down = row < 320;
     const uint local_row = is_down ? row : row - 320;
     const device uchar* weight = is_down ? down_weight : injection_weight;
-    const device bfloat* scale = is_down ? down_scale : injection_scale;
-    const device bfloat* bias = is_down ? down_bias : injection_bias;
+    const device uchar* scale = is_down ? down_scale : injection_scale;
+    const device uchar* bias = is_down ? down_bias : injection_bias;
     float dot = 0.0f;
     for (uint base = tid * 8; base < 10240; base += 2048) {
         const device uchar* bytes = weight + local_row * 5120 + base / 2;
-        const float s = float(scale[local_row * 320 + base / 32]);
-        const float b = float(bias[local_row * 320 + base / 32]);
+        const float s = float(load_bf16_unaligned(scale, local_row * 320 + base / 32));
+        const float b = float(load_bf16_unaligned(bias, local_row * 320 + base / 32));
         float sum = 0.0f;
         for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
         dot += s * q4_dot8(bytes, x + base) + b * sum;
@@ -987,8 +987,8 @@ kernel void hc_down_injection(
 
 kernel void hc_up_mix(
     const device bfloat* normalized [[buffer(0)]], const device bfloat* activation [[buffer(1)]],
-    const device uchar* weight [[buffer(2)]], const device bfloat* scale [[buffer(3)]],
-    const device bfloat* bias [[buffer(4)]], device bfloat* mixed [[buffer(5)]],
+    const device uchar* weight [[buffer(2)]], const device uchar* scale [[buffer(3)]],
+    const device uchar* bias [[buffer(4)]], device bfloat* mixed [[buffer(5)]],
     uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     const uint column = group * 8 + simd;
@@ -999,8 +999,8 @@ kernel void hc_up_mix(
         float dot = 0.0f;
         for (uint base = lane * 8; base < 320; base += 256) {
             const device uchar* bytes = weight + row * 160 + base / 2;
-            const float s = float(scale[row * 10 + base / 32]);
-            const float b = float(bias[row * 10 + base / 32]);
+            const float s = float(load_bf16_unaligned(scale, row * 10 + base / 32));
+            const float b = float(load_bf16_unaligned(bias, row * 10 + base / 32));
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(activation[base + i]);
             dot += s * q4_dot8(bytes, activation + base) + b * sum;
@@ -1013,21 +1013,21 @@ kernel void hc_up_mix(
 }
 
 kernel void healing_left(
-    const device bfloat* input [[buffer(0)]], const device bfloat* weight [[buffer(1)]],
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
     device bfloat* hidden [[buffer(2)]], uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint column = group * 4 + simd;
     if (column >= 64) return;
     float dot = 0.0f;
     for (uint row = lane; row < 2560; row += 32)
-        dot += float(input[row]) * float(weight[row * 64 + column]);
+        dot += float(input[row]) * float(load_bf16_unaligned(weight, row * 64 + column));
     dot = simd_sum(dot);
     if (lane == 0) hidden[column] = bfloat(dot);
 }
 
 kernel void healing_right_write(
     const device bfloat* block [[buffer(0)]], const device bfloat* hidden [[buffer(1)]],
-    const device bfloat* weight [[buffer(2)]], const device bfloat* stream [[buffer(3)]],
+    const device uchar* weight [[buffer(2)]], const device bfloat* stream [[buffer(3)]],
     const device bfloat* injection [[buffer(4)]], device bfloat* output [[buffer(5)]],
     uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
@@ -1035,7 +1035,7 @@ kernel void healing_right_write(
     if (column >= 2560) return;
     float dot = 0.0f;
     for (uint row = lane; row < 64; row += 32)
-        dot += float(hidden[row]) * float(weight[row * 2560 + column]);
+        dot += float(hidden[row]) * float(load_bf16_unaligned(weight, row * 2560 + column));
     dot = simd_sum(dot);
     if (lane == 0) {
         const bfloat healed = bfloat(float(block[column]) + float(bfloat(dot)));
@@ -2119,6 +2119,49 @@ GdnTrajectoryResult mlx_gdn_trajectory_oracle(
     return result;
 }
 
+OracleResult mlx_gdn_layer_oracle(const qwen38::ModelManifest &manifest,
+                                  std::span<const std::uint16_t> stream_values) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    setenv("QWEN38_GDN_PREWORK", "1", 1);
+    setenv("QWEN38_GDN_NORM_GATE", "1", 1);
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::DecoderLayer layer(store, 0, manifest.config());
+    const std::array<int, 3> shape{1, 1, 10240};
+    const MlxArray stream(
+        mlx_array_new_data(stream_values.data(), shape.data(), 3, MLX_BFLOAT16));
+    qwen38::DecoderLayerState state;
+    const auto started = std::chrono::steady_clock::now();
+    MlxArray output = layer.forward_decode(stream, 9419, state);
+    output.eval();
+    return {output.astype(MLX_FLOAT32).to_float32(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count()};
+}
+
+std::vector<std::vector<float>> mlx_gdn_layer_trajectory_oracle(
+    const qwen38::ModelManifest &manifest, std::span<const std::uint16_t> stream_values,
+    const std::uint32_t steps) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    setenv("QWEN38_GDN_PREWORK", "1", 1);
+    setenv("QWEN38_GDN_NORM_GATE", "1", 1);
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::DecoderLayer layer(store, 0, manifest.config());
+    const std::array<int, 3> shape{1, 1, 10240};
+    MlxArray stream(mlx_array_new_data(stream_values.data(), shape.data(), 3, MLX_BFLOAT16));
+    qwen38::DecoderLayerState state;
+    std::vector<std::vector<float>> outputs;
+    outputs.reserve(steps);
+    for (std::uint32_t step = 0; step < steps; ++step) {
+        MlxArray output = layer.forward_decode(stream, 9419, state);
+        output.eval();
+        outputs.push_back(output.astype(MLX_FLOAT32).to_float32());
+        stream = output.share();
+    }
+    return outputs;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -2170,6 +2213,36 @@ int main(int argc, char **argv) {
             const std::string gdn_decay_log = gdn_prefix + ".A_log";
             const std::string gdn_decay_bias = gdn_prefix + ".dt_bias";
             const std::string gdn_norm = gdn_prefix + ".norm.weight";
+            const std::string gdn_mlp_prefix = "language_model.model.layers.0.mlp";
+            const std::string gdn_switch_prefix = gdn_mlp_prefix + ".switch_mlp";
+            const auto gdn_mlp_gate = projection(gdn_switch_prefix + ".gate_proj");
+            const auto gdn_mlp_up = projection(gdn_switch_prefix + ".up_proj");
+            const auto gdn_mlp_down = projection(gdn_switch_prefix + ".down_proj");
+            const auto gdn_shared_gate = projection(gdn_mlp_prefix + ".shared_expert.gate_proj");
+            const auto gdn_shared_up = projection(gdn_mlp_prefix + ".shared_expert.up_proj");
+            const auto gdn_shared_down = projection(gdn_mlp_prefix + ".shared_expert.down_proj");
+            const auto gdn_shared_router = projection(gdn_mlp_prefix + ".shared_expert_gate");
+            const auto gdn_router = projection(gdn_mlp_prefix + ".gate");
+            const std::string gdn_mlp_hc_prefix =
+                "language_model.model.layers.0.mlp_hyper_connection";
+            const std::string gdn_mlp_hc_norm = gdn_mlp_hc_prefix + ".hc_norm.weight";
+            const auto gdn_mlp_hc_down =
+                projection(gdn_mlp_hc_prefix + ".input_mix_weight_down");
+            const auto gdn_mlp_hc_up =
+                projection(gdn_mlp_hc_prefix + ".input_mix_weight_up");
+            const auto gdn_mlp_hc_injection =
+                projection(gdn_mlp_hc_prefix + ".block_inject_weight");
+            const std::string gdn_attn_hc_prefix =
+                "language_model.model.layers.0.attn_hyper_connection";
+            const std::string gdn_attn_hc_norm = gdn_attn_hc_prefix + ".hc_norm.weight";
+            const auto gdn_attn_hc_down =
+                projection(gdn_attn_hc_prefix + ".input_mix_weight_down");
+            const auto gdn_attn_hc_up =
+                projection(gdn_attn_hc_prefix + ".input_mix_weight_up");
+            const auto gdn_attn_hc_injection =
+                projection(gdn_attn_hc_prefix + ".block_inject_weight");
+            const std::string gdn_healing_left = gdn_mlp_prefix + ".T_delta_left";
+            const std::string gdn_healing_right = gdn_mlp_prefix + ".T_delta_right";
             const std::string healing_left = layer_prefix + ".T_delta_left";
             const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
@@ -2233,6 +2306,10 @@ int main(int argc, char **argv) {
                                 manifest.directory() / manifest.weight_map().at(healing_left));
             Shard gdn_shard(device,
                             manifest.directory() / manifest.weight_map().at(gdn_qkv.weight));
+            Shard gdn_moe_shard(
+                device, manifest.directory() / manifest.weight_map().at(gdn_mlp_gate.weight));
+            Shard gdn_healing_shard(
+                device, manifest.directory() / manifest.weight_map().at(gdn_healing_left));
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
@@ -2641,6 +2718,224 @@ int main(int argc, char **argv) {
             for (int iteration = 0; iteration < 31; ++iteration) {
                 evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 181));
                 gdn_gpu.push_back(run_gdn(true));
+            }
+
+            const auto encode_hc_read = [&](id<MTLCommandBuffer> command,
+                                            id<MTLBuffer> stream, const Shard &weight_shard,
+                                            const std::string &norm,
+                                            const ProjectionNames &down_projection,
+                                            const ProjectionNames &up_projection,
+                                            const ProjectionNames &injection_projection) {
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_normalize_state];
+                [encoder setBuffer:stream offset:0 atIndex:0];
+                bind_tensor(encoder, weight_shard, norm, 1);
+                [encoder setBuffer:hc_normalized offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_down_state];
+                [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                bind_projection(encoder, weight_shard, down_projection, 1);
+                bind_projection(encoder, weight_shard, injection_projection, 4);
+                [encoder setBuffer:hc_activation offset:0 atIndex:7];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(324, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_up_state];
+                [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                [encoder setBuffer:hc_activation offset:0 atIndex:1];
+                bind_projection(encoder, weight_shard, up_projection, 2);
+                [encoder setBuffer:hc_mixed offset:0 atIndex:5];
+                [encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+            };
+            const auto encode_gdn_block = [&](id<MTLCommandBuffer> command,
+                                              id<MTLBuffer> block_input) {
+                const auto encode_projection = [&](const ProjectionNames &projection,
+                                                   const std::uint32_t rows,
+                                                   const NSUInteger output_offset) {
+                    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:q4_input_state];
+                    [encoder setBuffer:block_input offset:0 atIndex:0];
+                    bind_projection(encoder, gdn_shard, projection, 1);
+                    [encoder setBuffer:gdn_projected
+                                offset:output_offset * sizeof(std::uint16_t)
+                               atIndex:4];
+                    [encoder setBytes:&rows length:sizeof(rows) atIndex:5];
+                    [encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+                };
+                encode_projection(gdn_qkv, 10240, 0);
+                encode_projection(gdn_z, 6144, 10240);
+                encode_projection(gdn_beta, 48, 16384);
+                encode_projection(gdn_decay, 48, 16432);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_prework_state];
+                [encoder setBuffer:gdn_projected offset:0 atIndex:0];
+                [encoder setBuffer:gdn_convolution_state offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_shard, gdn_convolution, 2);
+                bind_tensor(encoder, gdn_shard, gdn_decay_log, 3);
+                bind_tensor(encoder, gdn_shard, gdn_decay_bias, 4);
+                [encoder setBuffer:gdn_query_buffer offset:0 atIndex:5];
+                [encoder setBuffer:gdn_key_buffer offset:0 atIndex:6];
+                [encoder setBuffer:gdn_value_buffer offset:0 atIndex:7];
+                [encoder setBuffer:gdn_decay_buffer offset:0 atIndex:8];
+                [encoder setBuffer:gdn_beta_buffer offset:0 atIndex:9];
+                [encoder dispatchThreadgroups:MTLSizeMake(80, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_recurrence_state];
+                [encoder setBuffer:gdn_query_buffer offset:0 atIndex:0];
+                [encoder setBuffer:gdn_key_buffer offset:0 atIndex:1];
+                [encoder setBuffer:gdn_value_buffer offset:0 atIndex:2];
+                [encoder setBuffer:gdn_decay_buffer offset:0 atIndex:3];
+                [encoder setBuffer:gdn_beta_buffer offset:0 atIndex:4];
+                [encoder setBuffer:gdn_recurrent_state_buffer offset:0 atIndex:5];
+                [encoder setBuffer:gdn_recurrent_output offset:0 atIndex:6];
+                [encoder dispatchThreadgroups:MTLSizeMake(128, 48, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_norm_gate_state];
+                [encoder setBuffer:gdn_recurrent_output offset:0 atIndex:0];
+                [encoder setBuffer:gdn_projected offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_shard, gdn_norm, 2);
+                [encoder setBuffer:gdn_gated_output offset:0 atIndex:3];
+                [encoder dispatchThreadgroups:MTLSizeMake(48, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_output_state];
+                [encoder setBuffer:gdn_gated_output offset:0 atIndex:0];
+                bind_projection(encoder, gdn_shard, gdn_output, 1);
+                [encoder setBuffer:gdn_block_output offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            };
+            const auto encode_gdn_mlp = [&](id<MTLCommandBuffer> command,
+                                            id<MTLBuffer> stream) {
+                encode_hc_read(command, stream, gdn_shard, gdn_mlp_hc_norm,
+                               gdn_mlp_hc_down, gdn_mlp_hc_up, gdn_mlp_hc_injection);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:router_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, gdn_shard, gdn_router, 1);
+                [encoder setBuffer:logits offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(128, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:select_state];
+                [encoder setBuffer:logits offset:0 atIndex:0];
+                [encoder setBuffer:experts offset:0 atIndex:1];
+                [encoder setBuffer:weights offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:fused_gate_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, gdn_moe_shard, gdn_mlp_gate, 1);
+                bind_projection(encoder, gdn_moe_shard, gdn_mlp_up, 4);
+                [encoder setBuffer:experts offset:0 atIndex:7];
+                [encoder setBuffer:hidden offset:0 atIndex:8];
+                bind_projection(encoder, gdn_moe_shard, gdn_shared_gate, 9);
+                bind_projection(encoder, gdn_moe_shard, gdn_shared_up, 12);
+                [encoder setBuffer:shared_hidden offset:0 atIndex:15];
+                bind_projection(encoder, gdn_shard, gdn_shared_router, 16);
+                [encoder setBuffer:shared_router_output offset:0 atIndex:19];
+                [encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:fused_down_state];
+                [encoder setBuffer:hidden offset:0 atIndex:0];
+                bind_projection(encoder, gdn_moe_shard, gdn_mlp_down, 1);
+                [encoder setBuffer:experts offset:0 atIndex:4];
+                [encoder setBuffer:weights offset:0 atIndex:5];
+                [encoder setBuffer:shared_hidden offset:0 atIndex:6];
+                bind_projection(encoder, gdn_moe_shard, gdn_shared_down, 7);
+                [encoder setBuffer:shared_router_output offset:0 atIndex:10];
+                [encoder setBuffer:full_output offset:0 atIndex:11];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:healing_left_state];
+                [encoder setBuffer:full_output offset:0 atIndex:0];
+                bind_tensor(encoder, gdn_healing_shard, gdn_healing_left, 1);
+                [encoder setBuffer:healing_hidden offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(16, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:healing_right_state];
+                [encoder setBuffer:full_output offset:0 atIndex:0];
+                [encoder setBuffer:healing_hidden offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_healing_shard, gdn_healing_right, 2);
+                [encoder setBuffer:stream offset:0 atIndex:3];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:4];
+                [encoder setBuffer:hc_output_stream offset:0 atIndex:5];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            };
+            const auto run_gdn_layer = [&](const bool reset_state = true) {
+                if (reset_state) {
+                    std::memset(gdn_convolution_state.contents, 0,
+                                3 * 10240 * sizeof(std::uint16_t));
+                    std::memset(gdn_recurrent_state_buffer.contents, 0,
+                                48ULL * 128 * 128 * sizeof(std::uint16_t));
+                }
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                encode_hc_read(command, hc_stream, gdn_shard, gdn_attn_hc_norm,
+                               gdn_attn_hc_down, gdn_attn_hc_up, gdn_attn_hc_injection);
+                encode_gdn_block(command, hc_mixed);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_write_state];
+                [encoder setBuffer:hc_stream offset:0 atIndex:0];
+                [encoder setBuffer:gdn_block_output offset:0 atIndex:1];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:2];
+                [encoder setBuffer:attention_output_stream offset:0 atIndex:3];
+                [encoder dispatchThreads:MTLSizeMake(10240, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encode_gdn_mlp(command, attention_output_stream);
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+            };
+            const double gdn_layer_first_gpu = run_gdn_layer();
+            const OracleResult gdn_layer_oracle = mlx_gdn_layer_oracle(manifest, stream_bf16);
+            const auto *gdn_layer_bits =
+                static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            double gdn_layer_dot = 0.0, gdn_layer_aa = 0.0, gdn_layer_bb = 0.0;
+            double gdn_layer_squared_error = 0.0, gdn_layer_max_abs = 0.0;
+            for (std::size_t component = 0; component < 10240; ++component) {
+                const double actual = from_bf16(gdn_layer_bits[component]);
+                const double expected = gdn_layer_oracle.output[component];
+                const double delta = actual - expected;
+                gdn_layer_dot += actual * expected;
+                gdn_layer_aa += actual * actual;
+                gdn_layer_bb += expected * expected;
+                gdn_layer_squared_error += delta * delta;
+                gdn_layer_max_abs = std::max(gdn_layer_max_abs, std::abs(delta));
+            }
+            for (int warmup = 0; warmup < 5; ++warmup) static_cast<void>(run_gdn_layer());
+            std::vector<double> gdn_layer_gpu;
+            for (int iteration = 0; iteration < 31; ++iteration) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 213));
+                gdn_layer_gpu.push_back(run_gdn_layer());
             }
 
             const auto run_attention_half = [&](const bool include_mlp,
@@ -3535,6 +3830,34 @@ int main(int argc, char **argv) {
                 layer_squared_error += delta * delta;
                 layer_max_abs = std::max(layer_max_abs, std::abs(delta));
             }
+            const auto gdn_layer_trajectory_oracle =
+                mlx_gdn_layer_trajectory_oracle(manifest, stream_bf16, 4);
+            std::memcpy(hc_stream.contents, stream_bf16.data(),
+                        stream_bf16.size() * sizeof(std::uint16_t));
+            double gdn_layer_trajectory_min_cosine = 1.0;
+            double gdn_layer_trajectory_max_rmse = 0.0, gdn_layer_trajectory_max_abs = 0.0;
+            for (std::uint32_t step = 0; step < 4; ++step) {
+                static_cast<void>(run_gdn_layer(step == 0));
+                const auto *actual_bits =
+                    static_cast<const std::uint16_t *>(hc_output_stream.contents);
+                double dot = 0.0, aa = 0.0, bb = 0.0, squared_error = 0.0;
+                for (std::size_t component = 0; component < 10240; ++component) {
+                    const double actual = from_bf16(actual_bits[component]);
+                    const double expected = gdn_layer_trajectory_oracle[step][component];
+                    const double delta = actual - expected;
+                    dot += actual * expected;
+                    aa += actual * actual;
+                    bb += expected * expected;
+                    squared_error += delta * delta;
+                    gdn_layer_trajectory_max_abs =
+                        std::max(gdn_layer_trajectory_max_abs, std::abs(delta));
+                }
+                gdn_layer_trajectory_min_cosine =
+                    std::min(gdn_layer_trajectory_min_cosine, dot / std::sqrt(aa * bb));
+                gdn_layer_trajectory_max_rmse = std::max(
+                    gdn_layer_trajectory_max_rmse, std::sqrt(squared_error / 10240.0));
+                std::memcpy(hc_stream.contents, actual_bits, 10240 * sizeof(std::uint16_t));
+            }
             const GdnTrajectoryResult gdn_trajectory_oracle =
                 mlx_gdn_trajectory_oracle(manifest, gdn_prefix, input_bf16, 4);
             std::memcpy(input.contents, input_bf16.data(),
@@ -3627,6 +3950,20 @@ int main(int argc, char **argv) {
                 << "\",\"layer\":3,\"gdn_layer\":0,\"experts\":10,\"mmap_backed\":true"
                 << ",\"joined_gpu_median_ms\":" << median(joined)
                 << ",\"gdn_gpu_median_ms\":" << median(gdn_gpu)
+                << ",\"gdn_layer_first_gpu_ms\":" << gdn_layer_first_gpu
+                << ",\"gdn_layer_gpu_median_ms\":" << median(gdn_layer_gpu)
+                << ",\"gdn_layer_oracle_ms\":" << gdn_layer_oracle.median_ms
+                << ",\"gdn_layer_cosine\":"
+                << gdn_layer_dot / std::sqrt(gdn_layer_aa * gdn_layer_bb)
+                << ",\"gdn_layer_rmse\":" << std::sqrt(gdn_layer_squared_error / 10240.0)
+                << ",\"gdn_layer_max_abs\":" << gdn_layer_max_abs
+                << ",\"gdn_layer_trajectory_tokens\":4"
+                << ",\"gdn_layer_trajectory_min_cosine\":"
+                << gdn_layer_trajectory_min_cosine
+                << ",\"gdn_layer_trajectory_max_rmse\":"
+                << gdn_layer_trajectory_max_rmse
+                << ",\"gdn_layer_trajectory_max_abs\":"
+                << gdn_layer_trajectory_max_abs
                 << ",\"gdn_projection_max_abs\":" << gdn_projection_max_abs
                 << ",\"gdn_projection_nonfinite\":[" << gdn_projection_nonfinite[0] << ','
                 << gdn_projection_nonfinite[1] << ',' << gdn_projection_nonfinite[2] << ','
