@@ -103,6 +103,33 @@ Two responses closed normally at 3,982 and 2,060 tokens; the third reached the
 range 33.79--36.20). This pilot validates the sampling and response-splitting
 path; three prompts are not an estimate of full-suite accuracy.
 
+### Niwaki 113B pilot
+
+`Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx` was tested on the same first
+three IFBench prompts. The engine used the 113B routed/backbone weights with
+the retained REAP tokenizer and Q4 SSD PLE because the checkpoint has no
+`merges.txt` and its native 2-bit PLE is stored as safetensors shards rather
+than the engine's row-major SSD format. This is therefore a clearly labelled
+hybrid, not checkpoint parity. MTP was off.
+
+The non-thinking pilot scored 0/3 strict and loose. Warm decode was 41.49 and
+42.04 tok/s after a 32.98 tok/s cold request. Sampled xhigh thinking used
+temperature 1.0, top-p 0.95, top-k 20, seed 0, and a 4,096-token maximum. All
+three requests reached EOS in 302--636 tokens and aggregate decode was 40.25
+tok/s, but their final answers omitted the requested exact keyword counts and
+also scored 0/3. The combined guarded engine session peaked at 26.6 GiB
+footprint and 26.0 GiB RSS, with 23.2 GiB minimum available memory.
+
+A stock `mlx-vlm` 0.7.0 / MLX 0.32.2 control used the checkpoint's native
+2-bit PLE on the first prompt. Sampled xhigh thinking did not emit
+`</think>` or a final answer within 4,096 tokens; it decoded at 29.13 tok/s and
+reported 43.58 GB peak memory, while the external guard measured 41.3 GiB peak
+footprint. A stock non-thinking 512-token control also repeated and failed the
+keyword constraint. These controls do not prove hybrid numerical parity, but
+they show that the checkpoint itself also fails this pilot rather than exposing
+a quality result hidden by the custom engine. A full 300-prompt run is not
+justified until a larger pilot clears this gate.
+
 ## Other published Qwen3.8-27B rows
 
 GPQA Diamond and LiveCodeBench v6 remain pending until their full harness and
