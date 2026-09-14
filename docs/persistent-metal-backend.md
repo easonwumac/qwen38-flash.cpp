@@ -289,10 +289,29 @@ tokens, 64-row chunks, a 512-token QSA budget, Q8 transition at 2,049 and a
 QSA handoff. The 8,192-token hot tail still fails closed when full; in-backend
 Q8 flushing remains required for very long generation after prefill.
 
+The seventeenth gate connects that handoff to the OpenAI-compatible server
+behind `QWEN38_PERSISTENT_METAL=1` and fails closed when MTP is enabled or the
+model geometry is unsupported. A real 16,451-token needle request on Apple M5
+Pro 64 GiB, Niwaki-99B, `speed`, Q8 at 2,049 with 2,048-token slabs, a
+512-token decode QSA budget, greedy/no-thinking, MTP off and the external REAP
+Q4 n-gram table recovered `K7-MOON-491`. The single cold run reached 784.14 PP
+tok/s and sampled 21--22 GiB footprint. After the resource transition,
+per-token traces stabilized at 22--25 ms wall (40--44 tok/s); a separate warm
+short HTTP request returned the exact requested `PERSISTENT_OK` at 40.97 tok/s.
+
+This is not yet a 40 tok/s cold-request claim. MLX prefill and direct Metal own
+different weight resources, so the first long-context decode paid a multi-second
+resource transition and the nine-token needle response averaged only 2.00
+tok/s. A full 36.7 GB Metal residency set removed that fault but reduced PP to
+167 tok/s when held across prefill; requesting it only at handoff produced
+573--583 PP and added queue overhead. That path was removed. The remaining
+solution must share one weight representation between prefill/decode or add a
+batch-prefill path to this backend.
+
 The next acceptance gates are:
 
-1. integrate the persistent state and layer dispatch into the runtime;
-2. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
+1. remove the cold weight-resource handoff without lowering PP;
+2. repeat the needle gate at 65K and 128K;
 3. add long-run Q8 hot-slab flushes and enforce the 40 GiB memory gate;
 4. move MTP verification onto the persistent backend and measure 60 token/s.
 

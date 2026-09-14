@@ -293,6 +293,17 @@ NativeEngine::NativeEngine(
     }
     static_cast<void>(MlxArray::set_cache_limit(
         options_.allocator_cache_limit_bytes));
+    const char* persistent = std::getenv("QWEN38_PERSISTENT_METAL");
+    if (persistent != nullptr && std::string_view(persistent) == "1") {
+        if (mtp_depth_ != 0) {
+            throw std::runtime_error("persistent Metal currently requires MTP depth 0");
+        }
+        persistent_backend_ = PersistentMetalBackend::create(tensors_.manifest());
+        if (persistent_backend_ == nullptr) {
+            throw std::runtime_error("model is not eligible for persistent Metal");
+        }
+        std::clog << "qwen38-server: persistent Metal decode enabled\n";
+    }
     if (mtp_depth_ != 0) {
         if (options_.zero_accept_fallback_rounds == 0) {
             throw std::runtime_error("MTP fallback window must be positive");
@@ -575,12 +586,27 @@ GenerationResult NativeEngine::complete_impl(
     result.tokens.reserve(max_tokens);
     const char* extend_cache = std::getenv("QWEN38_EXTEND_PREFIX_CACHE");
     const bool extend_cache_enabled =
-        ssd_prefix_cache_ != nullptr ||
-        (extend_cache != nullptr && std::string_view(extend_cache) == "1");
+        persistent_backend_ == nullptr &&
+        (ssd_prefix_cache_ != nullptr ||
+         (extend_cache != nullptr && std::string_view(extend_cache) == "1"));
     bool mtp_cache_extendable = true;
     std::vector<MlxArray> pending_mtp_streams;
     std::vector<std::uint32_t> pending_mtp_tokens;
     std::uint32_t current = prompt_tokens.back();
+    bool persistent_reset = prefill_rows == 0;
+    if (persistent_backend_ != nullptr) {
+        const auto prepare_started = std::chrono::steady_clock::now();
+        if (!persistent_reset) {
+            persistent_backend_->import_state(state);
+            const std::size_t imported_token_count = state.token_count;
+            state = model_.make_state();
+            state.token_count = imported_token_count;
+            previous_target_stream.reset();
+            MlxArray::clear_cache();
+        }
+        result.prompt_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - prepare_started).count();
+    }
     const char* history_draft_environment = std::getenv("QWEN38_HISTORY_DRAFT");
     const HistoryDraftMode history_draft_mode = history_draft_environment == nullptr
         ? HistoryDraftMode::adaptive
@@ -690,21 +716,35 @@ GenerationResult NativeEngine::complete_impl(
                     mtp_cache_extendable = false;
                 }
             }
-            TargetDecodeStep step = model_.forward_decode_capture(current, state);
-            const std::uint32_t token = argmax_token(step.logits, state);
-            previous_target_stream = std::move(step.pre_mixer_stream);
-            current = token;
-            if (is_stop_token(token)) {
+            if (persistent_backend_ != nullptr) {
+                const PersistentMetalBackend::GreedyResult step =
+                    persistent_backend_->greedy_decode(current, persistent_reset);
+                if (const char* trace = std::getenv("QWEN38_PERSISTENT_TRACE");
+                    trace != nullptr && std::string_view(trace) == "1") {
+                    std::clog << "qwen38-persistent-decode: context=" << state.token_count
+                              << " gpu_ms=" << step.gpu_ms
+                              << " wall_ms=" << step.wall_ms << '\n';
+                }
+                persistent_reset = false;
+                current = step.token;
+                ++state.token_count;
+            } else {
+                TargetDecodeStep step = model_.forward_decode_capture(current, state);
+                const std::uint32_t token = argmax_token(step.logits, state);
+                previous_target_stream = std::move(step.pre_mixer_stream);
+                current = token;
+            }
+            if (is_stop_token(current)) {
                 result.finish_reason = "stop";
                 stopped_on_terminator = true;
                 break;
             }
-            result.tokens.push_back(token);
+            result.tokens.push_back(current);
             if (!emit_new_tokens()) {
                 result.finish_reason = "cancelled";
                 break;
             }
-            if (history_draft_enabled) history_draft.append(token);
+            if (history_draft_enabled) history_draft.append(current);
             continue;
         }
 

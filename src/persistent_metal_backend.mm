@@ -811,12 +811,13 @@ public:
         }
     }
 
-    id<MTLBuffer> buffer_from_array(const MlxArray& source) {
+    void copy_or_replace(const MlxArray& source, id<MTLBuffer> __strong& target) {
         const std::vector<std::uint8_t> bytes = source.to_bytes();
         if (bytes.empty()) throw std::runtime_error("cannot import an empty state array");
-        id<MTLBuffer> result = make_buffer(bytes.size(), false);
-        std::memcpy(result.contents, bytes.data(), bytes.size());
-        return result;
+        if (target == nil || target.length != bytes.size()) {
+            target = make_buffer(bytes.size(), false);
+        }
+        std::memcpy(target.contents, bytes.data(), bytes.size());
     }
 
     void import_state(const ModelDecodeState& source) {
@@ -851,12 +852,12 @@ public:
             output.position_base = static_cast<std::uint32_t>(attention.position_base);
             output.cold_count = static_cast<std::uint32_t>(cold_tokens);
             if (attention.kv_q8) {
-                output.key_weights = buffer_from_array(attention.key_weights);
-                output.key_scales = buffer_from_array(attention.key_scales);
-                output.key_biases = buffer_from_array(attention.key_biases);
-                output.value_weights = buffer_from_array(attention.value_weights);
-                output.value_scales = buffer_from_array(attention.value_scales);
-                output.value_biases = buffer_from_array(attention.value_biases);
+                copy_or_replace(attention.key_weights, output.key_weights);
+                copy_or_replace(attention.key_scales, output.key_scales);
+                copy_or_replace(attention.key_biases, output.key_biases);
+                copy_or_replace(attention.value_weights, output.value_weights);
+                copy_or_replace(attention.value_scales, output.value_scales);
+                copy_or_replace(attention.value_biases, output.value_biases);
             }
             std::memset(output.hot_keys.contents, 0, output.hot_keys.length);
             std::memset(output.hot_values.contents, 0, output.hot_values.length);

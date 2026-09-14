@@ -5,6 +5,7 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_head.hpp"
 #include "qwen38/prefix_cache_store.hpp"
+#include "qwen38/persistent_metal_backend.hpp"
 #include "qwen38/tokenizer.hpp"
 
 #include <cstdint>
@@ -83,6 +84,7 @@ private:
     MlxTensorStore tensors_;
     Tokenizer tokenizer_;
     QwenModel model_;
+    std::unique_ptr<PersistentMetalBackend> persistent_backend_;
     std::unique_ptr<QwenMtpHead> mtp_head_;
     std::unique_ptr<PrefixCacheEntry> prefix_cache_;
     std::unique_ptr<PrefixCacheStore> ssd_prefix_cache_;
