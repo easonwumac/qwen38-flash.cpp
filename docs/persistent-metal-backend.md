@@ -29,6 +29,17 @@ ranged from 0.372 to 0.788 ms. Full-output cosine was 0.999776, RMSE 6.86e-5,
 and max absolute error 2.75e-4. This clears the primitive performance gate but
 remains an approximate path until token-trajectory testing is possible.
 
+Two follow-up changes tightened this primitive. BF16 route weights with
+per-expert BF16 accumulation changed full-output cosine from 0.999776 to
+0.999777 and RMSE from 6.86e-5 to 6.85e-5 without a measurable speed cost.
+Packing four Q3 output rows into each SIMD did not change the output or improve
+quality and was slower, so it was removed. In contrast, fusing the three
+gate/up/router dispatches into one and routed/shared down/merge into another
+preserved the exact candidate hash while reducing the cache-evicted GPU median
+from 0.138--0.141 ms to 0.125--0.131 ms across five process runs. Submit wall
+time remained host-noise limited at 0.279--0.305 ms versus 0.291--0.302 ms for
+the five-dispatch control.
+
 The next acceptance gates are:
 
 1. match the retained MLX token trajectory before extending beyond one layer;

@@ -101,7 +101,7 @@ kernel void q3_down_reduce(
     const device bfloat* scale [[buffer(2)]],
     const device bfloat* bias [[buffer(3)]],
     const device uint* experts [[buffer(4)]],
-    const device float* route_weights [[buffer(5)]],
+    const device bfloat* route_weights [[buffer(5)]],
     device bfloat* output [[buffer(6)]],
     uint group [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -109,7 +109,7 @@ kernel void q3_down_reduce(
     constexpr uint rows = 2560, k = 448, row_bytes = k / 8 * 3, groups = k / 64;
     const uint row = group * 4 + simd;
     if (row >= rows) return;
-    float total = 0.0f;
+    bfloat total = bfloat(0.0f);
     for (uint slot = 0; slot < 10; ++slot) {
         const ulong matrix_row = ulong(experts[slot]) * rows + row;
         const device uchar* wr = weight + matrix_row * row_bytes;
@@ -125,9 +125,12 @@ kernel void q3_down_reduce(
                 float(br[affine]) * sum;
         }
         dot = simd_sum(dot);
-        if (lane == 0) total += route_weights[slot] * float(bfloat(dot));
+        if (lane == 0) {
+            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
+            total = bfloat(float(total) + float(weighted));
+        }
     }
-    if (lane == 0) output[row] = bfloat(total);
+    if (lane == 0) output[row] = total;
 }
 
 kernel void q4_shared_gate_up(
@@ -219,6 +222,124 @@ kernel void q4_shared_down_merge(
     if (lane == 0) {
         const bfloat shared = bfloat(float(bfloat(dot)) * float(router[0]));
         output[row] = bfloat(float(routed[row]) + float(shared));
+    }
+}
+
+kernel void fused_all_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* rgw [[buffer(1)]], const device bfloat* rgs [[buffer(2)]],
+    const device bfloat* rgb [[buffer(3)]], const device uchar* ruw [[buffer(4)]],
+    const device bfloat* rus [[buffer(5)]], const device bfloat* rub [[buffer(6)]],
+    const device uint* experts [[buffer(7)]], device bfloat* routed [[buffer(8)]],
+    const device uchar* sgw [[buffer(9)]], const device bfloat* sgs [[buffer(10)]],
+    const device bfloat* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
+    const device bfloat* sus [[buffer(13)]], const device bfloat* sub [[buffer(14)]],
+    device bfloat* shared [[buffer(15)]], const device uchar* srw [[buffer(16)]],
+    const device bfloat* srs [[buffer(17)]], const device bfloat* srb [[buffer(18)]],
+    device bfloat* router [[buffer(19)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint linear = group * 4 + simd;
+    if (linear < 4480) {
+        constexpr uint rows = 448, k = 2560, row_bytes = 960, groups = 40;
+        const uint slot = linear / rows, row = linear % rows, expert = experts[slot];
+        const ulong matrix_row = ulong(expert) * rows + row;
+        float gate = 0.0f, up = 0.0f;
+        for (uint base = lane * 8; base < k; base += 256) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+            const uint quant = base / 8 * 3, affine = base / 64;
+            gate += float(rgs[matrix_row * groups + affine]) *
+                    q3_dot8(rgw + matrix_row * row_bytes + quant, x + base) +
+                float(rgb[matrix_row * groups + affine]) * sum;
+            up += float(rus[matrix_row * groups + affine]) *
+                    q3_dot8(ruw + matrix_row * row_bytes + quant, x + base) +
+                float(rub[matrix_row * groups + affine]) * sum;
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            routed[linear] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear < 5120) {
+        constexpr uint k = 2560, row_bytes = 1280, groups = 80;
+        const uint row = linear - 4480;
+        float gate = 0.0f, up = 0.0f;
+        for (uint base = lane * 8; base < k; base += 256) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+            const uint quant = base / 2, affine = base / 32;
+            gate += float(sgs[row * groups + affine]) *
+                    q4_dot8(sgw + row * row_bytes + quant, x + base) +
+                float(sgb[row * groups + affine]) * sum;
+            up += float(sus[row * groups + affine]) *
+                    q4_dot8(suw + row * row_bytes + quant, x + base) +
+                float(sub[row * groups + affine]) * sum;
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            shared[row] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear == 5120) {
+        float dot = 0.0f;
+        for (uint base = lane * 4; base < 2560; base += 128) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 4; ++i) sum += float(x[base + i]);
+            dot += float(srs[base / 64]) * q8_dot4(srw + base, x + base) +
+                float(srb[base / 64]) * sum;
+        }
+        dot = simd_sum(dot);
+        if (lane == 0) {
+            const float rounded = float(bfloat(dot));
+            router[0] = bfloat(1.0f / (1.0f + metal::exp(-rounded)));
+        }
+    }
+}
+
+kernel void fused_all_down(
+    const device bfloat* routed_hidden [[buffer(0)]],
+    const device uchar* rw [[buffer(1)]], const device bfloat* rs [[buffer(2)]],
+    const device bfloat* rb [[buffer(3)]], const device uint* experts [[buffer(4)]],
+    const device bfloat* route_weights [[buffer(5)]],
+    const device bfloat* shared_hidden [[buffer(6)]],
+    const device uchar* sw [[buffer(7)]], const device bfloat* ss [[buffer(8)]],
+    const device bfloat* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
+    device bfloat* output [[buffer(11)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    bfloat routed_total = bfloat(0.0f);
+    for (uint slot = 0; slot < 10; ++slot) {
+        constexpr uint k = 448, row_bytes = 168, groups = 7;
+        const ulong matrix_row = ulong(experts[slot]) * rows + row;
+        const device bfloat* x = routed_hidden + slot * k;
+        float dot = 0.0f;
+        for (uint base = lane * 8; base < k; base += 256) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+            dot += float(rs[matrix_row * groups + base / 64]) *
+                    q3_dot8(rw + matrix_row * row_bytes + base / 8 * 3, x + base) +
+                float(rb[matrix_row * groups + base / 64]) * sum;
+        }
+        dot = simd_sum(dot);
+        if (lane == 0) {
+            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
+            routed_total = bfloat(float(routed_total) + float(weighted));
+        }
+    }
+    float shared_dot = 0.0f;
+    for (uint base = lane * 8; base < 640; base += 256) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(shared_hidden[base + i]);
+        shared_dot += float(ss[row * 20 + base / 32]) *
+                q4_dot8(sw + row * 320 + base / 2, shared_hidden + base) +
+            float(sb[row * 20 + base / 32]) * sum;
+    }
+    shared_dot = simd_sum(shared_dot);
+    if (lane == 0) {
+        const bfloat shared = bfloat(float(bfloat(shared_dot)) * float(router[0]));
+        output[row] = bfloat(float(routed_total) + float(shared));
     }
 }
 )metal";
@@ -374,6 +495,53 @@ double run_full_joined(id<MTLCommandQueue> queue, id<MTLComputePipelineState> ro
                 weights, routed_output);
     encode_shared_down(command, shared_down_state, shared_hidden, expert_shard, shared_down,
                        router_output, routed_output, output);
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_fused_full(id<MTLCommandQueue> queue, id<MTLComputePipelineState> gate_state,
+                      id<MTLComputePipelineState> down_state, id<MTLBuffer> input,
+                      const Shard &expert_shard, const Shard &router_shard,
+                      const ProjectionNames &routed_gate, const ProjectionNames &routed_up,
+                      const ProjectionNames &routed_down, const ProjectionNames &shared_gate,
+                      const ProjectionNames &shared_up, const ProjectionNames &shared_down,
+                      const ProjectionNames &shared_router, id<MTLBuffer> experts,
+                      id<MTLBuffer> weights, id<MTLBuffer> routed_hidden,
+                      id<MTLBuffer> shared_hidden, id<MTLBuffer> router_output,
+                      id<MTLBuffer> output) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> gate_encoder = [command computeCommandEncoder];
+    [gate_encoder setComputePipelineState:gate_state];
+    [gate_encoder setBuffer:input offset:0 atIndex:0];
+    bind_projection(gate_encoder, expert_shard, routed_gate, 1);
+    bind_projection(gate_encoder, expert_shard, routed_up, 4);
+    [gate_encoder setBuffer:experts offset:0 atIndex:7];
+    [gate_encoder setBuffer:routed_hidden offset:0 atIndex:8];
+    bind_projection(gate_encoder, expert_shard, shared_gate, 9);
+    bind_projection(gate_encoder, expert_shard, shared_up, 12);
+    [gate_encoder setBuffer:shared_hidden offset:0 atIndex:15];
+    bind_projection(gate_encoder, router_shard, shared_router, 16);
+    [gate_encoder setBuffer:router_output offset:0 atIndex:19];
+    [gate_encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [gate_encoder endEncoding];
+
+    id<MTLComputeCommandEncoder> down_encoder = [command computeCommandEncoder];
+    [down_encoder setComputePipelineState:down_state];
+    [down_encoder setBuffer:routed_hidden offset:0 atIndex:0];
+    bind_projection(down_encoder, expert_shard, routed_down, 1);
+    [down_encoder setBuffer:experts offset:0 atIndex:4];
+    [down_encoder setBuffer:weights offset:0 atIndex:5];
+    [down_encoder setBuffer:shared_hidden offset:0 atIndex:6];
+    bind_projection(down_encoder, expert_shard, shared_down, 7);
+    [down_encoder setBuffer:router_output offset:0 atIndex:10];
+    [down_encoder setBuffer:output offset:0 atIndex:11];
+    [down_encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [down_encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
     if (command.status != MTLCommandBufferStatusCompleted)
@@ -555,6 +723,8 @@ int main(int argc, char **argv) {
             const auto shared_gate_state = pipeline(device, library, @"q4_shared_gate_up");
             const auto shared_router_state = pipeline(device, library, @"q8_shared_router");
             const auto shared_down_state = pipeline(device, library, @"q4_shared_down_merge");
+            const auto fused_gate_state = pipeline(device, library, @"fused_all_gate_up");
+            const auto fused_down_state = pipeline(device, library, @"fused_all_down");
             Shard shard(device, manifest.directory() / shard_name);
             Shard router_shard(device, manifest.directory() / router_shard_name);
 
@@ -571,6 +741,8 @@ int main(int argc, char **argv) {
             const float sum = std::accumulate(route_weights.begin(), route_weights.end(), 0.0F);
             for (float &value : route_weights)
                 value /= sum;
+            std::array<std::uint16_t, top_k> route_weights_bf16{};
+            std::ranges::transform(route_weights, route_weights_bf16.begin(), bf16);
 
             id<MTLBuffer> input =
                 [device newBufferWithBytes:input_bf16.data()
@@ -580,9 +752,10 @@ int main(int argc, char **argv) {
                 [device newBufferWithBytes:expert_ids.data()
                                     length:expert_ids.size() * sizeof(std::uint32_t)
                                    options:MTLResourceStorageModeShared];
-            id<MTLBuffer> weights = [device newBufferWithBytes:route_weights.data()
-                                                        length:route_weights.size() * sizeof(float)
-                                                       options:MTLResourceStorageModeShared];
+            id<MTLBuffer> weights =
+                [device newBufferWithBytes:route_weights_bf16.data()
+                                    length:route_weights_bf16.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
             id<MTLBuffer> hidden =
                 [device newBufferWithLength:top_k * expert_width * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
@@ -642,6 +815,23 @@ int main(int argc, char **argv) {
                                         std::chrono::steady_clock::now() - started)
                                         .count());
             }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_fused_full(
+                    queue, fused_gate_state, fused_down_state, input, shard, router_shard, gate, up,
+                    down, shared_gate, shared_up, shared_down, shared_router, experts, weights,
+                    hidden, shared_hidden, shared_router_output, full_output));
+            std::vector<double> fused_gpu, fused_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 117));
+                const auto started = std::chrono::steady_clock::now();
+                fused_gpu.push_back(run_fused_full(
+                    queue, fused_gate_state, fused_down_state, input, shard, router_shard, gate, up,
+                    down, shared_gate, shared_up, shared_down, shared_router, experts, weights,
+                    hidden, shared_hidden, shared_router_output, full_output));
+                fused_wall.push_back(std::chrono::duration<double, std::milli>(
+                                         std::chrono::steady_clock::now() - started)
+                                         .count());
+            }
             const auto *result = static_cast<const std::uint16_t *>(full_output.contents);
             std::uint64_t hash = 1469598103934665603ULL;
             std::vector<float> direct(hidden_size);
@@ -672,6 +862,8 @@ int main(int argc, char **argv) {
                       << ",\"split_wall_median_ms\":" << median(split_wall)
                       << ",\"full_gpu_median_ms\":" << median(full_gpu)
                       << ",\"full_wall_median_ms\":" << median(full_wall)
+                      << ",\"fused_gpu_median_ms\":" << median(fused_gpu)
+                      << ",\"fused_wall_median_ms\":" << median(fused_wall)
                       << ",\"mlx_full_oracle_median_ms\":" << oracle.median_ms
                       << ",\"cosine\":" << dot / std::sqrt(aa * bb)
                       << ",\"rmse\":" << std::sqrt(squared_error / hidden_size)
