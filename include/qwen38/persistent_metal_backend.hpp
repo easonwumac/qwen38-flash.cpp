@@ -3,8 +3,11 @@
 #include "qwen38/model_manifest.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace qwen38 {
 
@@ -28,6 +31,11 @@ public:
     PersistentMetalBackend& operator=(const PersistentMetalBackend&) = delete;
 
     [[nodiscard]] const Inventory& inventory() const noexcept;
+    [[nodiscard]] std::vector<std::uint16_t> decode_gdn_layer(
+        std::size_t layer,
+        std::span<const std::uint16_t> stream,
+        bool reset_state = false,
+        double* gpu_ms = nullptr);
 
 private:
     class Impl;

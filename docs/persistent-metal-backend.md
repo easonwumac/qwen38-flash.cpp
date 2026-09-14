@@ -220,6 +220,18 @@ backend smoke reports this inventory directly. This gate establishes production
 kernel and weight ownership; model decode still uses MLX until persistent state
 handoff and layer dispatch pass the following parity gates.
 
+The twelfth gate executes real layers through that production object. It owns
+separate convolution and `[48,128,128]` recurrent buffers for every GDN layer,
+reuses one bounded scratch set, resolves tensors across the model index, and
+submits the complete layer as one command buffer. The routed layer-0 result
+matched MLX at 0.999998 cosine, 6.54e-4 RMSE and 3.91e-3 maximum error; the
+shared-only layer-10 result reached 0.999997, 7.26e-4 and 5.86e-3. In one warm
+31-sample process without explicit cache eviction their GPU medians were 0.513
+and 0.266 ms respectively. The mmap-backed backend itself initialized with a
+73 MiB peak footprint before MLX oracle loading. This is the first production
+state/dispatch path, but only GDN layers are connected; full attention, PLE,
+embedding/head and MLX-prefill state import remain acceptance gates.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;
