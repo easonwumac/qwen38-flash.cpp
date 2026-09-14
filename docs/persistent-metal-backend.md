@@ -111,12 +111,33 @@ and is reported only for parity, not as a performance control. The remaining
 correctness risk is recursive accumulation across tokens and layers, not a
 large one-layer numerical mismatch.
 
+The sixth gate makes the attention state persistent. A 2,048-token fixed hot
+BF16 K/V slab and four-row QSA pending buffer are updated in place; every fourth
+decode row is mean-pooled, normalized, RoPE-encoded and appended directly to
+the fixed pooled-key bank. The append kernel measured 0.0042--0.0048 ms GPU and
+was bit-exact against the host reference for hot K/V, pending raw keys and the
+first newly completed pooled block. The selector now accepts arbitrary block
+counts through 256-row padding and an odd-group carry in its merge tree, so
+crossing from 32,768 to 32,769 blocks does not double work to the next power of
+two. Both top-128 sets matched the CPU reference exactly.
+
+A four-token recursive trajectory then fed each direct layer output back as the
+next input while both direct and MLX states accumulated hot K/V and QSA rows.
+It covers tail sizes one through three and the fourth-token transition where a
+new pooled block becomes selectable. Against MLX, the worst layer-output cosine
+was 0.999954, maximum RMSE was 3.78e-3 and maximum absolute error was 1.76e-2.
+This test used Apple M5 Pro 64 GiB, real Niwaki 99B layer-3 Q3/group-64 routed,
+Q4/group-32 shared/attention and BF16 healing/HyperConnection weights, a
+deterministic recursive stream, a synthetic 131,072-token affine-Q8 cold KV
+history, a 512-token QSA budget, greedy/no-sampling execution and no MTP. It is
+a layer-backend correctness gate, not whole-model throughput or retrieval data.
+
 The next acceptance gates are:
 
-1. persist the appended hot K/V and QSA raw/pooled state in the fixed buffers;
-2. match the retained multi-token trajectory and bound accumulated drift;
-3. extend the same backend contract to GDN layers;
-4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
+1. extend the same backend contract to GDN layers;
+2. integrate the persistent state and layer dispatch into the runtime;
+3. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
+4. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate.
 
 Run the bounded primitive probe with:
 

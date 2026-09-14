@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
@@ -390,10 +391,15 @@ kernel void select_top10(
 kernel void qsa_score_blocks(
     const device bfloat* query [[buffer(0)]], const device bfloat* pooled [[buffer(1)]],
     device float* scores [[buffer(2)]], constant uint& block_count [[buffer(3)]],
+    constant uint& padded_count [[buffer(4)]],
     uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
     const uint block = group * 4 + simd;
-    if (block >= block_count) return;
+    if (block >= padded_count) return;
+    if (block >= block_count) {
+        if (lane == 0) scores[block] = -INFINITY;
+        return;
+    }
     float score = 0.0f;
     for (uint head = 0; head < 4; ++head) {
         float dot = 0.0f;
@@ -404,6 +410,59 @@ kernel void qsa_score_blocks(
         if (lane == 0) score += max(dot, 0.0f);
     }
     if (lane == 0) scores[block] = score - float(block) * 1.0e-7f;
+}
+
+kernel void qsa_append_decode_state(
+    const device bfloat* projected [[buffer(0)]],
+    const device bfloat* normalized_key [[buffer(1)]],
+    device bfloat* hot_key [[buffer(2)]], device bfloat* hot_value [[buffer(3)]],
+    device bfloat* pending_raw [[buffer(4)]], device bfloat* pooled [[buffer(5)]],
+    const device bfloat* index_key_norm [[buffer(6)]],
+    const device bfloat* pool_rope_cos [[buffer(7)]],
+    const device bfloat* pool_rope_sin [[buffer(8)]],
+    constant uint& hot_index [[buffer(9)]], constant uint& hot_capacity [[buffer(10)]],
+    constant uint& pending_index [[buffer(11)]], constant uint& pooled_index [[buffer(12)]],
+    constant uint& complete_block [[buffer(13)]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    for (uint head = 0; head < 2; ++head) {
+        const uint source = head * 256 + lane * 8;
+        const uint target = (head * hot_capacity + hot_index) * 256 + lane * 8;
+        for (uint item = 0; item < 8; ++item) {
+            hot_key[target + item] = normalized_key[source + item];
+            hot_value[target + item] = projected[13440 + source + item];
+        }
+    }
+    for (uint item = 0; item < 4; ++item)
+        pending_raw[pending_index * 128 + lane + item * 32] =
+            projected[512 + lane + item * 32];
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
+    if (complete_block == 0) return;
+
+    float values[4];
+    float square_sum = 0.0f;
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane + item * 32;
+        float mean = 0.0f;
+        for (uint row = 0; row < 4; ++row)
+            mean += float(pending_raw[row * 128 + component]);
+        values[item] = float(bfloat(mean * 0.25f));
+        square_sum += values[item] * values[item];
+    }
+    square_sum = simd_sum(square_sum);
+    const float inverse_rms = rsqrt(square_sum / 128.0f + 1.0e-6f);
+    bfloat normalized[4];
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane + item * 32;
+        normalized[item] = bfloat(values[item] * inverse_rms *
+                                  (float(index_key_norm[component]) + 1.0f));
+    }
+    const bfloat first = normalized[0], second = normalized[1];
+    normalized[0] = bfloat(float(first) * float(pool_rope_cos[lane]) -
+                           float(second) * float(pool_rope_sin[lane]));
+    normalized[1] = bfloat(float(second) * float(pool_rope_cos[lane + 32]) +
+                           float(first) * float(pool_rope_sin[lane + 32]));
+    for (uint item = 0; item < 4; ++item)
+        pooled[pooled_index * 128 + lane + item * 32] = normalized[item];
 }
 
 inline void qsa_bitonic256(threadgroup float* values, threadgroup uint* ids, uint tid) {
@@ -443,7 +502,13 @@ kernel void qsa_top128_first(
 kernel void qsa_top128_merge(
     const device float* input_scores [[buffer(0)]], const device uint* input_ids [[buffer(1)]],
     device float* output_scores [[buffer(2)]], device uint* output_ids [[buffer(3)]],
+    constant uint& input_groups [[buffer(4)]],
     uint group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    if (group * 2 + 1 >= input_groups) {
+        output_scores[group * 128 + tid] = input_scores[group * 256 + tid];
+        output_ids[group * 128 + tid] = input_ids[group * 256 + tid];
+        return;
+    }
     threadgroup float values[256];
     threadgroup uint ids[256];
     const uint source = group * 256;
@@ -461,9 +526,9 @@ kernel void qsa_attention_q8_blocks(
     const device bfloat* key_scale [[buffer(2)]], const device bfloat* key_bias [[buffer(3)]],
     const device uint* value_weight [[buffer(4)]], const device bfloat* value_scale [[buffer(5)]],
     const device bfloat* value_bias [[buffer(6)]], const device uint* selected [[buffer(7)]],
-    device bfloat* output [[buffer(8)]], constant uint& token_count [[buffer(9)]],
+    device bfloat* output [[buffer(8)]], constant uint& cold_count [[buffer(9)]],
     const device bfloat* hot_key [[buffer(10)]], const device bfloat* hot_value [[buffer(11)]],
-    constant uint& include_hot [[buffer(12)]],
+    constant uint& hot_count [[buffer(12)]], constant uint& hot_capacity [[buffer(13)]],
     uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]], uint kv_head [[threadgroup_position_in_grid]]) {
     constexpr uint tile = 16, dimension = 256, packed_dimension = 64;
@@ -488,17 +553,32 @@ kernel void qsa_attention_q8_blocks(
             const uint packed_channel = local % packed_dimension;
             const uint selected_slot = tile_start + slot;
             const uint token = selected[selected_slot / 4] * 4 + selected_slot % 4;
-            const ulong vector = ulong(kv_head) * token_count + token;
-            const ulong word_index = vector * packed_dimension + packed_channel;
-            const uint packed = is_value ? value_weight[word_index] : key_weight[word_index];
-            const ulong affine_index = vector * 4 + packed_channel / 16;
-            const float scale = float(is_value ? value_scale[affine_index] : key_scale[affine_index]);
-            const float bias = float(is_value ? value_bias[affine_index] : key_bias[affine_index]);
             const uint shared_base = slot * dimension + packed_channel * 4;
-            for (uint component = 0; component < 4; ++component) {
-                const bfloat value = bfloat(float((packed >> (component * 8)) & 255) * scale + bias);
-                if (is_value) shared_value[shared_base + component] = value;
-                else shared_key[shared_base + component] = value;
+            if (token < cold_count) {
+                const ulong vector = ulong(kv_head) * cold_count + token;
+                const ulong word_index = vector * packed_dimension + packed_channel;
+                const uint packed = is_value ? value_weight[word_index] : key_weight[word_index];
+                const ulong affine_index = vector * 4 + packed_channel / 16;
+                const float scale =
+                    float(is_value ? value_scale[affine_index] : key_scale[affine_index]);
+                const float bias =
+                    float(is_value ? value_bias[affine_index] : key_bias[affine_index]);
+                for (uint component = 0; component < 4; ++component) {
+                    const bfloat value =
+                        bfloat(float((packed >> (component * 8)) & 255) * scale + bias);
+                    if (is_value) shared_value[shared_base + component] = value;
+                    else shared_key[shared_base + component] = value;
+                }
+            } else {
+                const uint hot = token - cold_count;
+                const ulong base = (ulong(kv_head) * hot_capacity + hot) * dimension +
+                    packed_channel * 4;
+                for (uint component = 0; component < 4; ++component) {
+                    const bfloat value = is_value ? hot_value[base + component]
+                                                  : hot_key[base + component];
+                    if (is_value) shared_value[shared_base + component] = value;
+                    else shared_key[shared_base + component] = value;
+                }
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -521,9 +601,12 @@ kernel void qsa_attention_q8_blocks(
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    if (active && include_hot != 0) {
+    const uint total_count = cold_count + hot_count;
+    const uint tail_start = (total_count / 4) * 4;
+    for (uint token = tail_start; active && token < total_count; ++token) {
+        const uint hot = token - cold_count;
+        const ulong base = (ulong(kv_head) * hot_capacity + hot) * dimension + lane * 8;
         float partial = 0.0f;
-        const uint base = kv_head * dimension + lane * 8;
         for (uint component = 0; component < 8; ++component)
             partial += q[component] * float(hot_key[base + component]);
         const float score = simd_sum(partial) * 0.0625f;
@@ -534,6 +617,7 @@ kernel void qsa_attention_q8_blocks(
         for (uint component = 0; component < 8; ++component)
             accumulator[component] = accumulator[component] * alpha +
                 probability * float(hot_value[base + component]);
+        running_max = next_max;
     }
     if (active) {
         const float inverse_sum = 1.0f / running_sum;
@@ -910,6 +994,7 @@ double run_qsa_selector(id<MTLCommandQueue> queue, id<MTLComputePipelineState> s
                         id<MTLBuffer> temp_ids_a, id<MTLBuffer> temp_scores_b,
                         id<MTLBuffer> temp_ids_b, id<MTLBuffer> selected,
                         const std::uint32_t block_count) {
+    const std::uint32_t padded_count = (block_count + 255) / 256 * 256;
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:score_state];
@@ -917,7 +1002,8 @@ double run_qsa_selector(id<MTLCommandQueue> queue, id<MTLComputePipelineState> s
     [encoder setBuffer:pooled offset:0 atIndex:1];
     [encoder setBuffer:scores offset:0 atIndex:2];
     [encoder setBytes:&block_count length:sizeof(block_count) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake((block_count + 3) / 4, 1, 1)
+    [encoder setBytes:&padded_count length:sizeof(padded_count) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(padded_count / 4, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     [encoder endEncoding];
     encoder = [command computeCommandEncoder];
@@ -925,25 +1011,26 @@ double run_qsa_selector(id<MTLCommandQueue> queue, id<MTLComputePipelineState> s
     [encoder setBuffer:scores offset:0 atIndex:0];
     [encoder setBuffer:temp_scores_a offset:0 atIndex:1];
     [encoder setBuffer:temp_ids_a offset:0 atIndex:2];
-    [encoder dispatchThreadgroups:MTLSizeMake(block_count / 256, 1, 1)
+    [encoder dispatchThreadgroups:MTLSizeMake(padded_count / 256, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     [encoder endEncoding];
-    std::uint32_t count = block_count / 2;
+    std::uint32_t input_groups = padded_count / 256;
     bool source_a = true;
-    while (count > 128) {
-        const std::uint32_t output_count = count / 2;
+    while (input_groups > 1) {
+        const std::uint32_t output_groups = (input_groups + 1) / 2;
         encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:merge_state];
         [encoder setBuffer:(source_a ? temp_scores_a : temp_scores_b) offset:0 atIndex:0];
         [encoder setBuffer:(source_a ? temp_ids_a : temp_ids_b) offset:0 atIndex:1];
         [encoder setBuffer:(source_a ? temp_scores_b : temp_scores_a) offset:0 atIndex:2];
-        [encoder setBuffer:(output_count == 128 ? selected : (source_a ? temp_ids_b : temp_ids_a))
+        [encoder setBuffer:(output_groups == 1 ? selected : (source_a ? temp_ids_b : temp_ids_a))
                     offset:0
                    atIndex:3];
-        [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+        [encoder setBytes:&input_groups length:sizeof(input_groups) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [encoder endEncoding];
-        count = output_count;
+        input_groups = output_groups;
         source_a = !source_a;
     }
     [command commit];
@@ -974,8 +1061,9 @@ double run_qsa_attention(id<MTLCommandQueue> queue, id<MTLComputePipelineState> 
     [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
     [encoder setBuffer:query offset:0 atIndex:10];
     [encoder setBuffer:query offset:0 atIndex:11];
-    const std::uint32_t include_hot = 0;
-    [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
+    const std::uint32_t hot_count = 0, hot_capacity = 1;
+    [encoder setBytes:&hot_count length:sizeof(hot_count) atIndex:12];
+    [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -996,6 +1084,7 @@ double run_qsa_selected_attention(
     id<MTLBuffer> key_bias, id<MTLBuffer> value_weight, id<MTLBuffer> value_scale,
     id<MTLBuffer> value_bias, id<MTLBuffer> output, const std::uint32_t block_count,
     const std::uint32_t token_count) {
+    const std::uint32_t padded_count = (block_count + 255) / 256 * 256;
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:score_state];
@@ -1003,7 +1092,8 @@ double run_qsa_selected_attention(
     [encoder setBuffer:pooled offset:0 atIndex:1];
     [encoder setBuffer:scores offset:0 atIndex:2];
     [encoder setBytes:&block_count length:sizeof(block_count) atIndex:3];
-    [encoder dispatchThreadgroups:MTLSizeMake((block_count + 3) / 4, 1, 1)
+    [encoder setBytes:&padded_count length:sizeof(padded_count) atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(padded_count / 4, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     [encoder endEncoding];
     encoder = [command computeCommandEncoder];
@@ -1011,25 +1101,26 @@ double run_qsa_selected_attention(
     [encoder setBuffer:scores offset:0 atIndex:0];
     [encoder setBuffer:temp_scores_a offset:0 atIndex:1];
     [encoder setBuffer:temp_ids_a offset:0 atIndex:2];
-    [encoder dispatchThreadgroups:MTLSizeMake(block_count / 256, 1, 1)
+    [encoder dispatchThreadgroups:MTLSizeMake(padded_count / 256, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
     [encoder endEncoding];
-    std::uint32_t count = block_count / 2;
+    std::uint32_t input_groups = padded_count / 256;
     bool source_a = true;
-    while (count > 128) {
-        const std::uint32_t output_count = count / 2;
+    while (input_groups > 1) {
+        const std::uint32_t output_groups = (input_groups + 1) / 2;
         encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:merge_state];
         [encoder setBuffer:(source_a ? temp_scores_a : temp_scores_b) offset:0 atIndex:0];
         [encoder setBuffer:(source_a ? temp_ids_a : temp_ids_b) offset:0 atIndex:1];
         [encoder setBuffer:(source_a ? temp_scores_b : temp_scores_a) offset:0 atIndex:2];
-        [encoder setBuffer:(output_count == 128 ? selected : (source_a ? temp_ids_b : temp_ids_a))
+        [encoder setBuffer:(output_groups == 1 ? selected : (source_a ? temp_ids_b : temp_ids_a))
                     offset:0
                    atIndex:3];
-        [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+        [encoder setBytes:&input_groups length:sizeof(input_groups) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [encoder endEncoding];
-        count = output_count;
+        input_groups = output_groups;
         source_a = !source_a;
     }
     encoder = [command computeCommandEncoder];
@@ -1046,8 +1137,9 @@ double run_qsa_selected_attention(
     [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
     [encoder setBuffer:attention_query offset:0 atIndex:10];
     [encoder setBuffer:attention_query offset:0 atIndex:11];
-    const std::uint32_t include_hot = 0;
-    [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
+    const std::uint32_t hot_count = 0, hot_capacity = 1;
+    [encoder setBytes:&hot_count length:sizeof(hot_count) atIndex:12];
+    [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -1750,6 +1842,60 @@ OracleResult mlx_full_layer_oracle(const qwen38::ModelManifest &manifest,
     return {output.astype(MLX_FLOAT32).to_float32(), elapsed};
 }
 
+std::vector<std::vector<float>> mlx_full_layer_trajectory_oracle(
+    const qwen38::ModelManifest &manifest, std::span<const std::uint16_t> stream_values,
+    std::span<const std::uint16_t> pooled_values, const std::uint32_t *key_weight,
+    const std::uint16_t *key_scale, const std::uint16_t *key_bias,
+    const std::uint32_t *value_weight, const std::uint16_t *value_scale,
+    const std::uint16_t *value_bias, const std::uint32_t token_count,
+    const std::uint32_t steps) {
+    setenv("QWEN38_HC_FUSED", "1", 1);
+    unsetenv("QWEN38_HC_FUSED_INJECTION");
+    setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
+    setenv("QWEN38_QSA_RAW_WINDOW", "64", 1);
+    const auto raw = [](const void *data, const std::span<const int> shape, const mlx_dtype dtype) {
+        return MlxArray(
+            mlx_array_new_data(data, shape.data(), static_cast<int>(shape.size()), dtype));
+    };
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::DecoderLayer layer(store, 3, manifest.config());
+    MlxArray stream = raw(stream_values.data(), std::array<int, 3>{1, 1, 10240}, MLX_BFLOAT16);
+    qwen38::DecoderLayerState state;
+    auto &attention = state.full_attention;
+    attention.key_weights = raw(
+        key_weight, std::array<int, 4>{1, 2, static_cast<int>(token_count), 64}, MLX_UINT32);
+    attention.key_scales = raw(
+        key_scale, std::array<int, 4>{1, 2, static_cast<int>(token_count), 4}, MLX_BFLOAT16);
+    attention.key_biases = raw(
+        key_bias, std::array<int, 4>{1, 2, static_cast<int>(token_count), 4}, MLX_BFLOAT16);
+    attention.value_weights = raw(
+        value_weight, std::array<int, 4>{1, 2, static_cast<int>(token_count), 64}, MLX_UINT32);
+    attention.value_scales = raw(
+        value_scale, std::array<int, 4>{1, 2, static_cast<int>(token_count), 4}, MLX_BFLOAT16);
+    attention.value_biases = raw(
+        value_bias, std::array<int, 4>{1, 2, static_cast<int>(token_count), 4}, MLX_BFLOAT16);
+    attention.keys = MlxArray::zeros(std::array<int, 4>{1, 2, 0, 256}, MLX_BFLOAT16);
+    attention.values = MlxArray::zeros(std::array<int, 4>{1, 2, 0, 256}, MLX_BFLOAT16);
+    attention.qsa_raw_keys = MlxArray::zeros(std::array<int, 3>{1, 64, 128}, MLX_BFLOAT16);
+    attention.qsa_raw_start = token_count - 64;
+    attention.qsa_pooled_keys = raw(
+        pooled_values.data(), std::array<int, 3>{1, static_cast<int>(token_count / 4), 128},
+        MLX_BFLOAT16);
+    attention.qsa_pooled_count = token_count / 4;
+    attention.token_count = token_count;
+    attention.kv_q8 = true;
+    attention.kv_q8_cold_tokens = token_count;
+    std::vector<std::vector<float>> outputs;
+    outputs.reserve(steps);
+    for (std::uint32_t step = 0; step < steps; ++step) {
+        MlxArray output = layer.forward_decode(stream, 9419, state);
+        output.eval();
+        outputs.push_back(output.astype(MLX_FLOAT32).to_float32());
+        stream = output.share();
+    }
+    return outputs;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1829,6 +1975,7 @@ int main(int argc, char **argv) {
             const auto qsa_first_state = pipeline(device, library, @"qsa_top128_first");
             const auto qsa_merge_state = pipeline(device, library, @"qsa_top128_merge");
             const auto qsa_attention_state = pipeline(device, library, @"qsa_attention_q8_blocks");
+            const auto qsa_append_state = pipeline(device, library, @"qsa_append_decode_state");
             const auto attention_projection_state =
                 pipeline(device, library, @"attention_qkv_index");
             const auto attention_normalize_state =
@@ -1940,24 +2087,26 @@ int main(int argc, char **argv) {
                                     length:qsa_query_values.size() * sizeof(std::uint16_t)
                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> qsa_pooled =
-                [device newBufferWithBytes:qsa_pooled_values.data()
-                                    length:qsa_pooled_values.size() * sizeof(std::uint16_t)
-                                   options:MTLResourceStorageModeShared];
-            id<MTLBuffer> qsa_scores = [device newBufferWithLength:qsa_blocks * sizeof(float)
+                [device newBufferWithLength:(qsa_pooled_values.size() + 128) *
+                                            sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            std::memcpy(qsa_pooled.contents, qsa_pooled_values.data(),
+                        qsa_pooled_values.size() * sizeof(std::uint16_t));
+            id<MTLBuffer> qsa_scores = [device newBufferWithLength:65536 * sizeof(float)
                                                            options:MTLResourceStorageModeShared];
             id<MTLBuffer> qsa_selected = [device newBufferWithLength:128 * sizeof(std::uint32_t)
                                                              options:MTLResourceStorageModeShared];
             id<MTLBuffer> qsa_temp_scores_a =
-                [device newBufferWithLength:16384 * sizeof(float)
+                [device newBufferWithLength:32768 * sizeof(float)
                                     options:MTLResourceStorageModePrivate];
             id<MTLBuffer> qsa_temp_scores_b =
-                [device newBufferWithLength:16384 * sizeof(float)
+                [device newBufferWithLength:32768 * sizeof(float)
                                     options:MTLResourceStorageModePrivate];
             id<MTLBuffer> qsa_temp_ids_a =
-                [device newBufferWithLength:16384 * sizeof(std::uint32_t)
+                [device newBufferWithLength:32768 * sizeof(std::uint32_t)
                                     options:MTLResourceStorageModePrivate];
             id<MTLBuffer> qsa_temp_ids_b =
-                [device newBufferWithLength:16384 * sizeof(std::uint32_t)
+                [device newBufferWithLength:32768 * sizeof(std::uint32_t)
                                     options:MTLResourceStorageModePrivate];
             constexpr std::uint32_t qsa_tokens = qsa_blocks * 4;
             const NSUInteger qsa_word_count = static_cast<NSUInteger>(2) * qsa_tokens * 64;
@@ -1998,6 +2147,14 @@ int main(int argc, char **argv) {
                 [device newBufferWithBytes:rope_sin_values.data()
                                     length:rope_sin_values.size() * sizeof(std::uint16_t)
                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> pool_rope_cos =
+                [device newBufferWithBytes:rope_cos_values.data()
+                                    length:rope_cos_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> pool_rope_sin =
+                [device newBufferWithBytes:rope_sin_values.data()
+                                    length:rope_sin_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
             id<MTLBuffer> attention_selector_query =
                 [device newBufferWithLength:4 * 128 * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
@@ -2006,6 +2163,16 @@ int main(int argc, char **argv) {
                                     options:MTLResourceStorageModeShared];
             id<MTLBuffer> attention_key_normalized =
                 [device newBufferWithLength:2 * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            constexpr std::uint32_t hot_capacity = 2048;
+            id<MTLBuffer> attention_hot_keys =
+                [device newBufferWithLength:2ULL * hot_capacity * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_hot_values =
+                [device newBufferWithLength:2ULL * hot_capacity * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_pending_raw =
+                [device newBufferWithLength:4 * 128 * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
             id<MTLBuffer> attention_gated =
                 [device newBufferWithLength:24 * 256 * sizeof(std::uint16_t)
@@ -2031,8 +2198,10 @@ int main(int argc, char **argv) {
                 qsa_value_weight == nil || qsa_key_scale == nil || qsa_key_bias == nil ||
                 qsa_value_scale == nil || qsa_value_bias == nil || qsa_attention_output == nil ||
                 attention_projection_output == nil || rope_cos == nil || rope_sin == nil ||
+                pool_rope_cos == nil || pool_rope_sin == nil ||
                 attention_selector_query == nil || attention_query_normalized == nil ||
-                attention_key_normalized == nil || attention_gated == nil ||
+                attention_key_normalized == nil || attention_hot_keys == nil ||
+                attention_hot_values == nil || qsa_pending_raw == nil || attention_gated == nil ||
                 attention_block_output == nil || attention_output_stream == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
 
@@ -2053,7 +2222,12 @@ int main(int argc, char **argv) {
                 qvb[i] = bf16(-0.230F);
             }
 
-            const auto run_attention_half = [&](const bool include_mlp) {
+            const auto run_attention_half = [&](const bool include_mlp,
+                                                const std::uint32_t state_hot_index = 0,
+                                                const std::uint32_t state_pending_index = 0,
+                                                const std::uint32_t state_block_count = qsa_blocks,
+                                                const std::uint32_t state_hot_count = 1,
+                                                const std::uint32_t state_complete_block = 0) {
                 id<MTLCommandBuffer> command = [queue commandBuffer];
                 id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:hc_normalize_state];
@@ -2113,12 +2287,36 @@ int main(int argc, char **argv) {
                 [encoder endEncoding];
 
                 encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_append_state];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:0];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:1];
+                [encoder setBuffer:attention_hot_keys offset:0 atIndex:2];
+                [encoder setBuffer:attention_hot_values offset:0 atIndex:3];
+                [encoder setBuffer:qsa_pending_raw offset:0 atIndex:4];
+                [encoder setBuffer:qsa_pooled offset:0 atIndex:5];
+                bind_tensor(encoder, router_shard, attention_index_norm, 6);
+                [encoder setBuffer:pool_rope_cos offset:0 atIndex:7];
+                [encoder setBuffer:pool_rope_sin offset:0 atIndex:8];
+                [encoder setBytes:&state_hot_index length:sizeof(state_hot_index) atIndex:9];
+                [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:10];
+                [encoder setBytes:&state_pending_index length:sizeof(state_pending_index) atIndex:11];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:12];
+                [encoder setBytes:&state_complete_block length:sizeof(state_complete_block)
+                           atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:qsa_score_state];
                 [encoder setBuffer:attention_selector_query offset:0 atIndex:0];
                 [encoder setBuffer:qsa_pooled offset:0 atIndex:1];
                 [encoder setBuffer:qsa_scores offset:0 atIndex:2];
-                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:3];
-                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 4, 1, 1)
+                const std::uint32_t state_padded_count =
+                    (state_block_count + 255) / 256 * 256;
+                [encoder setBytes:&state_block_count length:sizeof(state_block_count) atIndex:3];
+                [encoder setBytes:&state_padded_count length:sizeof(state_padded_count) atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(state_padded_count / 4, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [encoder endEncoding];
 
@@ -2127,13 +2325,13 @@ int main(int argc, char **argv) {
                 [encoder setBuffer:qsa_scores offset:0 atIndex:0];
                 [encoder setBuffer:qsa_temp_scores_a offset:0 atIndex:1];
                 [encoder setBuffer:qsa_temp_ids_a offset:0 atIndex:2];
-                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 256, 1, 1)
+                [encoder dispatchThreadgroups:MTLSizeMake(state_padded_count / 256, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [encoder endEncoding];
-                std::uint32_t selection_count = qsa_blocks / 2;
+                std::uint32_t selection_groups = state_padded_count / 256;
                 bool selection_source_a = true;
-                while (selection_count > 128) {
-                    const std::uint32_t output_count = selection_count / 2;
+                while (selection_groups > 1) {
+                    const std::uint32_t output_groups = (selection_groups + 1) / 2;
                     encoder = [command computeCommandEncoder];
                     [encoder setComputePipelineState:qsa_merge_state];
                     [encoder setBuffer:(selection_source_a ? qsa_temp_scores_a : qsa_temp_scores_b)
@@ -2145,15 +2343,16 @@ int main(int argc, char **argv) {
                     [encoder setBuffer:(selection_source_a ? qsa_temp_scores_b : qsa_temp_scores_a)
                                 offset:0
                                atIndex:2];
-                    [encoder setBuffer:(output_count == 128 ? qsa_selected
+                    [encoder setBuffer:(output_groups == 1 ? qsa_selected
                                                             : (selection_source_a ? qsa_temp_ids_b
                                                                                   : qsa_temp_ids_a))
                                 offset:0
                                atIndex:3];
-                    [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+                    [encoder setBytes:&selection_groups length:sizeof(selection_groups) atIndex:4];
+                    [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
                             threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                     [encoder endEncoding];
-                    selection_count = output_count;
+                    selection_groups = output_groups;
                     selection_source_a = !selection_source_a;
                 }
 
@@ -2169,12 +2368,10 @@ int main(int argc, char **argv) {
                 [encoder setBuffer:qsa_selected offset:0 atIndex:7];
                 [encoder setBuffer:qsa_attention_output offset:0 atIndex:8];
                 [encoder setBytes:&qsa_tokens length:sizeof(qsa_tokens) atIndex:9];
-                [encoder setBuffer:attention_key_normalized offset:0 atIndex:10];
-                [encoder setBuffer:attention_projection_output
-                            offset:13440 * sizeof(std::uint16_t)
-                           atIndex:11];
-                const std::uint32_t include_hot = 1;
-                [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
+                [encoder setBuffer:attention_hot_keys offset:0 atIndex:10];
+                [encoder setBuffer:attention_hot_values offset:0 atIndex:11];
+                [encoder setBytes:&state_hot_count length:sizeof(state_hot_count) atIndex:12];
+                [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
                 [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
                 [encoder endEncoding];
@@ -2348,6 +2545,136 @@ int main(int argc, char **argv) {
                 persistent_layer_output[static_cast<std::size_t>(i)] =
                     from_bf16(persistent_layer_bits[i]);
             }
+
+            std::vector<double> state_append_gpu;
+            for (std::uint32_t step = 0; step < 4; ++step) {
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_append_state];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:0];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:1];
+                [encoder setBuffer:attention_hot_keys offset:0 atIndex:2];
+                [encoder setBuffer:attention_hot_values offset:0 atIndex:3];
+                [encoder setBuffer:qsa_pending_raw offset:0 atIndex:4];
+                [encoder setBuffer:qsa_pooled offset:0 atIndex:5];
+                bind_tensor(encoder, router_shard, attention_index_norm, 6);
+                [encoder setBuffer:rope_cos offset:0 atIndex:7];
+                [encoder setBuffer:rope_sin offset:0 atIndex:8];
+                [encoder setBytes:&step length:sizeof(step) atIndex:9];
+                [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:10];
+                [encoder setBytes:&step length:sizeof(step) atIndex:11];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:12];
+                const std::uint32_t complete_block = step == 3 ? 1 : 0;
+                [encoder setBytes:&complete_block length:sizeof(complete_block) atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                state_append_gpu.push_back((command.GPUEndTime - command.GPUStartTime) * 1000.0);
+            }
+            const auto *projected_bits =
+                static_cast<const std::uint16_t *>(attention_projection_output.contents);
+            const auto *normalized_key_bits =
+                static_cast<const std::uint16_t *>(attention_key_normalized.contents);
+            const auto *hot_key_bits =
+                static_cast<const std::uint16_t *>(attention_hot_keys.contents);
+            const auto *hot_value_bits =
+                static_cast<const std::uint16_t *>(attention_hot_values.contents);
+            const auto *pending_bits =
+                static_cast<const std::uint16_t *>(qsa_pending_raw.contents);
+            double state_hot_max_abs = 0.0, state_pending_max_abs = 0.0;
+            for (std::uint32_t step = 0; step < 4; ++step) {
+                for (std::uint32_t head = 0; head < 2; ++head) {
+                    for (std::uint32_t component = 0; component < 256; ++component) {
+                        const std::size_t target =
+                            (static_cast<std::size_t>(head) * hot_capacity + step) * 256 + component;
+                        const std::size_t source = head * 256 + component;
+                        state_hot_max_abs = std::max(
+                            state_hot_max_abs,
+                            std::abs(static_cast<double>(from_bf16(hot_key_bits[target]) -
+                                                         from_bf16(normalized_key_bits[source]))));
+                        state_hot_max_abs = std::max(
+                            state_hot_max_abs,
+                            std::abs(static_cast<double>(from_bf16(hot_value_bits[target]) -
+                                                         from_bf16(projected_bits[13440 + source]))));
+                    }
+                }
+                for (std::uint32_t component = 0; component < 128; ++component)
+                    state_pending_max_abs = std::max(
+                        state_pending_max_abs,
+                        std::abs(static_cast<double>(from_bf16(pending_bits[step * 128 + component]) -
+                                                     from_bf16(projected_bits[512 + component]))));
+            }
+            const auto index_norm_tensor = router_shard.file.tensor(attention_index_norm);
+            const auto *index_norm_bits =
+                reinterpret_cast<const std::uint16_t *>(index_norm_tensor.bytes.data());
+            float state_square_sum = 0.0F;
+            for (std::uint32_t component = 0; component < 128; ++component) {
+                const float value = from_bf16(projected_bits[512 + component]);
+                state_square_sum += value * value;
+            }
+            const float state_inverse_rms = std::sqrt(128.0F / (state_square_sum + 128.0e-6F));
+            std::array<float, 128> expected_pool{};
+            for (std::uint32_t component = 0; component < 128; ++component)
+                expected_pool[component] = from_bf16(bf16(
+                    from_bf16(projected_bits[512 + component]) * state_inverse_rms *
+                    (from_bf16(index_norm_bits[component]) + 1.0F)));
+            for (std::uint32_t component = 0; component < 32; ++component) {
+                const float first = expected_pool[component];
+                const float second = expected_pool[component + 32];
+                expected_pool[component] = from_bf16(bf16(
+                    first * from_bf16(rope_cos_values[component]) -
+                    second * from_bf16(rope_sin_values[component])));
+                expected_pool[component + 32] = from_bf16(bf16(
+                    second * from_bf16(rope_cos_values[component + 32]) +
+                    first * from_bf16(rope_sin_values[component + 32])));
+            }
+            const auto *pooled_bits = static_cast<const std::uint16_t *>(qsa_pooled.contents);
+            double state_pool_max_abs = 0.0;
+            for (std::uint32_t component = 0; component < 128; ++component)
+                state_pool_max_abs = std::max(
+                    state_pool_max_abs,
+                    std::abs(static_cast<double>(
+                        from_bf16(pooled_bits[static_cast<std::size_t>(qsa_blocks) * 128 + component]) -
+                        expected_pool[component])));
+
+            static_cast<void>(run_qsa_selector(
+                queue, qsa_score_state, qsa_first_state, qsa_merge_state, qsa_query, qsa_pooled,
+                qsa_scores, qsa_temp_scores_a, qsa_temp_ids_a, qsa_temp_scores_b,
+                qsa_temp_ids_b, qsa_selected, qsa_blocks + 1));
+            const auto *padded_selected =
+                static_cast<const std::uint32_t *>(qsa_selected.contents);
+            bool qsa_padded_selection_valid = true;
+            for (std::uint32_t slot = 0; slot < 128; ++slot)
+                qsa_padded_selection_valid &= padded_selected[slot] < qsa_blocks + 1;
+            std::vector<std::pair<float, std::uint32_t>> padded_cpu_scores;
+            padded_cpu_scores.reserve(qsa_blocks + 1);
+            for (std::uint32_t block = 0; block < qsa_blocks + 1; ++block) {
+                float score = 0.0F;
+                for (std::uint32_t head = 0; head < 4; ++head) {
+                    float dot = 0.0F;
+                    for (std::uint32_t component = 0; component < 128; ++component)
+                        dot += from_bf16(qsa_query_values[head * 128 + component]) *
+                               from_bf16(pooled_bits[static_cast<std::size_t>(block) * 128 +
+                                                     component]);
+                    score += std::max(dot, 0.0F);
+                }
+                padded_cpu_scores.emplace_back(score - static_cast<float>(block) * 1.0e-7F,
+                                               block);
+            }
+            std::ranges::sort(padded_cpu_scores, std::greater{},
+                              &std::pair<float, std::uint32_t>::first);
+            std::vector<std::uint32_t> expected_padded(128), actual_padded(128);
+            for (std::size_t slot = 0; slot < 128; ++slot) {
+                expected_padded[slot] = padded_cpu_scores[slot].second;
+                actual_padded[slot] = padded_selected[slot];
+            }
+            std::ranges::sort(expected_padded);
+            std::ranges::sort(actual_padded);
+            const bool qsa_padded_selected_match = expected_padded == actual_padded;
 
             for (int i = 0; i < 5; ++i)
                 static_cast<void>(run_qsa_selector(
@@ -2787,6 +3114,48 @@ int main(int argc, char **argv) {
                 layer_squared_error += delta * delta;
                 layer_max_abs = std::max(layer_max_abs, std::abs(delta));
             }
+            const auto trajectory_oracle = mlx_full_layer_trajectory_oracle(
+                manifest, stream_bf16, qsa_pooled_values, qkw, qks, qkb, qvw, qvs, qvb,
+                qsa_tokens, 4);
+            std::memcpy(hc_stream.contents, stream_bf16.data(),
+                        stream_bf16.size() * sizeof(std::uint16_t));
+            std::vector<double> trajectory_gpu;
+            double trajectory_min_cosine = 1.0, trajectory_max_rmse = 0.0;
+            double trajectory_max_abs = 0.0;
+            for (std::uint32_t step = 0; step < 4; ++step) {
+                auto *cos_bits = static_cast<std::uint16_t *>(rope_cos.contents);
+                auto *sin_bits = static_cast<std::uint16_t *>(rope_sin.contents);
+                for (std::size_t component = 0; component < 32; ++component) {
+                    const double frequency =
+                        std::pow(10000000.0, -2.0 * static_cast<double>(component) / 64.0);
+                    const double angle = static_cast<double>(qsa_tokens + step) * frequency;
+                    cos_bits[component] = cos_bits[component + 32] =
+                        bf16(static_cast<float>(std::cos(angle)));
+                    sin_bits[component] = sin_bits[component + 32] =
+                        bf16(static_cast<float>(std::sin(angle)));
+                }
+                const std::uint32_t complete = step == 3 ? 1 : 0;
+                trajectory_gpu.push_back(run_attention_half(
+                    true, step, step, qsa_blocks + complete, step + 1, complete));
+                const auto *actual_bits =
+                    static_cast<const std::uint16_t *>(hc_output_stream.contents);
+                double dot = 0.0, aa = 0.0, bb = 0.0, squared_error = 0.0;
+                for (std::size_t component = 0; component < 10240; ++component) {
+                    const double actual = from_bf16(actual_bits[component]);
+                    const double expected = trajectory_oracle[step][component];
+                    const double delta = actual - expected;
+                    dot += actual * expected;
+                    aa += actual * actual;
+                    bb += expected * expected;
+                    squared_error += delta * delta;
+                    trajectory_max_abs = std::max(trajectory_max_abs, std::abs(delta));
+                }
+                trajectory_min_cosine =
+                    std::min(trajectory_min_cosine, dot / std::sqrt(aa * bb));
+                trajectory_max_rmse =
+                    std::max(trajectory_max_rmse, std::sqrt(squared_error / 10240.0));
+                std::memcpy(hc_stream.contents, actual_bits, 10240 * sizeof(std::uint16_t));
+            }
             std::cout
                 << "{\"device\":\"" << device.name.UTF8String
                 << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
@@ -2819,6 +3188,19 @@ int main(int argc, char **argv) {
                 << ",\"persistent_layer_gpu_median_ms\":" << median(persistent_layer_gpu)
                 << ",\"persistent_layer_wall_median_ms\":" << median(persistent_layer_wall)
                 << ",\"persistent_layer_hash\":\"" << persistent_layer_hash << "\""
+                << ",\"state_append_gpu_median_ms\":" << median(state_append_gpu)
+                << ",\"state_hot_max_abs\":" << state_hot_max_abs
+                << ",\"state_pending_max_abs\":" << state_pending_max_abs
+                << ",\"state_pool_max_abs\":" << state_pool_max_abs
+                << ",\"qsa_padded_selection_valid\":"
+                << (qsa_padded_selection_valid ? "true" : "false")
+                << ",\"qsa_padded_selected_match\":"
+                << (qsa_padded_selected_match ? "true" : "false")
+                << ",\"trajectory_tokens\":4"
+                << ",\"trajectory_gpu_median_ms\":" << median(trajectory_gpu)
+                << ",\"trajectory_min_cosine\":" << trajectory_min_cosine
+                << ",\"trajectory_max_rmse\":" << trajectory_max_rmse
+                << ",\"trajectory_max_abs\":" << trajectory_max_abs
                 << ",\"mlx_layer_oracle_ms\":" << layer_oracle.median_ms
                 << ",\"persistent_layer_cosine\":" << layer_dot / std::sqrt(layer_aa * layer_bb)
                 << ",\"persistent_layer_rmse\":" << std::sqrt(layer_squared_error / 10240.0)
