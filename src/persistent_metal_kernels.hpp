@@ -509,6 +509,7 @@ kernel void qsa_attention_q8_blocks(
     device bfloat* output [[buffer(8)]], constant uint& cold_count [[buffer(9)]],
     const device bfloat* hot_key [[buffer(10)]], const device bfloat* hot_value [[buffer(11)]],
     constant uint& hot_count [[buffer(12)]], constant uint& hot_capacity [[buffer(13)]],
+    constant uint& selected_count [[buffer(14)]],
     uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]], uint kv_head [[threadgroup_position_in_grid]]) {
     constexpr uint tile = 16, dimension = 256, packed_dimension = 64;
@@ -525,13 +526,15 @@ kernel void qsa_attention_q8_blocks(
     float running_sum = 0.0f;
     threadgroup bfloat shared_key[tile * dimension];
     threadgroup bfloat shared_value[tile * dimension];
-    for (uint tile_start = 0; tile_start < 512; tile_start += tile) {
+    for (uint tile_start = 0; tile_start < selected_count; tile_start += tile) {
+        const uint tile_count = min(tile, selected_count - tile_start);
         for (uint offset = tid; offset < 2 * tile * packed_dimension; offset += 384) {
             const bool is_value = offset >= tile * packed_dimension;
             const uint local = is_value ? offset - tile * packed_dimension : offset;
             const uint slot = local / packed_dimension;
             const uint packed_channel = local % packed_dimension;
             const uint selected_slot = tile_start + slot;
+            if (slot >= tile_count) continue;
             const uint token = selected[selected_slot / 4] * 4 + selected_slot % 4;
             const uint shared_base = slot * dimension + packed_channel * 4;
             if (token < cold_count) {
@@ -562,7 +565,7 @@ kernel void qsa_attention_q8_blocks(
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint slot = 0; slot < tile; ++slot) {
+        for (uint slot = 0; slot < tile_count; ++slot) {
             float partial = 0.0f;
             const uint base = slot * dimension + lane * 8;
             for (uint component = 0; component < 8; ++component)

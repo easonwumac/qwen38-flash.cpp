@@ -7,6 +7,8 @@
 #import <Metal/Metal.h>
 
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -66,6 +68,14 @@ public:
         id<MTLBuffer> recurrent{nil};
     };
 
+    struct AttentionState {
+        id<MTLBuffer> hot_keys{nil};
+        id<MTLBuffer> hot_values{nil};
+        id<MTLBuffer> pending{nil};
+        id<MTLBuffer> pooled{nil};
+        std::uint32_t token_count{0};
+    };
+
     explicit Impl(const ModelManifest& manifest) {
         @autoreleasepool {
             device_ = MTLCreateSystemDefaultDevice();
@@ -115,19 +125,29 @@ public:
             if (queue_ == nil) throw std::runtime_error("cannot create persistent Metal queue");
             allocate_scratch();
             for (std::size_t layer = 0; layer < 48; ++layer) {
-                if (layer % 4 == 3) continue;
-                gdn_states_[layer].convolution = make_buffer(3 * 10240 * sizeof(std::uint16_t));
-                gdn_states_[layer].recurrent =
-                    make_buffer(48ULL * 128 * 128 * sizeof(std::uint16_t));
+                if (layer % 4 == 3) {
+                    attention_states_[layer].hot_keys =
+                        make_buffer(2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+                    attention_states_[layer].hot_values =
+                        make_buffer(2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+                    attention_states_[layer].pending = make_buffer(4 * 128 * sizeof(std::uint16_t));
+                    attention_states_[layer].pooled = make_buffer(
+                        65536ULL * 128 * sizeof(std::uint16_t), false);
+                } else {
+                    gdn_states_[layer].convolution =
+                        make_buffer(3 * 10240 * sizeof(std::uint16_t));
+                    gdn_states_[layer].recurrent =
+                        make_buffer(48ULL * 128 * 128 * sizeof(std::uint16_t));
+                }
             }
         }
     }
 
-    id<MTLBuffer> make_buffer(NSUInteger bytes) {
+    id<MTLBuffer> make_buffer(NSUInteger bytes, bool clear = true) {
         id<MTLBuffer> value = [device_ newBufferWithLength:bytes
                                                    options:MTLResourceStorageModeShared];
         if (value == nil) throw std::bad_alloc();
-        std::memset(value.contents, 0, bytes);
+        if (clear) std::memset(value.contents, 0, bytes);
         return value;
     }
 
@@ -156,6 +176,23 @@ public:
         healing_hidden_ = make_buffer(64 * sizeof(std::uint16_t));
         output_stream_ = make_buffer(10240 * sizeof(std::uint16_t));
         router_logits_ = make_buffer(512 * sizeof(float));
+        attention_projected_ = make_buffer(13952 * sizeof(std::uint16_t));
+        selector_query_ = make_buffer(4 * 128 * sizeof(std::uint16_t));
+        attention_query_ = make_buffer(24 * 256 * sizeof(std::uint16_t));
+        attention_key_ = make_buffer(2 * 256 * sizeof(std::uint16_t));
+        attention_values_ = make_buffer(24 * 256 * sizeof(std::uint16_t));
+        attention_gated_ = make_buffer(24 * 256 * sizeof(std::uint16_t));
+        rope_cos_ = make_buffer(64 * sizeof(std::uint16_t));
+        rope_sin_ = make_buffer(64 * sizeof(std::uint16_t));
+        pool_rope_cos_ = make_buffer(64 * sizeof(std::uint16_t));
+        pool_rope_sin_ = make_buffer(64 * sizeof(std::uint16_t));
+        qsa_scores_ = make_buffer(65536 * sizeof(float), false);
+        selected_ = make_buffer(128 * sizeof(std::uint32_t));
+        temp_scores_a_ = make_buffer(32768 * sizeof(float), false);
+        temp_scores_b_ = make_buffer(32768 * sizeof(float), false);
+        temp_ids_a_ = make_buffer(32768 * sizeof(std::uint32_t), false);
+        temp_ids_b_ = make_buffer(32768 * sizeof(std::uint32_t), false);
+        q8_dummy_ = make_buffer(16);
     }
 
     id<MTLComputePipelineState> pipeline(const char* name) const {
@@ -427,6 +464,205 @@ public:
         return {begin, begin + 10240};
     }
 
+    static std::uint16_t bf16(float value) {
+        std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        bits += 0x7fffU + ((bits >> 16U) & 1U);
+        return static_cast<std::uint16_t>(bits >> 16U);
+    }
+
+    void update_rope(id<MTLBuffer> cosine, id<MTLBuffer> sine, std::uint32_t position) {
+        auto* cos_values = static_cast<std::uint16_t*>(cosine.contents);
+        auto* sin_values = static_cast<std::uint16_t*>(sine.contents);
+        for (std::size_t index = 0; index < 32; ++index) {
+            const double frequency = std::pow(10000000.0, -2.0 * static_cast<double>(index) / 64.0);
+            const double angle = static_cast<double>(position) * frequency;
+            cos_values[index] = cos_values[index + 32] = bf16(static_cast<float>(std::cos(angle)));
+            sin_values[index] = sin_values[index + 32] = bf16(static_cast<float>(std::sin(angle)));
+        }
+    }
+
+    void encode_qsa_selection(id<MTLCommandBuffer> command, AttentionState& state,
+                              std::uint32_t block_count, std::uint32_t& selected_count) {
+        if (block_count <= 128) {
+            auto* ids = static_cast<std::uint32_t*>(selected_.contents);
+            for (std::uint32_t index = 0; index < block_count; ++index) ids[index] = index;
+            selected_count = block_count * 4;
+            return;
+        }
+        selected_count = 512;
+        const std::uint32_t padded = (block_count + 255) / 256 * 256;
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("qsa_score_blocks")];
+        [encoder setBuffer:selector_query_ offset:0 atIndex:0];
+        [encoder setBuffer:state.pooled offset:0 atIndex:1];
+        [encoder setBuffer:qsa_scores_ offset:0 atIndex:2];
+        [encoder setBytes:&block_count length:sizeof(block_count) atIndex:3];
+        [encoder setBytes:&padded length:sizeof(padded) atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(padded / 4, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("qsa_top128_first")];
+        [encoder setBuffer:qsa_scores_ offset:0 atIndex:0];
+        [encoder setBuffer:temp_scores_a_ offset:0 atIndex:1];
+        [encoder setBuffer:temp_ids_a_ offset:0 atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(padded / 256, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        std::uint32_t groups = padded / 256;
+        bool source_a = true;
+        while (groups > 1) {
+            const std::uint32_t output_groups = (groups + 1) / 2;
+            encoder = [command computeCommandEncoder];
+            [encoder setComputePipelineState:pipeline("qsa_top128_merge")];
+            [encoder setBuffer:(source_a ? temp_scores_a_ : temp_scores_b_) offset:0 atIndex:0];
+            [encoder setBuffer:(source_a ? temp_ids_a_ : temp_ids_b_) offset:0 atIndex:1];
+            [encoder setBuffer:(source_a ? temp_scores_b_ : temp_scores_a_) offset:0 atIndex:2];
+            [encoder setBuffer:(output_groups == 1 ? selected_ :
+                (source_a ? temp_ids_b_ : temp_ids_a_)) offset:0 atIndex:3];
+            [encoder setBytes:&groups length:sizeof(groups) atIndex:4];
+            [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+            [encoder endEncoding];
+            groups = output_groups;
+            source_a = !source_a;
+        }
+    }
+
+    void encode_attention(id<MTLCommandBuffer> command, const std::string& base,
+                          AttentionState& state) {
+        update_rope(rope_cos_, rope_sin_, state.token_count);
+        const std::uint32_t pending_index = state.token_count % 4;
+        const std::uint32_t old_blocks = state.token_count / 4;
+        const std::uint32_t resulting_tokens = state.token_count + 1;
+        const std::uint32_t block_count = resulting_tokens / 4;
+        const std::uint32_t complete_block = block_count > old_blocks ? 1 : 0;
+        update_rope(pool_rope_cos_, pool_rope_sin_, old_blocks * 4);
+
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("attention_qkv_index")];
+        [encoder setBuffer:mixed_ offset:0 atIndex:0];
+        bind_projection(encoder, base + ".indexer.index_qk_proj", 1);
+        bind_projection(encoder, base + ".q_proj", 4);
+        bind_projection(encoder, base + ".k_proj", 7);
+        bind_projection(encoder, base + ".v_proj", 10);
+        [encoder setBuffer:attention_projected_ offset:0 atIndex:13];
+        [encoder dispatchThreadgroups:MTLSizeMake((13952 + 3) / 4, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("attention_normalize_rope")];
+        [encoder setBuffer:attention_projected_ offset:0 atIndex:0];
+        bind(encoder, base + ".q_norm.weight", 1);
+        bind(encoder, base + ".k_norm.weight", 2);
+        bind(encoder, base + ".indexer.q_layernorm.weight", 3);
+        [encoder setBuffer:rope_cos_ offset:0 atIndex:4];
+        [encoder setBuffer:rope_sin_ offset:0 atIndex:5];
+        [encoder setBuffer:selector_query_ offset:0 atIndex:6];
+        [encoder setBuffer:attention_query_ offset:0 atIndex:7];
+        [encoder setBuffer:attention_key_ offset:0 atIndex:8];
+        [encoder dispatchThreadgroups:MTLSizeMake(30, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [encoder endEncoding];
+
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("qsa_append_decode_state")];
+        [encoder setBuffer:attention_projected_ offset:0 atIndex:0];
+        [encoder setBuffer:attention_key_ offset:0 atIndex:1];
+        [encoder setBuffer:state.hot_keys offset:0 atIndex:2];
+        [encoder setBuffer:state.hot_values offset:0 atIndex:3];
+        [encoder setBuffer:state.pending offset:0 atIndex:4];
+        [encoder setBuffer:state.pooled offset:0 atIndex:5];
+        bind(encoder, base + ".indexer.k_layernorm.weight", 6);
+        [encoder setBuffer:pool_rope_cos_ offset:0 atIndex:7];
+        [encoder setBuffer:pool_rope_sin_ offset:0 atIndex:8];
+        [encoder setBytes:&state.token_count length:sizeof(state.token_count) atIndex:9];
+        [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:10];
+        [encoder setBytes:&pending_index length:sizeof(pending_index) atIndex:11];
+        [encoder setBytes:&old_blocks length:sizeof(old_blocks) atIndex:12];
+        [encoder setBytes:&complete_block length:sizeof(complete_block) atIndex:13];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [encoder endEncoding];
+
+        std::uint32_t selected_count = 0;
+        encode_qsa_selection(command, state, block_count, selected_count);
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("qsa_attention_q8_blocks")];
+        [encoder setBuffer:attention_query_ offset:0 atIndex:0];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:1];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:2];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:3];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:4];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:5];
+        [encoder setBuffer:q8_dummy_ offset:0 atIndex:6];
+        [encoder setBuffer:selected_ offset:0 atIndex:7];
+        [encoder setBuffer:attention_values_ offset:0 atIndex:8];
+        const std::uint32_t cold_count = 0;
+        [encoder setBytes:&cold_count length:sizeof(cold_count) atIndex:9];
+        [encoder setBuffer:state.hot_keys offset:0 atIndex:10];
+        [encoder setBuffer:state.hot_values offset:0 atIndex:11];
+        [encoder setBytes:&resulting_tokens length:sizeof(resulting_tokens) atIndex:12];
+        [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+        [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
+        [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
+        [encoder endEncoding];
+
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("attention_apply_gate")];
+        [encoder setBuffer:attention_values_ offset:0 atIndex:0];
+        [encoder setBuffer:attention_projected_ offset:0 atIndex:1];
+        [encoder setBuffer:attention_gated_ offset:0 atIndex:2];
+        [encoder dispatchThreads:MTLSizeMake(6144, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("attention_output_projection")];
+        [encoder setBuffer:attention_gated_ offset:0 atIndex:0];
+        bind_projection(encoder, base + ".o_proj", 1);
+        [encoder setBuffer:block_output_ offset:0 atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        state.token_count = resulting_tokens;
+    }
+
+    std::vector<std::uint16_t> decode_attention_layer(
+        std::size_t index, std::span<const std::uint16_t> stream, bool reset,
+        double* gpu_ms) {
+        if (index >= 48 || index % 4 != 3) throw std::out_of_range("not an attention layer");
+        if (stream.size() != 10240) throw std::runtime_error("persistent stream width mismatch");
+        AttentionState& state = attention_states_[index];
+        if (reset) {
+            state.token_count = 0;
+            std::memset(state.hot_keys.contents, 0,
+                        2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+            std::memset(state.hot_values.contents, 0,
+                        2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
+            std::memset(state.pending.contents, 0, 4 * 128 * sizeof(std::uint16_t));
+        }
+        if (state.token_count >= hot_capacity) {
+            throw std::runtime_error("persistent attention hot slab requires Q8 flush");
+        }
+        std::memcpy(stream_.contents, stream.data(), stream.size_bytes());
+        const std::string layer = "language_model.model.layers." + std::to_string(index);
+        id<MTLCommandBuffer> command = [queue_ commandBuffer];
+        encode_hc_read(command, stream_, layer + ".attn_hyper_connection");
+        encode_attention(command, layer + ".self_attn", state);
+        encode_hc_write(command, stream_, block_output_, post_attention_);
+        encode_mlp(command, layer, index >= 10 && index <= 33);
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            throw std::runtime_error(command.error.localizedDescription.UTF8String);
+        }
+        if (gpu_ms != nullptr) *gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+        const auto* begin = static_cast<const std::uint16_t*>(output_stream_.contents);
+        return {begin, begin + 10240};
+    }
+
     Inventory inventory_;
     id<MTLDevice> device_{nil};
     id<MTLLibrary> library_{nil};
@@ -435,12 +671,19 @@ public:
     std::unordered_map<std::string, std::unique_ptr<Shard>> shards_;
     std::unordered_map<std::string, std::string> weight_map_;
     std::array<GdnState, 48> gdn_states_;
+    std::array<AttentionState, 48> attention_states_;
+    static constexpr std::uint32_t hot_capacity = 2048;
     id<MTLBuffer> stream_{nil}, normalized_{nil}, activation_{nil}, injection_{nil}, mixed_{nil};
     id<MTLBuffer> projected_{nil}, query_{nil}, key_{nil}, value_{nil}, decay_{nil}, beta_{nil};
     id<MTLBuffer> recurrent_output_{nil}, gated_{nil}, block_output_{nil};
     id<MTLBuffer> post_attention_{nil}, expert_ids_{nil}, route_weights_{nil};
     id<MTLBuffer> routed_hidden_{nil}, shared_hidden_{nil}, shared_scale_{nil};
     id<MTLBuffer> moe_output_{nil}, healing_hidden_{nil}, output_stream_{nil}, router_logits_{nil};
+    id<MTLBuffer> attention_projected_{nil}, selector_query_{nil}, attention_query_{nil};
+    id<MTLBuffer> attention_key_{nil}, attention_values_{nil}, attention_gated_{nil};
+    id<MTLBuffer> rope_cos_{nil}, rope_sin_{nil}, pool_rope_cos_{nil}, pool_rope_sin_{nil};
+    id<MTLBuffer> qsa_scores_{nil}, selected_{nil}, temp_scores_a_{nil}, temp_scores_b_{nil};
+    id<MTLBuffer> temp_ids_a_{nil}, temp_ids_b_{nil}, q8_dummy_{nil};
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
@@ -479,6 +722,12 @@ std::vector<std::uint16_t> PersistentMetalBackend::decode_gdn_layer(
     const std::size_t layer, const std::span<const std::uint16_t> stream,
     const bool reset_state, double* gpu_ms) {
     return impl_->decode_gdn_layer(layer, stream, reset_state, gpu_ms);
+}
+
+std::vector<std::uint16_t> PersistentMetalBackend::decode_attention_layer(
+    const std::size_t layer, const std::span<const std::uint16_t> stream,
+    const bool reset_state, double* gpu_ms) {
+    return impl_->decode_attention_layer(layer, stream, reset_state, gpu_ms);
 }
 
 } // namespace qwen38

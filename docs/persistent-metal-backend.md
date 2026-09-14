@@ -232,6 +232,21 @@ and 0.266 ms respectively. The mmap-backed backend itself initialized with a
 state/dispatch path, but only GDN layers are connected; full attention, PLE,
 embedding/head and MLX-prefill state import remain acceptance gates.
 
+The thirteenth gate adds production state and dispatch for both routed and
+shared-only full-attention layers. A variable-count form of the Q8 attention
+kernel now handles 0--127 complete QSA blocks without padding fake tokens; the
+ordinary exact top-128 selector starts only once the history exceeds that
+range. Real empty-state layer-3/layer-11 runs matched MLX at 0.999959/0.999986
+cosine, 3.08e-3/1.62e-3 RMSE and 1.95e-2/7.81e-3 maximum error. Warm 31-sample
+GPU medians varied with cache state around 0.39--0.43 ms routed and 0.26--0.33
+ms shared-only. Four recursively fed tokens, including the first completed QSA
+block, retained 0.999916/0.999915 minimum cosine; maximum RMSE was
+1.36e-2/1.17e-2. The existing synthetic 128K oracle remained unchanged at
+0.999990 layer cosine and 0.999952 four-token minimum cosine after the kernel
+generalization. Production attention currently owns a 2,048-token BF16 hot
+slab and fails closed at its boundary; Q8 cold-state import/flush is the next
+required gate, not an implicit precision downgrade.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;

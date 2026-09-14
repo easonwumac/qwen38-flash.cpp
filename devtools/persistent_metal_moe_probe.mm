@@ -217,8 +217,10 @@ double run_qsa_attention(id<MTLCommandQueue> queue, id<MTLComputePipelineState> 
     [encoder setBuffer:query offset:0 atIndex:10];
     [encoder setBuffer:query offset:0 atIndex:11];
     const std::uint32_t hot_count = 0, hot_capacity = 1;
+    const std::uint32_t selected_count = 512;
     [encoder setBytes:&hot_count length:sizeof(hot_count) atIndex:12];
     [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+    [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -293,8 +295,10 @@ double run_qsa_selected_attention(
     [encoder setBuffer:attention_query offset:0 atIndex:10];
     [encoder setBuffer:attention_query offset:0 atIndex:11];
     const std::uint32_t hot_count = 0, hot_capacity = 1;
+    const std::uint32_t selected_count = 512;
     [encoder setBytes:&hot_count length:sizeof(hot_count) atIndex:12];
     [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+    [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -2256,6 +2260,8 @@ int main(int argc, char **argv) {
                 const std::uint32_t one = 1;
                 [encoder setBytes:&one length:sizeof(one) atIndex:12];
                 [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+                const std::uint32_t selected_count = 512;
+                [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
                 [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
                 [encoder endEncoding];
@@ -2476,6 +2482,8 @@ int main(int argc, char **argv) {
                 [encoder setBuffer:attention_hot_values offset:0 atIndex:11];
                 [encoder setBytes:&state_hot_count length:sizeof(state_hot_count) atIndex:12];
                 [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+                const std::uint32_t selected_count = 512;
+                [encoder setBytes:&selected_count length:sizeof(selected_count) atIndex:14];
                 [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
                 [encoder endEncoding];

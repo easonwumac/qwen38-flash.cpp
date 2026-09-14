@@ -36,6 +36,11 @@ public:
         std::span<const std::uint16_t> stream,
         bool reset_state = false,
         double* gpu_ms = nullptr);
+    [[nodiscard]] std::vector<std::uint16_t> decode_attention_layer(
+        std::size_t layer,
+        std::span<const std::uint16_t> stream,
+        bool reset_state = false,
+        double* gpu_ms = nullptr);
 
 private:
     class Impl;
