@@ -386,6 +386,255 @@ kernel void select_top10(
         weights[slot] = bfloat(metal::exp(selected[slot] - selected[0]) / denominator);
 }
 
+kernel void qsa_score_blocks(
+    const device bfloat* query [[buffer(0)]], const device bfloat* pooled [[buffer(1)]],
+    device float* scores [[buffer(2)]], constant uint& block_count [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint block = group * 4 + simd;
+    if (block >= block_count) return;
+    float score = 0.0f;
+    for (uint head = 0; head < 4; ++head) {
+        float dot = 0.0f;
+        for (uint component = lane; component < 128; component += 32)
+            dot += float(query[head * 128 + component]) *
+                float(pooled[block * 128 + component]);
+        dot = simd_sum(dot);
+        if (lane == 0) score += max(dot, 0.0f);
+    }
+    if (lane == 0) scores[block] = score - float(block) * 1.0e-7f;
+}
+
+inline void qsa_bitonic256(threadgroup float* values, threadgroup uint* ids, uint tid) {
+    for (uint width = 2; width <= 256; width <<= 1) {
+        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
+            const uint left = (tid / stride) * (stride * 2) + tid % stride;
+            const uint right = left + stride;
+            const bool ascending = (left & width) == 0;
+            const bool swap = ascending ? values[left] > values[right]
+                                        : values[left] < values[right];
+            if (swap) {
+                const float score = values[left];
+                const uint id = ids[left];
+                values[left] = values[right]; ids[left] = ids[right];
+                values[right] = score; ids[right] = id;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
+kernel void qsa_top128_first(
+    const device float* scores [[buffer(0)]], device float* output_scores [[buffer(1)]],
+    device uint* output_ids [[buffer(2)]], uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float values[256];
+    threadgroup uint ids[256];
+    const uint source = group * 256;
+    values[tid] = scores[source + tid]; ids[tid] = source + tid;
+    values[tid + 128] = scores[source + tid + 128]; ids[tid + 128] = source + tid + 128;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    qsa_bitonic256(values, ids, tid);
+    output_scores[group * 128 + tid] = values[128 + tid];
+    output_ids[group * 128 + tid] = ids[128 + tid];
+}
+
+kernel void qsa_top128_merge(
+    const device float* input_scores [[buffer(0)]], const device uint* input_ids [[buffer(1)]],
+    device float* output_scores [[buffer(2)]], device uint* output_ids [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float values[256];
+    threadgroup uint ids[256];
+    const uint source = group * 256;
+    values[tid] = input_scores[source + tid]; ids[tid] = input_ids[source + tid];
+    values[tid + 128] = input_scores[source + tid + 128];
+    ids[tid + 128] = input_ids[source + tid + 128];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    qsa_bitonic256(values, ids, tid);
+    output_scores[group * 128 + tid] = values[128 + tid];
+    output_ids[group * 128 + tid] = ids[128 + tid];
+}
+
+kernel void qsa_attention_q8_blocks(
+    const device bfloat* query [[buffer(0)]], const device uint* key_weight [[buffer(1)]],
+    const device bfloat* key_scale [[buffer(2)]], const device bfloat* key_bias [[buffer(3)]],
+    const device uint* value_weight [[buffer(4)]], const device bfloat* value_scale [[buffer(5)]],
+    const device bfloat* value_bias [[buffer(6)]], const device uint* selected [[buffer(7)]],
+    device bfloat* output [[buffer(8)]], constant uint& token_count [[buffer(9)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint kv_head [[threadgroup_position_in_grid]]) {
+    constexpr uint tile = 16, dimension = 256, packed_dimension = 64;
+    constexpr uint query_heads_per_kv = 12;
+    const bool active = simd < query_heads_per_kv;
+    const uint query_head = kv_head * query_heads_per_kv + simd;
+    float q[8];
+    float accumulator[8];
+    for (uint component = 0; component < 8; ++component) {
+        q[component] = active ? float(query[query_head * dimension + lane * 8 + component]) : 0.0f;
+        accumulator[component] = 0.0f;
+    }
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    threadgroup bfloat shared_key[tile * dimension];
+    threadgroup bfloat shared_value[tile * dimension];
+    for (uint tile_start = 0; tile_start < 512; tile_start += tile) {
+        for (uint offset = tid; offset < 2 * tile * packed_dimension; offset += 384) {
+            const bool is_value = offset >= tile * packed_dimension;
+            const uint local = is_value ? offset - tile * packed_dimension : offset;
+            const uint slot = local / packed_dimension;
+            const uint packed_channel = local % packed_dimension;
+            const uint selected_slot = tile_start + slot;
+            const uint token = selected[selected_slot / 4] * 4 + selected_slot % 4;
+            const ulong vector = ulong(kv_head) * token_count + token;
+            const ulong word_index = vector * packed_dimension + packed_channel;
+            const uint packed = is_value ? value_weight[word_index] : key_weight[word_index];
+            const ulong affine_index = vector * 4 + packed_channel / 16;
+            const float scale = float(is_value ? value_scale[affine_index] : key_scale[affine_index]);
+            const float bias = float(is_value ? value_bias[affine_index] : key_bias[affine_index]);
+            const uint shared_base = slot * dimension + packed_channel * 4;
+            for (uint component = 0; component < 4; ++component) {
+                const bfloat value = bfloat(float((packed >> (component * 8)) & 255) * scale + bias);
+                if (is_value) shared_value[shared_base + component] = value;
+                else shared_key[shared_base + component] = value;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint slot = 0; slot < tile; ++slot) {
+            float partial = 0.0f;
+            const uint base = slot * dimension + lane * 8;
+            for (uint component = 0; component < 8; ++component)
+                partial += q[component] * float(shared_key[base + component]);
+            const float score = simd_sum(partial) * 0.0625f;
+            if (active) {
+                const float next_max = max(running_max, score);
+                const float alpha = isfinite(running_max) ? metal::exp(running_max - next_max) : 0.0f;
+                const float probability = metal::exp(score - next_max);
+                running_sum = running_sum * alpha + probability;
+                for (uint component = 0; component < 8; ++component)
+                    accumulator[component] = accumulator[component] * alpha +
+                        probability * float(shared_value[base + component]);
+                running_max = next_max;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (active) {
+        const float inverse_sum = 1.0f / running_sum;
+        for (uint component = 0; component < 8; ++component)
+            output[query_head * dimension + lane * 8 + component] =
+                bfloat(accumulator[component] * inverse_sum);
+    }
+}
+
+kernel void attention_qkv_index(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* iw [[buffer(1)]], const device bfloat* is [[buffer(2)]],
+    const device bfloat* ib [[buffer(3)]], const device uchar* qw [[buffer(4)]],
+    const device bfloat* qs [[buffer(5)]], const device bfloat* qb [[buffer(6)]],
+    const device uchar* kw [[buffer(7)]], const device bfloat* ks [[buffer(8)]],
+    const device bfloat* kb [[buffer(9)]], const device uchar* vw [[buffer(10)]],
+    const device bfloat* vs [[buffer(11)]], const device bfloat* vb [[buffer(12)]],
+    device bfloat* output [[buffer(13)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint linear = group * 4 + simd;
+    if (linear >= 13952) return;
+    const device uchar* weight;
+    const device bfloat* scale;
+    const device bfloat* bias;
+    uint row;
+    if (linear < 640) {
+        row = linear; weight = iw; scale = is; bias = ib;
+    } else if (linear < 12928) {
+        row = linear - 640; weight = qw; scale = qs; bias = qb;
+    } else if (linear < 13440) {
+        row = linear - 12928; weight = kw; scale = ks; bias = kb;
+    } else {
+        row = linear - 13440; weight = vw; scale = vs; bias = vb;
+    }
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 2560; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(scale[row * 80 + base / 32]) *
+                q4_dot8(weight + row * 1280 + base / 2, input + base) +
+            float(bias[row * 80 + base / 32]) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[linear] = bfloat(dot);
+}
+
+kernel void attention_normalize_rope(
+    const device bfloat* projected [[buffer(0)]], const device bfloat* query_norm [[buffer(1)]],
+    const device bfloat* key_norm [[buffer(2)]], const device bfloat* index_norm [[buffer(3)]],
+    const device bfloat* rope_cos [[buffer(4)]], const device bfloat* rope_sin [[buffer(5)]],
+    device bfloat* selector_query [[buffer(6)]], device bfloat* attention_query [[buffer(7)]],
+    device bfloat* attention_key [[buffer(8)]], uint lane [[thread_index_in_simdgroup]],
+    uint head [[threadgroup_position_in_grid]]) {
+    const bool is_index = head < 4;
+    const bool is_query = head >= 4 && head < 28;
+    const uint local_head = is_index ? head : (is_query ? head - 4 : head - 28);
+    const uint dimension = is_index ? 128 : 256;
+    const uint source_base = is_index ? local_head * 128
+        : (is_query ? 640 + local_head * 512 : 12928 + local_head * 256);
+    const device bfloat* norm = is_index ? index_norm : (is_query ? query_norm : key_norm);
+    float values[8];
+    float square_sum = 0.0f;
+    const uint items = dimension / 32;
+    for (uint item = 0; item < items; ++item) {
+        values[item] = float(projected[source_base + lane + item * 32]);
+        square_sum += values[item] * values[item];
+    }
+    square_sum = simd_sum(square_sum);
+    const float inverse_rms = rsqrt(square_sum / float(dimension) + 1.0e-6f);
+    bfloat normalized[8];
+    for (uint item = 0; item < items; ++item) {
+        const uint component = lane + item * 32;
+        const bfloat weight = bfloat(float(norm[component]) + 1.0f);
+        normalized[item] = bfloat(values[item] * inverse_rms * float(weight));
+    }
+    const bfloat first = normalized[0], second = normalized[1];
+    normalized[0] = bfloat(float(first) * float(rope_cos[lane]) -
+                           float(second) * float(rope_sin[lane]));
+    normalized[1] = bfloat(float(second) * float(rope_cos[lane + 32]) +
+                           float(first) * float(rope_sin[lane + 32]));
+    device bfloat* output = is_index ? selector_query : (is_query ? attention_query : attention_key);
+    const uint output_base = local_head * dimension;
+    for (uint item = 0; item < items; ++item)
+        output[output_base + lane + item * 32] = normalized[item];
+}
+
+kernel void attention_apply_gate(
+    const device bfloat* attended [[buffer(0)]], const device bfloat* projected [[buffer(1)]],
+    device bfloat* gated [[buffer(2)]], uint index [[thread_position_in_grid]]) {
+    if (index >= 6144) return;
+    const uint head = index / 256;
+    const uint component = index % 256;
+    const bfloat raw = projected[640 + head * 512 + 256 + component];
+    const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(raw))));
+    gated[index] = bfloat(float(attended[index]) * float(gate));
+}
+
+kernel void attention_output_projection(
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    const device bfloat* scale [[buffer(2)]], const device bfloat* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4 + simd;
+    if (row >= 2560) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 6144; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(scale[row * 192 + base / 32]) *
+                q4_dot8(weight + row * 3072 + base / 2, input + base) +
+            float(bias[row * 192 + base / 32]) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[row] = bfloat(dot);
+}
+
 kernel void hc_normalize(
     const device bfloat* stream [[buffer(0)]], const device bfloat* norm [[buffer(1)]],
     device bfloat* normalized [[buffer(2)]], uint tid [[thread_index_in_threadgroup]],
@@ -619,6 +868,233 @@ double run_hc_read(id<MTLCommandQueue> queue, id<MTLComputePipelineState> normal
     [up_encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     [up_encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_qsa_selector(id<MTLCommandQueue> queue, id<MTLComputePipelineState> score_state,
+                        id<MTLComputePipelineState> first_state,
+                        id<MTLComputePipelineState> merge_state, id<MTLBuffer> query,
+                        id<MTLBuffer> pooled, id<MTLBuffer> scores, id<MTLBuffer> temp_scores_a,
+                        id<MTLBuffer> temp_ids_a, id<MTLBuffer> temp_scores_b,
+                        id<MTLBuffer> temp_ids_b, id<MTLBuffer> selected,
+                        const std::uint32_t block_count) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:score_state];
+    [encoder setBuffer:query offset:0 atIndex:0];
+    [encoder setBuffer:pooled offset:0 atIndex:1];
+    [encoder setBuffer:scores offset:0 atIndex:2];
+    [encoder setBytes:&block_count length:sizeof(block_count) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake((block_count + 3) / 4, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:first_state];
+    [encoder setBuffer:scores offset:0 atIndex:0];
+    [encoder setBuffer:temp_scores_a offset:0 atIndex:1];
+    [encoder setBuffer:temp_ids_a offset:0 atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(block_count / 256, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    std::uint32_t count = block_count / 2;
+    bool source_a = true;
+    while (count > 128) {
+        const std::uint32_t output_count = count / 2;
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:merge_state];
+        [encoder setBuffer:(source_a ? temp_scores_a : temp_scores_b) offset:0 atIndex:0];
+        [encoder setBuffer:(source_a ? temp_ids_a : temp_ids_b) offset:0 atIndex:1];
+        [encoder setBuffer:(source_a ? temp_scores_b : temp_scores_a) offset:0 atIndex:2];
+        [encoder setBuffer:(output_count == 128 ? selected : (source_a ? temp_ids_b : temp_ids_a))
+                    offset:0
+                   atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        count = output_count;
+        source_a = !source_a;
+    }
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_qsa_attention(id<MTLCommandQueue> queue, id<MTLComputePipelineState> attention_state,
+                         id<MTLBuffer> query, id<MTLBuffer> key_weight, id<MTLBuffer> key_scale,
+                         id<MTLBuffer> key_bias, id<MTLBuffer> value_weight,
+                         id<MTLBuffer> value_scale, id<MTLBuffer> value_bias,
+                         id<MTLBuffer> selected, id<MTLBuffer> output,
+                         const std::uint32_t token_count) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:attention_state];
+    [encoder setBuffer:query offset:0 atIndex:0];
+    [encoder setBuffer:key_weight offset:0 atIndex:1];
+    [encoder setBuffer:key_scale offset:0 atIndex:2];
+    [encoder setBuffer:key_bias offset:0 atIndex:3];
+    [encoder setBuffer:value_weight offset:0 atIndex:4];
+    [encoder setBuffer:value_scale offset:0 atIndex:5];
+    [encoder setBuffer:value_bias offset:0 atIndex:6];
+    [encoder setBuffer:selected offset:0 atIndex:7];
+    [encoder setBuffer:output offset:0 atIndex:8];
+    [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
+    [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_qsa_selected_attention(
+    id<MTLCommandQueue> queue, id<MTLComputePipelineState> score_state,
+    id<MTLComputePipelineState> first_state, id<MTLComputePipelineState> merge_state,
+    id<MTLComputePipelineState> attention_state, id<MTLBuffer> selector_query, id<MTLBuffer> pooled,
+    id<MTLBuffer> scores, id<MTLBuffer> temp_scores_a, id<MTLBuffer> temp_ids_a,
+    id<MTLBuffer> temp_scores_b, id<MTLBuffer> temp_ids_b, id<MTLBuffer> selected,
+    id<MTLBuffer> attention_query, id<MTLBuffer> key_weight, id<MTLBuffer> key_scale,
+    id<MTLBuffer> key_bias, id<MTLBuffer> value_weight, id<MTLBuffer> value_scale,
+    id<MTLBuffer> value_bias, id<MTLBuffer> output, const std::uint32_t block_count,
+    const std::uint32_t token_count) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:score_state];
+    [encoder setBuffer:selector_query offset:0 atIndex:0];
+    [encoder setBuffer:pooled offset:0 atIndex:1];
+    [encoder setBuffer:scores offset:0 atIndex:2];
+    [encoder setBytes:&block_count length:sizeof(block_count) atIndex:3];
+    [encoder dispatchThreadgroups:MTLSizeMake((block_count + 3) / 4, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:first_state];
+    [encoder setBuffer:scores offset:0 atIndex:0];
+    [encoder setBuffer:temp_scores_a offset:0 atIndex:1];
+    [encoder setBuffer:temp_ids_a offset:0 atIndex:2];
+    [encoder dispatchThreadgroups:MTLSizeMake(block_count / 256, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    std::uint32_t count = block_count / 2;
+    bool source_a = true;
+    while (count > 128) {
+        const std::uint32_t output_count = count / 2;
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:merge_state];
+        [encoder setBuffer:(source_a ? temp_scores_a : temp_scores_b) offset:0 atIndex:0];
+        [encoder setBuffer:(source_a ? temp_ids_a : temp_ids_b) offset:0 atIndex:1];
+        [encoder setBuffer:(source_a ? temp_scores_b : temp_scores_a) offset:0 atIndex:2];
+        [encoder setBuffer:(output_count == 128 ? selected : (source_a ? temp_ids_b : temp_ids_a))
+                    offset:0
+                   atIndex:3];
+        [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        count = output_count;
+        source_a = !source_a;
+    }
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:attention_state];
+    [encoder setBuffer:attention_query offset:0 atIndex:0];
+    [encoder setBuffer:key_weight offset:0 atIndex:1];
+    [encoder setBuffer:key_scale offset:0 atIndex:2];
+    [encoder setBuffer:key_bias offset:0 atIndex:3];
+    [encoder setBuffer:value_weight offset:0 atIndex:4];
+    [encoder setBuffer:value_scale offset:0 atIndex:5];
+    [encoder setBuffer:value_bias offset:0 atIndex:6];
+    [encoder setBuffer:selected offset:0 atIndex:7];
+    [encoder setBuffer:output offset:0 atIndex:8];
+    [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
+    [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_attention_projections(id<MTLCommandQueue> queue, id<MTLComputePipelineState> state,
+                                 id<MTLBuffer> input, const Shard &shard,
+                                 const ProjectionNames &index, const ProjectionNames &query,
+                                 const ProjectionNames &key, const ProjectionNames &value,
+                                 id<MTLBuffer> output) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:input offset:0 atIndex:0];
+    bind_projection(encoder, shard, index, 1);
+    bind_projection(encoder, shard, query, 4);
+    bind_projection(encoder, shard, key, 7);
+    bind_projection(encoder, shard, value, 10);
+    [encoder setBuffer:output offset:0 atIndex:13];
+    [encoder dispatchThreadgroups:MTLSizeMake((13952 + 3) / 4, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_attention_normalize(id<MTLCommandQueue> queue, id<MTLComputePipelineState> state,
+                               id<MTLBuffer> projected, const Shard &shard,
+                               const std::string &query_norm, const std::string &key_norm,
+                               const std::string &index_norm, id<MTLBuffer> rope_cos,
+                               id<MTLBuffer> rope_sin, id<MTLBuffer> selector_query,
+                               id<MTLBuffer> attention_query, id<MTLBuffer> attention_key) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:projected offset:0 atIndex:0];
+    bind_tensor(encoder, shard, query_norm, 1);
+    bind_tensor(encoder, shard, key_norm, 2);
+    bind_tensor(encoder, shard, index_norm, 3);
+    [encoder setBuffer:rope_cos offset:0 atIndex:4];
+    [encoder setBuffer:rope_sin offset:0 atIndex:5];
+    [encoder setBuffer:selector_query offset:0 atIndex:6];
+    [encoder setBuffer:attention_query offset:0 atIndex:7];
+    [encoder setBuffer:attention_key offset:0 atIndex:8];
+    [encoder dispatchThreadgroups:MTLSizeMake(30, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted)
+        throw std::runtime_error(command.error.localizedDescription.UTF8String);
+    return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+}
+
+double run_attention_output(id<MTLCommandQueue> queue, id<MTLComputePipelineState> gate_state,
+                            id<MTLComputePipelineState> projection_state, id<MTLBuffer> attended,
+                            id<MTLBuffer> projected, const Shard &shard,
+                            const ProjectionNames &projection, id<MTLBuffer> gated,
+                            id<MTLBuffer> output) {
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:gate_state];
+    [encoder setBuffer:attended offset:0 atIndex:0];
+    [encoder setBuffer:projected offset:0 atIndex:1];
+    [encoder setBuffer:gated offset:0 atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(6144, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    [encoder endEncoding];
+    encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:projection_state];
+    [encoder setBuffer:gated offset:0 atIndex:0];
+    bind_projection(encoder, shard, projection, 1);
+    [encoder setBuffer:output offset:0 atIndex:4];
+    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+    [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
     if (command.status != MTLCommandBufferStatusCompleted)
@@ -1163,6 +1639,31 @@ OracleResult mlx_mlp_half_oracle(const qwen38::ModelManifest &manifest,
     return {std::move(output), median(std::move(samples))};
 }
 
+std::vector<float>
+mlx_attention_projection_oracle(const qwen38::ModelManifest &manifest, const ProjectionNames &index,
+                                const ProjectionNames &query, const ProjectionNames &key,
+                                const ProjectionNames &value, std::span<const float> input_values) {
+    qwen38::MlxTensorStore store(manifest);
+    const auto input =
+        MlxArray::from_float32(input_values, std::array<int, 3>{1, 1, 2560}).astype(MLX_BFLOAT16);
+    const auto project = [&](const ProjectionNames &names) {
+        return MlxArray::quantized_matmul(input, store.tensor(names.weight),
+                                          store.tensor(names.scales), store.tensor(names.biases),
+                                          32, 4);
+    };
+    std::array<MlxArray, 4> outputs{project(index), project(query), project(key), project(value)};
+    const std::array<const MlxArray *, 4> evaluated{&outputs[0], &outputs[1], &outputs[2],
+                                                    &outputs[3]};
+    MlxArray::eval_all(evaluated);
+    std::vector<float> result;
+    result.reserve(13952);
+    for (const MlxArray &output : outputs) {
+        auto values = output.astype(MLX_FLOAT32).to_float32();
+        result.insert(result.end(), values.begin(), values.end());
+    }
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1186,6 +1687,16 @@ int main(int argc, char **argv) {
             const auto hc_down = projection(hc_prefix + ".input_mix_weight_down");
             const auto hc_up = projection(hc_prefix + ".input_mix_weight_up");
             const auto hc_injection = projection(hc_prefix + ".block_inject_weight");
+            const std::string attention_prefix = "language_model.model.layers.3.self_attn";
+            const auto attention_index = projection(attention_prefix + ".indexer.index_qk_proj");
+            const auto attention_query = projection(attention_prefix + ".q_proj");
+            const auto attention_key = projection(attention_prefix + ".k_proj");
+            const auto attention_value = projection(attention_prefix + ".v_proj");
+            const auto attention_output_projection = projection(attention_prefix + ".o_proj");
+            const std::string attention_query_norm = attention_prefix + ".q_norm.weight";
+            const std::string attention_key_norm = attention_prefix + ".k_norm.weight";
+            const std::string attention_index_norm =
+                attention_prefix + ".indexer.q_layernorm.weight";
             const std::string healing_left = layer_prefix + ".T_delta_left";
             const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
@@ -1220,6 +1731,17 @@ int main(int argc, char **argv) {
             const auto fused_down_state = pipeline(device, library, @"fused_all_down");
             const auto router_state = pipeline(device, library, @"q8_router_logits");
             const auto select_state = pipeline(device, library, @"select_top10");
+            const auto qsa_score_state = pipeline(device, library, @"qsa_score_blocks");
+            const auto qsa_first_state = pipeline(device, library, @"qsa_top128_first");
+            const auto qsa_merge_state = pipeline(device, library, @"qsa_top128_merge");
+            const auto qsa_attention_state = pipeline(device, library, @"qsa_attention_q8_blocks");
+            const auto attention_projection_state =
+                pipeline(device, library, @"attention_qkv_index");
+            const auto attention_normalize_state =
+                pipeline(device, library, @"attention_normalize_rope");
+            const auto attention_gate_state = pipeline(device, library, @"attention_apply_gate");
+            const auto attention_output_state =
+                pipeline(device, library, @"attention_output_projection");
             const auto hc_normalize_state = pipeline(device, library, @"hc_normalize");
             const auto hc_down_state = pipeline(device, library, @"hc_down_injection");
             const auto hc_up_state = pipeline(device, library, @"hc_up_mix");
@@ -1240,6 +1762,29 @@ int main(int argc, char **argv) {
                 stream_f32[i] = static_cast<float>((i * 29 + 7) % 521 - 260) / 512.0F;
             std::vector<std::uint16_t> stream_bf16(10240);
             std::ranges::transform(stream_f32, stream_bf16.begin(), bf16);
+            constexpr std::uint32_t qsa_blocks = 32768;
+            std::vector<std::uint16_t> qsa_query_values(4 * 128);
+            std::vector<std::uint16_t> qsa_pooled_values(static_cast<std::size_t>(qsa_blocks) *
+                                                         128);
+            std::vector<std::uint16_t> qsa_attention_query_values(24 * 256);
+            for (std::size_t i = 0; i < qsa_query_values.size(); ++i)
+                qsa_query_values[i] =
+                    bf16(static_cast<float>(static_cast<int>((i * 37 + 5) % 257) - 128) / 256.0F);
+            for (std::size_t i = 0; i < qsa_pooled_values.size(); ++i)
+                qsa_pooled_values[i] =
+                    bf16(static_cast<float>(static_cast<int>((i * 43 + 17) % 263) - 131) / 256.0F);
+            for (std::size_t i = 0; i < qsa_attention_query_values.size(); ++i)
+                qsa_attention_query_values[i] =
+                    bf16(static_cast<float>(static_cast<int>((i * 19 + 3) % 127) - 63) / 512.0F);
+            std::array<std::uint16_t, 64> rope_cos_values{}, rope_sin_values{};
+            for (std::size_t i = 0; i < 32; ++i) {
+                const double frequency = std::pow(10000000.0, -2.0 * static_cast<double>(i) / 64.0);
+                const double angle = 131072.0 * frequency;
+                rope_cos_values[i] = rope_cos_values[i + 32] =
+                    bf16(static_cast<float>(std::cos(angle)));
+                rope_sin_values[i] = rope_sin_values[i + 32] =
+                    bf16(static_cast<float>(std::sin(angle)));
+            }
             const std::array<std::uint32_t, top_k> expert_ids{0,   287, 31, 129, 7,
                                                               256, 63,  17, 201, 95};
             std::array<float, top_k> route_weights{};
@@ -1295,6 +1840,84 @@ int main(int argc, char **argv) {
             id<MTLBuffer> hc_output_stream =
                 [device newBufferWithLength:10240 * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_query =
+                [device newBufferWithBytes:qsa_query_values.data()
+                                    length:qsa_query_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_pooled =
+                [device newBufferWithBytes:qsa_pooled_values.data()
+                                    length:qsa_pooled_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_scores = [device newBufferWithLength:qsa_blocks * sizeof(float)
+                                                           options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_selected = [device newBufferWithLength:128 * sizeof(std::uint32_t)
+                                                             options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_temp_scores_a =
+                [device newBufferWithLength:16384 * sizeof(float)
+                                    options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> qsa_temp_scores_b =
+                [device newBufferWithLength:16384 * sizeof(float)
+                                    options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> qsa_temp_ids_a =
+                [device newBufferWithLength:16384 * sizeof(std::uint32_t)
+                                    options:MTLResourceStorageModePrivate];
+            id<MTLBuffer> qsa_temp_ids_b =
+                [device newBufferWithLength:16384 * sizeof(std::uint32_t)
+                                    options:MTLResourceStorageModePrivate];
+            constexpr std::uint32_t qsa_tokens = qsa_blocks * 4;
+            const NSUInteger qsa_word_count = static_cast<NSUInteger>(2) * qsa_tokens * 64;
+            const NSUInteger qsa_affine_count = static_cast<NSUInteger>(2) * qsa_tokens * 4;
+            id<MTLBuffer> qsa_attention_query =
+                [device newBufferWithBytes:qsa_attention_query_values.data()
+                                    length:qsa_attention_query_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_key_weight =
+                [device newBufferWithLength:qsa_word_count * sizeof(std::uint32_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_value_weight =
+                [device newBufferWithLength:qsa_word_count * sizeof(std::uint32_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_key_scale =
+                [device newBufferWithLength:qsa_affine_count * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_key_bias =
+                [device newBufferWithLength:qsa_affine_count * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_value_scale =
+                [device newBufferWithLength:qsa_affine_count * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_value_bias =
+                [device newBufferWithLength:qsa_affine_count * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> qsa_attention_output =
+                [device newBufferWithLength:24 * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_projection_output =
+                [device newBufferWithLength:13952 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> rope_cos =
+                [device newBufferWithBytes:rope_cos_values.data()
+                                    length:rope_cos_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> rope_sin =
+                [device newBufferWithBytes:rope_sin_values.data()
+                                    length:rope_sin_values.size() * sizeof(std::uint16_t)
+                                   options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_selector_query =
+                [device newBufferWithLength:4 * 128 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_query_normalized =
+                [device newBufferWithLength:24 * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_key_normalized =
+                [device newBufferWithLength:2 * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_gated =
+                [device newBufferWithLength:24 * 256 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_block_output =
+                [device newBufferWithLength:2560 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> logits = [device newBufferWithLength:512 * sizeof(float)
                                                        options:MTLResourceStorageModeShared];
             id<MTLBuffer> cache_evict = [device newBufferWithLength:64ULL * 1024 * 1024
@@ -1303,8 +1926,175 @@ int main(int argc, char **argv) {
                 output == nil || shared_hidden == nil || shared_router_output == nil ||
                 full_output == nil || logits == nil || cache_evict == nil || hc_stream == nil ||
                 hc_normalized == nil || hc_activation == nil || hc_injection_output == nil ||
-                hc_mixed == nil || healing_hidden == nil || hc_output_stream == nil)
+                hc_mixed == nil || healing_hidden == nil || hc_output_stream == nil ||
+                qsa_query == nil || qsa_pooled == nil || qsa_scores == nil || qsa_selected == nil ||
+                qsa_temp_scores_a == nil || qsa_temp_scores_b == nil || qsa_temp_ids_a == nil ||
+                qsa_temp_ids_b == nil || qsa_attention_query == nil || qsa_key_weight == nil ||
+                qsa_value_weight == nil || qsa_key_scale == nil || qsa_key_bias == nil ||
+                qsa_value_scale == nil || qsa_value_bias == nil || qsa_attention_output == nil ||
+                attention_projection_output == nil || rope_cos == nil || rope_sin == nil ||
+                attention_selector_query == nil || attention_query_normalized == nil ||
+                attention_key_normalized == nil || attention_gated == nil ||
+                attention_block_output == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
+
+            auto *qkw = static_cast<std::uint32_t *>(qsa_key_weight.contents);
+            auto *qvw = static_cast<std::uint32_t *>(qsa_value_weight.contents);
+            for (NSUInteger i = 0; i < qsa_word_count; ++i) {
+                qkw[i] = static_cast<std::uint32_t>(i * 2654435761U + 17U);
+                qvw[i] = static_cast<std::uint32_t>(i * 2246822519U + 31U);
+            }
+            auto *qks = static_cast<std::uint16_t *>(qsa_key_scale.contents);
+            auto *qkb = static_cast<std::uint16_t *>(qsa_key_bias.contents);
+            auto *qvs = static_cast<std::uint16_t *>(qsa_value_scale.contents);
+            auto *qvb = static_cast<std::uint16_t *>(qsa_value_bias.contents);
+            for (NSUInteger i = 0; i < qsa_affine_count; ++i) {
+                qks[i] = bf16(0.0020F + static_cast<float>(i % 5) * 0.00005F);
+                qkb[i] = bf16(-0.255F);
+                qvs[i] = bf16(0.0018F + static_cast<float>(i % 7) * 0.00004F);
+                qvb[i] = bf16(-0.230F);
+            }
+
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_qsa_selector(
+                    queue, qsa_score_state, qsa_first_state, qsa_merge_state, qsa_query, qsa_pooled,
+                    qsa_scores, qsa_temp_scores_a, qsa_temp_ids_a, qsa_temp_scores_b,
+                    qsa_temp_ids_b, qsa_selected, qsa_blocks));
+            std::vector<double> qsa_selector_gpu, qsa_selector_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 11));
+                const auto started = std::chrono::steady_clock::now();
+                qsa_selector_gpu.push_back(run_qsa_selector(
+                    queue, qsa_score_state, qsa_first_state, qsa_merge_state, qsa_query, qsa_pooled,
+                    qsa_scores, qsa_temp_scores_a, qsa_temp_ids_a, qsa_temp_scores_b,
+                    qsa_temp_ids_b, qsa_selected, qsa_blocks));
+                qsa_selector_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                std::chrono::steady_clock::now() - started)
+                                                .count());
+            }
+            std::vector<std::pair<float, std::uint32_t>> cpu_qsa_scores;
+            cpu_qsa_scores.reserve(qsa_blocks);
+            for (std::uint32_t block = 0; block < qsa_blocks; ++block) {
+                float score = 0.0F;
+                for (std::uint32_t head = 0; head < 4; ++head) {
+                    float dot = 0.0F;
+                    for (std::uint32_t component = 0; component < 128; ++component) {
+                        dot += from_bf16(qsa_query_values[head * 128 + component]) *
+                               from_bf16(qsa_pooled_values[static_cast<std::size_t>(block) * 128 +
+                                                           component]);
+                    }
+                    score += std::max(dot, 0.0F);
+                }
+                cpu_qsa_scores.emplace_back(score - static_cast<float>(block) * 1.0e-7F, block);
+            }
+            std::ranges::sort(cpu_qsa_scores, std::greater{},
+                              &std::pair<float, std::uint32_t>::first);
+            std::vector<std::uint32_t> expected_qsa(128);
+            for (std::size_t i = 0; i < expected_qsa.size(); ++i)
+                expected_qsa[i] = cpu_qsa_scores[i].second;
+            std::ranges::sort(expected_qsa);
+            const auto *device_qsa = static_cast<const std::uint32_t *>(qsa_selected.contents);
+            std::vector<std::uint32_t> actual_qsa(device_qsa, device_qsa + 128);
+            std::ranges::sort(actual_qsa);
+            const bool qsa_selected_match = expected_qsa == actual_qsa;
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_qsa_attention(
+                    queue, qsa_attention_state, qsa_attention_query, qsa_key_weight, qsa_key_scale,
+                    qsa_key_bias, qsa_value_weight, qsa_value_scale, qsa_value_bias, qsa_selected,
+                    qsa_attention_output, qsa_tokens));
+            std::vector<double> qsa_attention_gpu, qsa_attention_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 43));
+                const auto started = std::chrono::steady_clock::now();
+                qsa_attention_gpu.push_back(run_qsa_attention(
+                    queue, qsa_attention_state, qsa_attention_query, qsa_key_weight, qsa_key_scale,
+                    qsa_key_bias, qsa_value_weight, qsa_value_scale, qsa_value_bias, qsa_selected,
+                    qsa_attention_output, qsa_tokens));
+                qsa_attention_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                 std::chrono::steady_clock::now() - started)
+                                                 .count());
+            }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_qsa_selected_attention(
+                    queue, qsa_score_state, qsa_first_state, qsa_merge_state, qsa_attention_state,
+                    qsa_query, qsa_pooled, qsa_scores, qsa_temp_scores_a, qsa_temp_ids_a,
+                    qsa_temp_scores_b, qsa_temp_ids_b, qsa_selected, qsa_attention_query,
+                    qsa_key_weight, qsa_key_scale, qsa_key_bias, qsa_value_weight, qsa_value_scale,
+                    qsa_value_bias, qsa_attention_output, qsa_blocks, qsa_tokens));
+            std::vector<double> qsa_pipeline_gpu, qsa_pipeline_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 89));
+                const auto started = std::chrono::steady_clock::now();
+                qsa_pipeline_gpu.push_back(run_qsa_selected_attention(
+                    queue, qsa_score_state, qsa_first_state, qsa_merge_state, qsa_attention_state,
+                    qsa_query, qsa_pooled, qsa_scores, qsa_temp_scores_a, qsa_temp_ids_a,
+                    qsa_temp_scores_b, qsa_temp_ids_b, qsa_selected, qsa_attention_query,
+                    qsa_key_weight, qsa_key_scale, qsa_key_bias, qsa_value_weight, qsa_value_scale,
+                    qsa_value_bias, qsa_attention_output, qsa_blocks, qsa_tokens));
+                qsa_pipeline_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                std::chrono::steady_clock::now() - started)
+                                                .count());
+            }
+            std::uint64_t qsa_attention_hash = 1469598103934665603ULL;
+            for (const auto *bits =
+                     static_cast<const std::uint16_t *>(qsa_attention_output.contents);
+                 bits !=
+                 static_cast<const std::uint16_t *>(qsa_attention_output.contents) + 24 * 256;
+                 ++bits) {
+                if (!std::isfinite(from_bf16(*bits)))
+                    throw std::runtime_error("non-finite QSA attention output");
+                qsa_attention_hash ^= *bits;
+                qsa_attention_hash *= 1099511628211ULL;
+            }
+            std::array<float, 256> qsa_attention_reference{};
+            float attention_running_max = -std::numeric_limits<float>::infinity();
+            float attention_running_sum = 0.0F;
+            for (std::size_t slot = 0; slot < 512; ++slot) {
+                const std::uint32_t token = device_qsa[slot / 4] * 4 + slot % 4;
+                float score = 0.0F;
+                std::array<float, 256> value{};
+                for (std::size_t component = 0; component < 256; ++component) {
+                    const std::size_t packed_channel = component / 4;
+                    const std::size_t word_index =
+                        static_cast<std::size_t>(token) * 64 + packed_channel;
+                    const std::size_t affine_index =
+                        static_cast<std::size_t>(token) * 4 + component / 64;
+                    const float key = from_bf16(
+                        bf16(static_cast<float>((qkw[word_index] >> ((component % 4) * 8)) & 255U) *
+                                 from_bf16(qks[affine_index]) +
+                             from_bf16(qkb[affine_index])));
+                    value[component] = from_bf16(
+                        bf16(static_cast<float>((qvw[word_index] >> ((component % 4) * 8)) & 255U) *
+                                 from_bf16(qvs[affine_index]) +
+                             from_bf16(qvb[affine_index])));
+                    score += from_bf16(qsa_attention_query_values[component]) * key;
+                }
+                score *= 0.0625F;
+                const float next_max = std::max(attention_running_max, score);
+                const float alpha = std::isfinite(attention_running_max)
+                                        ? std::exp(attention_running_max - next_max)
+                                        : 0.0F;
+                const float probability = std::exp(score - next_max);
+                attention_running_sum = attention_running_sum * alpha + probability;
+                for (std::size_t component = 0; component < 256; ++component) {
+                    qsa_attention_reference[component] =
+                        qsa_attention_reference[component] * alpha + probability * value[component];
+                }
+                attention_running_max = next_max;
+            }
+            const auto *qsa_attention_bits =
+                static_cast<const std::uint16_t *>(qsa_attention_output.contents);
+            double qsa_attention_dot = 0.0, qsa_attention_aa = 0.0, qsa_attention_bb = 0.0;
+            double qsa_attention_max_abs = 0.0;
+            for (std::size_t component = 0; component < 256; ++component) {
+                const double actual = from_bf16(qsa_attention_bits[component]);
+                const double expected = qsa_attention_reference[component] / attention_running_sum;
+                qsa_attention_dot += actual * expected;
+                qsa_attention_aa += actual * actual;
+                qsa_attention_bb += expected * expected;
+                qsa_attention_max_abs =
+                    std::max(qsa_attention_max_abs, std::abs(actual - expected));
+            }
 
             for (int i = 0; i < 5; ++i)
                 static_cast<void>(run_hc_read(queue, hc_normalize_state, hc_down_state, hc_up_state,
@@ -1322,6 +2112,58 @@ int main(int argc, char **argv) {
                 hc_wall.push_back(std::chrono::duration<double, std::milli>(
                                       std::chrono::steady_clock::now() - started)
                                       .count());
+            }
+
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_attention_projections(
+                    queue, attention_projection_state, hc_mixed, router_shard, attention_index,
+                    attention_query, attention_key, attention_value, attention_projection_output));
+            std::vector<double> attention_projection_gpu, attention_projection_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 211));
+                const auto started = std::chrono::steady_clock::now();
+                attention_projection_gpu.push_back(run_attention_projections(
+                    queue, attention_projection_state, hc_mixed, router_shard, attention_index,
+                    attention_query, attention_key, attention_value, attention_projection_output));
+                attention_projection_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                        std::chrono::steady_clock::now() - started)
+                                                        .count());
+            }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_attention_normalize(
+                    queue, attention_normalize_state, attention_projection_output, router_shard,
+                    attention_query_norm, attention_key_norm, attention_index_norm, rope_cos,
+                    rope_sin, attention_selector_query, attention_query_normalized,
+                    attention_key_normalized));
+            std::vector<double> attention_normalize_gpu, attention_normalize_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 239));
+                const auto started = std::chrono::steady_clock::now();
+                attention_normalize_gpu.push_back(run_attention_normalize(
+                    queue, attention_normalize_state, attention_projection_output, router_shard,
+                    attention_query_norm, attention_key_norm, attention_index_norm, rope_cos,
+                    rope_sin, attention_selector_query, attention_query_normalized,
+                    attention_key_normalized));
+                attention_normalize_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                       std::chrono::steady_clock::now() - started)
+                                                       .count());
+            }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_attention_output(
+                    queue, attention_gate_state, attention_output_state, qsa_attention_output,
+                    attention_projection_output, router_shard, attention_output_projection,
+                    attention_gated, attention_block_output));
+            std::vector<double> attention_output_gpu, attention_output_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 17));
+                const auto started = std::chrono::steady_clock::now();
+                attention_output_gpu.push_back(run_attention_output(
+                    queue, attention_gate_state, attention_output_state, qsa_attention_output,
+                    attention_projection_output, router_shard, attention_output_projection,
+                    attention_gated, attention_block_output));
+                attention_output_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                    std::chrono::steady_clock::now() - started)
+                                                    .count());
             }
 
             for (int i = 0; i < 5; ++i)
@@ -1437,6 +2279,25 @@ int main(int argc, char **argv) {
             const auto *hc_mixed_bits = static_cast<const std::uint16_t *>(hc_mixed.contents);
             std::ranges::transform(hc_mixed_bits, hc_mixed_bits + hidden_size, hc_direct.begin(),
                                    from_bf16);
+            const std::vector<float> attention_projection_oracle =
+                mlx_attention_projection_oracle(manifest, attention_index, attention_query,
+                                                attention_key, attention_value, hc_direct);
+            const auto *attention_projection_bits =
+                static_cast<const std::uint16_t *>(attention_projection_output.contents);
+            double attention_projection_dot = 0.0, attention_projection_aa = 0.0;
+            double attention_projection_bb = 0.0, attention_projection_squared_error = 0.0;
+            double attention_projection_max_abs = 0.0;
+            for (std::size_t i = 0; i < attention_projection_oracle.size(); ++i) {
+                const double actual = from_bf16(attention_projection_bits[i]);
+                const double expected = attention_projection_oracle[i];
+                const double delta = actual - expected;
+                attention_projection_dot += actual * expected;
+                attention_projection_aa += actual * actual;
+                attention_projection_bb += expected * expected;
+                attention_projection_squared_error += delta * delta;
+                attention_projection_max_abs =
+                    std::max(attention_projection_max_abs, std::abs(delta));
+            }
             const auto *result = static_cast<const std::uint16_t *>(full_output.contents);
             std::uint64_t hash = 1469598103934665603ULL;
             std::vector<float> direct(hidden_size);
@@ -1518,37 +2379,61 @@ int main(int argc, char **argv) {
                 mlp_squared_error += delta * delta;
                 mlp_max_abs = std::max(mlp_max_abs, std::abs(delta));
             }
-            std::cout << "{\"device\":\"" << device.name.UTF8String
-                      << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
-                      << ",\"joined_gpu_median_ms\":" << median(joined)
-                      << ",\"split_gpu_median_ms\":" << median(split)
-                      << ",\"joined_wall_median_ms\":" << median(joined_wall)
-                      << ",\"split_wall_median_ms\":" << median(split_wall)
-                      << ",\"full_gpu_median_ms\":" << median(full_gpu)
-                      << ",\"full_wall_median_ms\":" << median(full_wall)
-                      << ",\"fused_gpu_median_ms\":" << median(fused_gpu)
-                      << ",\"fused_wall_median_ms\":" << median(fused_wall)
-                      << ",\"device_routed_gpu_median_ms\":" << median(device_routed_gpu)
-                      << ",\"device_routed_wall_median_ms\":" << median(device_routed_wall)
-                      << ",\"hc_moe_gpu_median_ms\":" << median(hc_moe_gpu)
-                      << ",\"hc_moe_wall_median_ms\":" << median(hc_moe_wall)
-                      << ",\"router_ids_match\":" << (router_ids_match ? "true" : "false")
-                      << ",\"router_weight_max_abs\":" << router_weight_max_abs
-                      << ",\"hc_gpu_median_ms\":" << median(hc_gpu)
-                      << ",\"hc_wall_median_ms\":" << median(hc_wall)
-                      << ",\"mlx_hc_oracle_median_ms\":" << hc_oracle.median_ms
-                      << ",\"hc_cosine\":" << hc_dot / std::sqrt(hc_aa * hc_bb)
-                      << ",\"hc_rmse\":" << std::sqrt(hc_squared_error / hidden_size)
-                      << ",\"hc_max_abs\":" << hc_max_abs
-                      << ",\"hc_injection_max_abs\":" << hc_injection_max_abs
-                      << ",\"mlx_mlp_oracle_median_ms\":" << mlp_oracle.median_ms
-                      << ",\"mlp_cosine\":" << mlp_dot / std::sqrt(mlp_aa * mlp_bb)
-                      << ",\"mlp_rmse\":" << std::sqrt(mlp_squared_error / 10240.0)
-                      << ",\"mlp_max_abs\":" << mlp_max_abs
-                      << ",\"mlx_full_oracle_median_ms\":" << oracle.median_ms
-                      << ",\"cosine\":" << dot / std::sqrt(aa * bb)
-                      << ",\"rmse\":" << std::sqrt(squared_error / hidden_size)
-                      << ",\"max_abs\":" << max_abs << ",\"output_hash\":\"" << hash << "\"}\n";
+            std::cout
+                << "{\"device\":\"" << device.name.UTF8String
+                << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
+                << ",\"joined_gpu_median_ms\":" << median(joined)
+                << ",\"qsa_selector_gpu_median_ms\":" << median(qsa_selector_gpu)
+                << ",\"qsa_selector_wall_median_ms\":" << median(qsa_selector_wall)
+                << ",\"qsa_selected_match\":" << (qsa_selected_match ? "true" : "false")
+                << ",\"qsa_attention_gpu_median_ms\":" << median(qsa_attention_gpu)
+                << ",\"qsa_attention_wall_median_ms\":" << median(qsa_attention_wall)
+                << ",\"qsa_attention_hash\":\"" << qsa_attention_hash << "\""
+                << ",\"qsa_attention_cosine\":"
+                << qsa_attention_dot / std::sqrt(qsa_attention_aa * qsa_attention_bb)
+                << ",\"qsa_attention_max_abs\":" << qsa_attention_max_abs
+                << ",\"qsa_pipeline_gpu_median_ms\":" << median(qsa_pipeline_gpu)
+                << ",\"qsa_pipeline_wall_median_ms\":" << median(qsa_pipeline_wall)
+                << ",\"attention_projection_gpu_median_ms\":" << median(attention_projection_gpu)
+                << ",\"attention_projection_wall_median_ms\":" << median(attention_projection_wall)
+                << ",\"attention_projection_cosine\":"
+                << attention_projection_dot /
+                       std::sqrt(attention_projection_aa * attention_projection_bb)
+                << ",\"attention_projection_rmse\":"
+                << std::sqrt(attention_projection_squared_error / 13952.0)
+                << ",\"attention_projection_max_abs\":" << attention_projection_max_abs
+                << ",\"attention_normalize_gpu_median_ms\":" << median(attention_normalize_gpu)
+                << ",\"attention_normalize_wall_median_ms\":" << median(attention_normalize_wall)
+                << ",\"attention_output_gpu_median_ms\":" << median(attention_output_gpu)
+                << ",\"attention_output_wall_median_ms\":" << median(attention_output_wall)
+                << ",\"split_gpu_median_ms\":" << median(split)
+                << ",\"joined_wall_median_ms\":" << median(joined_wall)
+                << ",\"split_wall_median_ms\":" << median(split_wall)
+                << ",\"full_gpu_median_ms\":" << median(full_gpu)
+                << ",\"full_wall_median_ms\":" << median(full_wall)
+                << ",\"fused_gpu_median_ms\":" << median(fused_gpu)
+                << ",\"fused_wall_median_ms\":" << median(fused_wall)
+                << ",\"device_routed_gpu_median_ms\":" << median(device_routed_gpu)
+                << ",\"device_routed_wall_median_ms\":" << median(device_routed_wall)
+                << ",\"hc_moe_gpu_median_ms\":" << median(hc_moe_gpu)
+                << ",\"hc_moe_wall_median_ms\":" << median(hc_moe_wall)
+                << ",\"router_ids_match\":" << (router_ids_match ? "true" : "false")
+                << ",\"router_weight_max_abs\":" << router_weight_max_abs
+                << ",\"hc_gpu_median_ms\":" << median(hc_gpu)
+                << ",\"hc_wall_median_ms\":" << median(hc_wall)
+                << ",\"mlx_hc_oracle_median_ms\":" << hc_oracle.median_ms
+                << ",\"hc_cosine\":" << hc_dot / std::sqrt(hc_aa * hc_bb)
+                << ",\"hc_rmse\":" << std::sqrt(hc_squared_error / hidden_size)
+                << ",\"hc_max_abs\":" << hc_max_abs
+                << ",\"hc_injection_max_abs\":" << hc_injection_max_abs
+                << ",\"mlx_mlp_oracle_median_ms\":" << mlp_oracle.median_ms
+                << ",\"mlp_cosine\":" << mlp_dot / std::sqrt(mlp_aa * mlp_bb)
+                << ",\"mlp_rmse\":" << std::sqrt(mlp_squared_error / 10240.0)
+                << ",\"mlp_max_abs\":" << mlp_max_abs
+                << ",\"mlx_full_oracle_median_ms\":" << oracle.median_ms
+                << ",\"cosine\":" << dot / std::sqrt(aa * bb)
+                << ",\"rmse\":" << std::sqrt(squared_error / hidden_size)
+                << ",\"max_abs\":" << max_abs << ",\"output_hash\":\"" << hash << "\"}\n";
             return 0;
         } catch (const std::exception &exception) {
             std::cerr << "qwen38-persistent-metal-moe-probe: " << exception.what() << '\n';

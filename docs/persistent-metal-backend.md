@@ -69,11 +69,32 @@ contiguous-eight affine dot path is retained; future parity work must isolate
 normalization and BF16 expression rounding rather than revisiting reduction
 partitioning.
 
+The first 128K full-attention primitives are also validated. A parallel exact
+QSA selector scores four 128-wide query heads against 32,768 pooled blocks,
+then repeatedly bitonic-sorts 256 candidates and retains the upper 128. Across
+five independent 31-sample processes, the fused selector plus block-direct
+affine-Q8 attention measured 0.286--0.309 ms GPU and 0.455--0.485 ms wall. Its
+top-128 set matched the CPU reference exactly; the first Q8 attention head had
+0.999999 cosine and 4.56e-4 maximum absolute error against a CPU online-softmax
+reference. The discarded single-thread 128-element heap selected the same set
+but required 2.78 ms GPU because its private arrays and serial work dominated.
+
+Real layer-3 Q4/group-32 indexer-QK, query/gate, key and value projections took
+0.138--0.141 ms GPU; normalization plus partial RoPE took 0.0060--0.0065 ms;
+gate plus the real Q4 output projection took 0.0645--0.0685 ms. The projection
+primitive had 0.999972 cosine, 2.72e-3 RMSE and 1.56e-2 maximum absolute error
+against MLX. Adding the independently measured stages and HyperConnection read
+places the current full-attention half-layer device frontier at approximately
+0.52--0.55 ms, before a final single-command-buffer measurement. The QSA test
+uses deterministic synthetic pooled keys and a fully cold 131,072-token affine
+Q8 K/V cache; it does not yet include the current-token BF16 tail, state update,
+or an end-to-end retrieval claim.
+
 The next acceptance gates are:
 
-1. match the retained MLX token trajectory before extending beyond one layer;
-2. encode one complete full-attention layer with fixed buffers and no MLX
-   synchronization inside the layer;
+1. combine the full-attention primitives, current-token tail/state update and
+   both HyperConnections into one fixed-buffer layer command;
+2. match the retained MLX token trajectory before extending beyond one layer;
 3. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 
 Run the bounded primitive probe with:
