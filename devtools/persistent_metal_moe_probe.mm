@@ -425,7 +425,7 @@ kernel void qsa_append_decode_state(
     const device bfloat* normalized_key [[buffer(1)]],
     device bfloat* hot_key [[buffer(2)]], device bfloat* hot_value [[buffer(3)]],
     device bfloat* pending_raw [[buffer(4)]], device bfloat* pooled [[buffer(5)]],
-    const device bfloat* index_key_norm [[buffer(6)]],
+    const device uchar* index_key_norm [[buffer(6)]],
     const device bfloat* pool_rope_cos [[buffer(7)]],
     const device bfloat* pool_rope_sin [[buffer(8)]],
     constant uint& hot_index [[buffer(9)]], constant uint& hot_capacity [[buffer(10)]],
@@ -462,7 +462,7 @@ kernel void qsa_append_decode_state(
     for (uint item = 0; item < 4; ++item) {
         const uint component = lane + item * 32;
         normalized[item] = bfloat(values[item] * inverse_rms *
-                                  (float(index_key_norm[component]) + 1.0f));
+                                  (float(load_bf16_unaligned(index_key_norm, component)) + 1.0f));
     }
     const bfloat first = normalized[0], second = normalized[1];
     normalized[0] = bfloat(float(first) * float(pool_rope_cos[lane]) -
@@ -674,8 +674,8 @@ kernel void attention_qkv_index(
 }
 
 kernel void attention_normalize_rope(
-    const device bfloat* projected [[buffer(0)]], const device bfloat* query_norm [[buffer(1)]],
-    const device bfloat* key_norm [[buffer(2)]], const device bfloat* index_norm [[buffer(3)]],
+    const device bfloat* projected [[buffer(0)]], const device uchar* query_norm [[buffer(1)]],
+    const device uchar* key_norm [[buffer(2)]], const device uchar* index_norm [[buffer(3)]],
     const device bfloat* rope_cos [[buffer(4)]], const device bfloat* rope_sin [[buffer(5)]],
     device bfloat* selector_query [[buffer(6)]], device bfloat* attention_query [[buffer(7)]],
     device bfloat* attention_key [[buffer(8)]], uint lane [[thread_index_in_simdgroup]],
@@ -686,7 +686,7 @@ kernel void attention_normalize_rope(
     const uint dimension = is_index ? 128 : 256;
     const uint source_base = is_index ? local_head * 128
         : (is_query ? 640 + local_head * 512 : 12928 + local_head * 256);
-    const device bfloat* norm = is_index ? index_norm : (is_query ? query_norm : key_norm);
+    const device uchar* norm = is_index ? index_norm : (is_query ? query_norm : key_norm);
     float values[8];
     float square_sum = 0.0f;
     const uint items = dimension / 32;
@@ -699,7 +699,7 @@ kernel void attention_normalize_rope(
     bfloat normalized[8];
     for (uint item = 0; item < items; ++item) {
         const uint component = lane + item * 32;
-        const bfloat weight = bfloat(float(norm[component]) + 1.0f);
+        const bfloat weight = bfloat(float(load_bf16_unaligned(norm, component)) + 1.0f);
         normalized[item] = bfloat(values[item] * inverse_rms * float(weight));
     }
     const bfloat first = normalized[0], second = normalized[1];
@@ -1966,7 +1966,8 @@ OracleResult mlx_full_layer_oracle(const qwen38::ModelManifest &manifest,
                                    const std::uint16_t *key_bias, const std::uint32_t *value_weight,
                                    const std::uint16_t *value_scale,
                                    const std::uint16_t *value_bias,
-                                   const std::uint32_t token_count) {
+                                   const std::uint32_t token_count,
+                                   const std::size_t layer_index = 3) {
     setenv("QWEN38_HC_FUSED", "1", 1);
     unsetenv("QWEN38_HC_FUSED_INJECTION");
     setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
@@ -1976,7 +1977,7 @@ OracleResult mlx_full_layer_oracle(const qwen38::ModelManifest &manifest,
             mlx_array_new_data(data, shape.data(), static_cast<int>(shape.size()), dtype));
     };
     qwen38::MlxTensorStore store(manifest);
-    qwen38::DecoderLayer layer(store, 3, manifest.config());
+    qwen38::DecoderLayer layer(store, layer_index, manifest.config());
     const std::array<int, 3> stream_shape{1, 1, 10240};
     MlxArray stream = raw(stream_values.data(), stream_shape, MLX_BFLOAT16);
     qwen38::DecoderLayerState state;
@@ -2280,6 +2281,51 @@ int main(int argc, char **argv) {
                 projection(shared_attn_hc_prefix + ".block_inject_weight");
             const std::string shared_healing_left = shared_mlp_prefix + ".T_delta_left";
             const std::string shared_healing_right = shared_mlp_prefix + ".T_delta_right";
+            const std::string shared_attention_prefix = "language_model.model.layers.11";
+            const std::string shared_attention_block = shared_attention_prefix + ".self_attn";
+            const auto shared_attention_index =
+                projection(shared_attention_block + ".indexer.index_qk_proj");
+            const auto shared_attention_query = projection(shared_attention_block + ".q_proj");
+            const auto shared_attention_key = projection(shared_attention_block + ".k_proj");
+            const auto shared_attention_value = projection(shared_attention_block + ".v_proj");
+            const auto shared_attention_output = projection(shared_attention_block + ".o_proj");
+            const std::string shared_attention_query_norm = shared_attention_block + ".q_norm.weight";
+            const std::string shared_attention_key_norm = shared_attention_block + ".k_norm.weight";
+            const std::string shared_attention_index_norm =
+                shared_attention_block + ".indexer.q_layernorm.weight";
+            const std::string shared_attention_attn_hc =
+                shared_attention_prefix + ".attn_hyper_connection";
+            const std::string shared_attention_attn_hc_norm =
+                shared_attention_attn_hc + ".hc_norm.weight";
+            const auto shared_attention_attn_hc_down =
+                projection(shared_attention_attn_hc + ".input_mix_weight_down");
+            const auto shared_attention_attn_hc_up =
+                projection(shared_attention_attn_hc + ".input_mix_weight_up");
+            const auto shared_attention_attn_hc_injection =
+                projection(shared_attention_attn_hc + ".block_inject_weight");
+            const std::string shared_attention_mlp = shared_attention_prefix + ".mlp";
+            const auto shared_attention_mlp_gate =
+                projection(shared_attention_mlp + ".shared_expert.gate_proj");
+            const auto shared_attention_mlp_up =
+                projection(shared_attention_mlp + ".shared_expert.up_proj");
+            const auto shared_attention_mlp_down =
+                projection(shared_attention_mlp + ".shared_expert.down_proj");
+            const auto shared_attention_mlp_router =
+                projection(shared_attention_mlp + ".shared_expert_gate");
+            const std::string shared_attention_mlp_hc =
+                shared_attention_prefix + ".mlp_hyper_connection";
+            const std::string shared_attention_mlp_hc_norm =
+                shared_attention_mlp_hc + ".hc_norm.weight";
+            const auto shared_attention_mlp_hc_down =
+                projection(shared_attention_mlp_hc + ".input_mix_weight_down");
+            const auto shared_attention_mlp_hc_up =
+                projection(shared_attention_mlp_hc + ".input_mix_weight_up");
+            const auto shared_attention_mlp_hc_injection =
+                projection(shared_attention_mlp_hc + ".block_inject_weight");
+            const std::string shared_attention_healing_left =
+                shared_attention_mlp + ".T_delta_left";
+            const std::string shared_attention_healing_right =
+                shared_attention_mlp + ".T_delta_right";
             const std::string healing_left = layer_prefix + ".T_delta_left";
             const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
@@ -2351,6 +2397,14 @@ int main(int argc, char **argv) {
                 device, manifest.directory() / manifest.weight_map().at(shared_gdn_qkv.weight));
             Shard shared_mlp_shard(
                 device, manifest.directory() / manifest.weight_map().at(shared_only_gate.weight));
+            Shard shared_attention_shard(
+                device, manifest.directory() / manifest.weight_map().at(shared_attention_query.weight));
+            Shard shared_attention_aux_shard(
+                device, manifest.directory() /
+                    manifest.weight_map().at(shared_attention_attn_hc_norm));
+            Shard shared_attention_mlp_shard(
+                device, manifest.directory() /
+                    manifest.weight_map().at(shared_attention_mlp_gate.weight));
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
@@ -2986,16 +3040,22 @@ int main(int argc, char **argv) {
                 evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 213));
                 gdn_layer_gpu.push_back(run_gdn_layer());
             }
-            const auto encode_shared_only_mlp = [&](id<MTLCommandBuffer> command,
-                                                    id<MTLBuffer> stream) {
-                encode_hc_read(command, stream, shared_layer_shard, shared_mlp_hc_norm,
-                               shared_mlp_hc_down, shared_mlp_hc_up,
-                               shared_mlp_hc_injection);
+            const auto encode_shared_only_mlp = [&] (
+                id<MTLCommandBuffer> command, id<MTLBuffer> stream,
+                const Shard &aux_shard, const Shard &mlp_shard,
+                const ProjectionNames &shared_gate_projection,
+                const ProjectionNames &shared_up_projection,
+                const ProjectionNames &shared_down_projection,
+                const ProjectionNames &shared_router_projection,
+                const std::string &hc_norm, const ProjectionNames &hc_down,
+                const ProjectionNames &hc_up, const ProjectionNames &hc_injection,
+                const std::string &healing_left, const std::string &healing_right) {
+                encode_hc_read(command, stream, aux_shard, hc_norm, hc_down, hc_up, hc_injection);
                 id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:shared_gate_state];
                 [encoder setBuffer:hc_mixed offset:0 atIndex:0];
-                bind_projection(encoder, shared_mlp_shard, shared_only_gate, 1);
-                bind_projection(encoder, shared_mlp_shard, shared_only_up, 4);
+                bind_projection(encoder, mlp_shard, shared_gate_projection, 1);
+                bind_projection(encoder, mlp_shard, shared_up_projection, 4);
                 [encoder setBuffer:shared_hidden offset:0 atIndex:7];
                 [encoder dispatchThreadgroups:MTLSizeMake(160, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -3003,7 +3063,7 @@ int main(int argc, char **argv) {
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:shared_router_state];
                 [encoder setBuffer:hc_mixed offset:0 atIndex:0];
-                bind_projection(encoder, shared_layer_shard, shared_only_router, 1);
+                bind_projection(encoder, aux_shard, shared_router_projection, 1);
                 [encoder setBuffer:shared_router_output offset:0 atIndex:4];
                 [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
@@ -3011,7 +3071,7 @@ int main(int argc, char **argv) {
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:shared_down_state];
                 [encoder setBuffer:shared_hidden offset:0 atIndex:0];
-                bind_projection(encoder, shared_mlp_shard, shared_only_down, 1);
+                bind_projection(encoder, mlp_shard, shared_down_projection, 1);
                 [encoder setBuffer:shared_router_output offset:0 atIndex:4];
                 [encoder setBuffer:full_output offset:0 atIndex:5];
                 [encoder setBuffer:full_output offset:0 atIndex:6];
@@ -3021,7 +3081,7 @@ int main(int argc, char **argv) {
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:healing_left_state];
                 [encoder setBuffer:full_output offset:0 atIndex:0];
-                bind_tensor(encoder, gdn_healing_shard, shared_healing_left, 1);
+                bind_tensor(encoder, gdn_healing_shard, healing_left, 1);
                 [encoder setBuffer:healing_hidden offset:0 atIndex:2];
                 [encoder dispatchThreadgroups:MTLSizeMake(16, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -3030,7 +3090,7 @@ int main(int argc, char **argv) {
                 [encoder setComputePipelineState:healing_right_state];
                 [encoder setBuffer:full_output offset:0 atIndex:0];
                 [encoder setBuffer:healing_hidden offset:0 atIndex:1];
-                bind_tensor(encoder, gdn_healing_shard, shared_healing_right, 2);
+                bind_tensor(encoder, gdn_healing_shard, healing_right, 2);
                 [encoder setBuffer:stream offset:0 atIndex:3];
                 [encoder setBuffer:hc_injection_output offset:0 atIndex:4];
                 [encoder setBuffer:hc_output_stream offset:0 atIndex:5];
@@ -3061,7 +3121,11 @@ int main(int argc, char **argv) {
                 [encoder dispatchThreads:MTLSizeMake(10240, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
                 [encoder endEncoding];
-                encode_shared_only_mlp(command, attention_output_stream);
+                encode_shared_only_mlp(
+                    command, attention_output_stream, shared_layer_shard, shared_mlp_shard,
+                    shared_only_gate, shared_only_up, shared_only_down, shared_only_router,
+                    shared_mlp_hc_norm, shared_mlp_hc_down, shared_mlp_hc_up,
+                    shared_mlp_hc_injection, shared_healing_left, shared_healing_right);
                 [command commit];
                 [command waitUntilCompleted];
                 if (command.status != MTLCommandBufferStatusCompleted)
@@ -3093,6 +3157,185 @@ int main(int argc, char **argv) {
             for (int iteration = 0; iteration < 31; ++iteration) {
                 evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 229));
                 shared_gdn_layer_gpu.push_back(run_shared_gdn_layer());
+            }
+            const auto run_shared_attention_layer = [&] {
+                std::memset(full_output.contents, 0, 2560 * sizeof(std::uint16_t));
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                encode_hc_read(command, hc_stream, shared_attention_aux_shard,
+                               shared_attention_attn_hc_norm,
+                               shared_attention_attn_hc_down, shared_attention_attn_hc_up,
+                               shared_attention_attn_hc_injection);
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_projection_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, shared_attention_shard, shared_attention_index, 1);
+                bind_projection(encoder, shared_attention_shard, shared_attention_query, 4);
+                bind_projection(encoder, shared_attention_shard, shared_attention_key, 7);
+                bind_projection(encoder, shared_attention_shard, shared_attention_value, 10);
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake((13952 + 3) / 4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_normalize_state];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:0];
+                bind_tensor(encoder, shared_attention_shard, shared_attention_query_norm, 1);
+                bind_tensor(encoder, shared_attention_shard, shared_attention_key_norm, 2);
+                bind_tensor(encoder, shared_attention_shard, shared_attention_index_norm, 3);
+                [encoder setBuffer:rope_cos offset:0 atIndex:4];
+                [encoder setBuffer:rope_sin offset:0 atIndex:5];
+                [encoder setBuffer:attention_selector_query offset:0 atIndex:6];
+                [encoder setBuffer:attention_query_normalized offset:0 atIndex:7];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(30, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_append_state];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:0];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:1];
+                [encoder setBuffer:attention_hot_keys offset:0 atIndex:2];
+                [encoder setBuffer:attention_hot_values offset:0 atIndex:3];
+                [encoder setBuffer:qsa_pending_raw offset:0 atIndex:4];
+                [encoder setBuffer:qsa_pooled offset:0 atIndex:5];
+                bind_tensor(encoder, shared_attention_shard, shared_attention_index_norm, 6);
+                [encoder setBuffer:pool_rope_cos offset:0 atIndex:7];
+                [encoder setBuffer:pool_rope_sin offset:0 atIndex:8];
+                const std::uint32_t zero = 0;
+                [encoder setBytes:&zero length:sizeof(zero) atIndex:9];
+                [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:10];
+                [encoder setBytes:&zero length:sizeof(zero) atIndex:11];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:12];
+                [encoder setBytes:&zero length:sizeof(zero) atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_score_state];
+                [encoder setBuffer:attention_selector_query offset:0 atIndex:0];
+                [encoder setBuffer:qsa_pooled offset:0 atIndex:1];
+                [encoder setBuffer:qsa_scores offset:0 atIndex:2];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:3];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_first_state];
+                [encoder setBuffer:qsa_scores offset:0 atIndex:0];
+                [encoder setBuffer:qsa_temp_scores_a offset:0 atIndex:1];
+                [encoder setBuffer:qsa_temp_ids_a offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 256, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                std::uint32_t selection_groups = qsa_blocks / 256;
+                bool selection_source_a = true;
+                while (selection_groups > 1) {
+                    const std::uint32_t output_groups = (selection_groups + 1) / 2;
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:qsa_merge_state];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_scores_a : qsa_temp_scores_b)
+                                offset:0 atIndex:0];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_ids_a : qsa_temp_ids_b)
+                                offset:0 atIndex:1];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_scores_b : qsa_temp_scores_a)
+                                offset:0 atIndex:2];
+                    [encoder setBuffer:(output_groups == 1 ? qsa_selected
+                                                            : (selection_source_a ? qsa_temp_ids_b
+                                                                                  : qsa_temp_ids_a))
+                                offset:0 atIndex:3];
+                    [encoder setBytes:&selection_groups length:sizeof(selection_groups) atIndex:4];
+                    [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+                    selection_groups = output_groups;
+                    selection_source_a = !selection_source_a;
+                }
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_attention_state];
+                [encoder setBuffer:attention_query_normalized offset:0 atIndex:0];
+                [encoder setBuffer:qsa_key_weight offset:0 atIndex:1];
+                [encoder setBuffer:qsa_key_scale offset:0 atIndex:2];
+                [encoder setBuffer:qsa_key_bias offset:0 atIndex:3];
+                [encoder setBuffer:qsa_value_weight offset:0 atIndex:4];
+                [encoder setBuffer:qsa_value_scale offset:0 atIndex:5];
+                [encoder setBuffer:qsa_value_bias offset:0 atIndex:6];
+                [encoder setBuffer:qsa_selected offset:0 atIndex:7];
+                [encoder setBuffer:qsa_attention_output offset:0 atIndex:8];
+                [encoder setBytes:&qsa_tokens length:sizeof(qsa_tokens) atIndex:9];
+                [encoder setBuffer:attention_hot_keys offset:0 atIndex:10];
+                [encoder setBuffer:attention_hot_values offset:0 atIndex:11];
+                const std::uint32_t one = 1;
+                [encoder setBytes:&one length:sizeof(one) atIndex:12];
+                [encoder setBytes:&hot_capacity length:sizeof(hot_capacity) atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_gate_state];
+                [encoder setBuffer:qsa_attention_output offset:0 atIndex:0];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:1];
+                [encoder setBuffer:attention_gated offset:0 atIndex:2];
+                [encoder dispatchThreads:MTLSizeMake(6144, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_output_state];
+                [encoder setBuffer:attention_gated offset:0 atIndex:0];
+                bind_projection(encoder, shared_attention_shard, shared_attention_output, 1);
+                [encoder setBuffer:attention_block_output offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_write_state];
+                [encoder setBuffer:hc_stream offset:0 atIndex:0];
+                [encoder setBuffer:attention_block_output offset:0 atIndex:1];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:2];
+                [encoder setBuffer:attention_output_stream offset:0 atIndex:3];
+                [encoder dispatchThreads:MTLSizeMake(10240, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+                encode_shared_only_mlp(
+                    command, attention_output_stream, shared_attention_aux_shard,
+                    shared_attention_mlp_shard, shared_attention_mlp_gate,
+                    shared_attention_mlp_up, shared_attention_mlp_down,
+                    shared_attention_mlp_router, shared_attention_mlp_hc_norm,
+                    shared_attention_mlp_hc_down, shared_attention_mlp_hc_up,
+                    shared_attention_mlp_hc_injection, shared_attention_healing_left,
+                    shared_attention_healing_right);
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+            };
+            const double shared_attention_first_gpu = run_shared_attention_layer();
+            const OracleResult shared_attention_oracle =
+                mlx_full_layer_oracle(manifest, stream_bf16, qsa_pooled_values, qkw, qks, qkb,
+                                      qvw, qvs, qvb, qsa_tokens, 11);
+            const auto *shared_attention_bits =
+                static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            double shared_attention_dot = 0.0, shared_attention_aa = 0.0;
+            double shared_attention_bb = 0.0, shared_attention_squared_error = 0.0;
+            double shared_attention_max_abs = 0.0;
+            for (std::size_t component = 0; component < 10240; ++component) {
+                const double actual = from_bf16(shared_attention_bits[component]);
+                const double expected = shared_attention_oracle.output[component];
+                const double delta = actual - expected;
+                shared_attention_dot += actual * expected;
+                shared_attention_aa += actual * actual;
+                shared_attention_bb += expected * expected;
+                shared_attention_squared_error += delta * delta;
+                shared_attention_max_abs =
+                    std::max(shared_attention_max_abs, std::abs(delta));
+            }
+            for (int warmup = 0; warmup < 5; ++warmup)
+                static_cast<void>(run_shared_attention_layer());
+            std::vector<double> shared_attention_gpu;
+            for (int iteration = 0; iteration < 31; ++iteration) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 241));
+                shared_attention_gpu.push_back(run_shared_attention_layer());
             }
 
             const auto run_attention_half = [&](const bool include_mlp,
@@ -4130,6 +4373,15 @@ int main(int argc, char **argv) {
                 << ",\"shared_gdn_layer_rmse\":"
                 << std::sqrt(shared_gdn_layer_squared_error / 10240.0)
                 << ",\"shared_gdn_layer_max_abs\":" << shared_gdn_layer_max_abs
+                << ",\"shared_attention_first_gpu_ms\":" << shared_attention_first_gpu
+                << ",\"shared_attention_gpu_median_ms\":" << median(shared_attention_gpu)
+                << ",\"shared_attention_oracle_ms\":" << shared_attention_oracle.median_ms
+                << ",\"shared_attention_cosine\":"
+                << shared_attention_dot /
+                       std::sqrt(shared_attention_aa * shared_attention_bb)
+                << ",\"shared_attention_rmse\":"
+                << std::sqrt(shared_attention_squared_error / 10240.0)
+                << ",\"shared_attention_max_abs\":" << shared_attention_max_abs
                 << ",\"gdn_projection_max_abs\":" << gdn_projection_max_abs
                 << ",\"gdn_projection_nonfinite\":[" << gdn_projection_nonfinite[0] << ','
                 << gdn_projection_nonfinite[1] << ',' << gdn_projection_nonfinite[2] << ','

@@ -193,12 +193,29 @@ shared-only split projects about 21.8 ms of layer-device work, approximately
 45.9 token/s before embedding, final head and host overhead. This is useful
 headroom evidence, not an end-to-end result.
 
+The tenth gate directly measures the remaining combination: shared-only
+full-attention layer 11. It uses the same 131,072-token affine-Q8 cold KV,
+512-token exact QSA selection and current BF16 tail as the routed attention
+gate, with real layer-11 attention/HyperConnection weights and its shared-only
+MoE/healing path. Five independent 31-sample cache-evicted processes measured
+0.586--0.588 ms GPU. Complete output matched the MLX layer-11 oracle at
+0.999990 cosine, 1.44e-3 RMSE and 1.17e-2 maximum absolute error.
+
+All four deployed layer combinations are now represented by actual weights.
+Using conservative five-process upper medians--0.464 ms routed GDN, 0.729 ms
+routed full attention, 0.337 ms shared-only GDN and 0.588 ms shared-only full
+attention--the real 18/6/18/6 layer split totals about 22.3 ms of device layer
+work, or 44.8 token/s before embedding, final head and host overhead. The
+40-token/s no-MTP target is therefore no longer blocked by the layer-kernel
+compute bound, but only runtime integration and non-layer overhead can establish
+the end-to-end result.
+
 The next acceptance gates are:
 
-1. validate a complete shared-only full-attention layer;
-2. integrate the persistent state and layer dispatch into the runtime;
-3. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
-4. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate.
+1. integrate the persistent state and layer dispatch into the runtime;
+2. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
+3. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate;
+4. move MTP verification onto the persistent backend and measure 60 token/s.
 
 Run the bounded primitive probe with:
 
