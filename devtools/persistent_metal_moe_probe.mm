@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 
 #include "qwen38/decoder_layer.hpp"
+#include "qwen38/gated_delta_net.hpp"
 #include "qwen38/hyper_connection.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
@@ -55,6 +56,13 @@ inline float q8_dot4(const device uchar* packed, const device bfloat* x) {
     float value = 0.0f;
     for (uint i = 0; i < 4; ++i) value += float(packed[i]) * float(x[i]);
     return value;
+}
+
+inline bfloat load_bf16_unaligned(const device uchar* bytes, ulong index) {
+    const ulong offset = index * 2;
+    const ushort bits = ushort(ushort(bytes[offset]) |
+                               ushort(ushort(bytes[offset + 1]) << 8));
+    return as_type<bfloat>(bits);
 }
 
 kernel void q3_gate_up(
@@ -731,6 +739,165 @@ kernel void attention_output_projection(
         dot += float(scale[row * 192 + base / 32]) *
                 q4_dot8(weight + row * 3072 + base / 2, input + base) +
             float(bias[row * 192 + base / 32]) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[row] = bfloat(dot);
+}
+
+kernel void q4_input_projection(
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]], constant uint& rows [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 2560; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * 80 + base / 32)) *
+                q4_dot8(weight + row * 1280 + base / 2, input + base) +
+            float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[row] = bfloat(dot);
+}
+
+kernel void gdn_prework(
+    const device bfloat* projected [[buffer(0)]], device bfloat* convolution [[buffer(1)]],
+    const device uchar* convolution_weight [[buffer(2)]],
+    const device uchar* decay_log [[buffer(3)]], const device uchar* decay_bias [[buffer(4)]],
+    device bfloat* query [[buffer(5)]], device bfloat* key [[buffer(6)]],
+    device bfloat* value [[buffer(7)]], device bfloat* decay [[buffer(8)]],
+    device bfloat* beta [[buffer(9)]], uint lane [[thread_index_in_simdgroup]],
+    uint logical_head [[threadgroup_position_in_grid]]) {
+    constexpr uint hk = 16, hv = 48, dimension = 128, width = 10240;
+    const bool is_query = logical_head < hk;
+    const bool is_key = logical_head >= hk && logical_head < 2 * hk;
+    const uint head = is_query ? logical_head : (is_key ? logical_head - hk
+                                                       : logical_head - 2 * hk);
+    const uint channel_base = is_query ? head * dimension
+        : (is_key ? hk * dimension + head * dimension
+                  : 2 * hk * dimension + head * dimension);
+    float square_sum = 0.0f;
+    bfloat activated[4];
+    for (uint item = 0; item < 4; ++item) {
+        const uint channel = channel_base + lane * 4 + item;
+        float sum = 0.0f;
+        for (uint tap = 0; tap < 3; ++tap)
+            sum += float(convolution[tap * width + channel]) *
+                   float(load_bf16_unaligned(convolution_weight, channel * 4 + tap));
+        sum += float(projected[channel]) *
+               float(load_bf16_unaligned(convolution_weight, channel * 4 + 3));
+        const bfloat convolved = bfloat(sum);
+        const bfloat small = bfloat(1.0f) /
+            bfloat(1.0f + metal::exp(metal::abs(float(convolved))));
+        activated[item] = bfloat(float(convolved) *
+            float(convolved < bfloat(0.0f) ? small : bfloat(1.0f) - small));
+        square_sum += float(activated[item]) * float(activated[item]);
+        convolution[channel] = convolution[width + channel];
+        convolution[width + channel] = convolution[2 * width + channel];
+        convolution[2 * width + channel] = projected[channel];
+    }
+    if (is_query || is_key) {
+        square_sum = simd_sum(square_sum);
+        const float inverse_rms = rsqrt(square_sum / 128.0f + 1.0e-6f);
+        const float scale = is_query ? (1.0f / 128.0f) : (1.0f / sqrt(128.0f));
+        device bfloat* destination = is_query ? query : key;
+        for (uint item = 0; item < 4; ++item)
+            destination[head * dimension + lane * 4 + item] =
+                bfloat(scale * float(bfloat(float(activated[item]) * inverse_rms)));
+    } else {
+        for (uint item = 0; item < 4; ++item)
+            value[head * dimension + lane * 4 + item] = activated[item];
+        if (lane == 0) {
+            const bfloat beta_input = projected[16384 + head];
+            beta[head] = bfloat(1.0f / (1.0f + metal::exp(-float(beta_input))));
+            const bfloat biased = bfloat(float(projected[16432 + head]) +
+                                         float(load_bf16_unaligned(decay_bias, head)));
+            const float softplus = metal::log(1.0f + metal::exp(float(biased)));
+            decay[head] = bfloat(metal::exp(
+                -metal::exp(float(load_bf16_unaligned(decay_log, head))) * softplus));
+        }
+    }
+}
+
+kernel void gdn_recurrence(
+    const device bfloat* query [[buffer(0)]], const device bfloat* key [[buffer(1)]],
+    const device bfloat* value [[buffer(2)]], const device bfloat* decay [[buffer(3)]],
+    const device bfloat* beta [[buffer(4)]], device bfloat* recurrent [[buffer(5)]],
+    device bfloat* output [[buffer(6)]], uint lane [[thread_index_in_simdgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+    constexpr uint dimension = 128, value_dimension = 128;
+    const uint dv = group.x, hv = group.y, hk = hv / 3;
+    device bfloat* state = recurrent + (hv * value_dimension + dv) * dimension;
+    bfloat local[4];
+    bfloat recalled = bfloat(0.0f);
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane * 4 + item;
+        local[item] = bfloat(float(state[component]) * float(decay[hv]));
+        const bfloat product = bfloat(float(local[item]) *
+                                      float(key[hk * dimension + component]));
+        recalled = bfloat(float(recalled) + float(product));
+    }
+    recalled = bfloat(simd_sum(float(recalled)));
+    const bfloat residual = bfloat(float(value[hv * value_dimension + dv]) - float(recalled));
+    const bfloat delta = bfloat(float(residual) * float(beta[hv]));
+    bfloat result = bfloat(0.0f);
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane * 4 + item;
+        const bfloat update = bfloat(float(key[hk * dimension + component]) * float(delta));
+        local[item] = bfloat(float(local[item]) + float(update));
+        state[component] = local[item];
+        const bfloat product = bfloat(float(local[item]) *
+                                      float(query[hk * dimension + component]));
+        result = bfloat(float(result) + float(product));
+    }
+    result = bfloat(simd_sum(float(result)));
+    if (lane == 0) output[hv * value_dimension + dv] = result;
+}
+
+kernel void gdn_norm_gate(
+    const device bfloat* recurrent_output [[buffer(0)]],
+    const device bfloat* projected [[buffer(1)]], const device uchar* norm [[buffer(2)]],
+    device bfloat* output [[buffer(3)]], uint lane [[thread_index_in_simdgroup]],
+    uint head [[threadgroup_position_in_grid]]) {
+    float values[4];
+    float square_sum = 0.0f;
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane * 4 + item;
+        values[item] = float(recurrent_output[head * 128 + component]);
+        square_sum += values[item] * values[item];
+    }
+    square_sum = simd_sum(square_sum);
+    const float inverse_rms = rsqrt(square_sum / 128.0f + 1.0e-6f);
+    for (uint item = 0; item < 4; ++item) {
+        const uint component = lane * 4 + item;
+        const bfloat normalized = bfloat(
+            values[item] * inverse_rms * float(load_bf16_unaligned(norm, component)));
+        const bfloat raw_gate = projected[10240 + head * 128 + component];
+        const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(raw_gate))));
+        output[head * 128 + component] = bfloat(float(normalized) * float(gate));
+    }
+}
+
+kernel void gdn_output_projection(
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4 + simd;
+    if (row >= 2560) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 6144; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * 192 + base / 32)) *
+                q4_dot8(weight + row * 3072 + base / 2, input + base) +
+            float(load_bf16_unaligned(bias, row * 192 + base / 32)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) output[row] = bfloat(dot);
@@ -1896,6 +2063,62 @@ std::vector<std::vector<float>> mlx_full_layer_trajectory_oracle(
     return outputs;
 }
 
+struct GdnOracleResult {
+    std::vector<float> output;
+    std::vector<float> convolution;
+    std::vector<float> recurrent;
+};
+
+GdnOracleResult mlx_gdn_oracle(const qwen38::ModelManifest &manifest,
+                               const std::string &prefix,
+                               std::span<const std::uint16_t> input_values) {
+    setenv("QWEN38_GDN_PREWORK", "1", 1);
+    setenv("QWEN38_GDN_NORM_GATE", "1", 1);
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::GatedDeltaNet gdn(store, prefix, manifest.config());
+    const auto input = MlxArray(
+        mlx_array_new_data(input_values.data(), std::array<int, 3>{1, 1, 2560}.data(), 3,
+                           MLX_BFLOAT16));
+    qwen38::GatedDeltaNetState state;
+    MlxArray output = gdn.forward_decode(input, state);
+    const std::array<const MlxArray *, 3> evaluated{&output, &state.convolution, &state.recurrent};
+    MlxArray::eval_all(evaluated);
+    return {output.astype(MLX_FLOAT32).to_float32(),
+            state.convolution.astype(MLX_FLOAT32).to_float32(),
+            state.recurrent.astype(MLX_FLOAT32).to_float32()};
+}
+
+struct GdnTrajectoryResult {
+    std::vector<std::vector<float>> outputs;
+    std::vector<float> convolution;
+    std::vector<float> recurrent;
+};
+
+GdnTrajectoryResult mlx_gdn_trajectory_oracle(
+    const qwen38::ModelManifest &manifest, const std::string &prefix,
+    std::span<const std::uint16_t> input_values, const std::uint32_t steps) {
+    setenv("QWEN38_GDN_PREWORK", "1", 1);
+    setenv("QWEN38_GDN_NORM_GATE", "1", 1);
+    qwen38::MlxTensorStore store(manifest);
+    qwen38::GatedDeltaNet gdn(store, prefix, manifest.config());
+    const std::array<int, 3> shape{1, 1, 2560};
+    MlxArray input(mlx_array_new_data(input_values.data(), shape.data(), 3, MLX_BFLOAT16));
+    qwen38::GatedDeltaNetState state;
+    GdnTrajectoryResult result;
+    result.outputs.reserve(steps);
+    for (std::uint32_t step = 0; step < steps; ++step) {
+        MlxArray output = gdn.forward_decode(input, state);
+        output.eval();
+        result.outputs.push_back(output.astype(MLX_FLOAT32).to_float32());
+        input = output.share();
+    }
+    const std::array<const MlxArray *, 2> evaluated{&state.convolution, &state.recurrent};
+    MlxArray::eval_all(evaluated);
+    result.convolution = state.convolution.astype(MLX_FLOAT32).to_float32();
+    result.recurrent = state.recurrent.astype(MLX_FLOAT32).to_float32();
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1937,6 +2160,16 @@ int main(int argc, char **argv) {
             const std::string attention_key_norm = attention_prefix + ".k_norm.weight";
             const std::string attention_index_norm =
                 attention_prefix + ".indexer.q_layernorm.weight";
+            const std::string gdn_prefix = "language_model.model.layers.0.linear_attn";
+            const auto gdn_qkv = projection(gdn_prefix + ".in_proj_qkv");
+            const auto gdn_z = projection(gdn_prefix + ".in_proj_z");
+            const auto gdn_beta = projection(gdn_prefix + ".in_proj_b");
+            const auto gdn_decay = projection(gdn_prefix + ".in_proj_a");
+            const auto gdn_output = projection(gdn_prefix + ".out_proj");
+            const std::string gdn_convolution = gdn_prefix + ".conv1d.weight";
+            const std::string gdn_decay_log = gdn_prefix + ".A_log";
+            const std::string gdn_decay_bias = gdn_prefix + ".dt_bias";
+            const std::string gdn_norm = gdn_prefix + ".norm.weight";
             const std::string healing_left = layer_prefix + ".T_delta_left";
             const std::string healing_right = layer_prefix + ".T_delta_right";
             const std::string shard_name = manifest.weight_map().at(gate.weight);
@@ -1983,6 +2216,11 @@ int main(int argc, char **argv) {
             const auto attention_gate_state = pipeline(device, library, @"attention_apply_gate");
             const auto attention_output_state =
                 pipeline(device, library, @"attention_output_projection");
+            const auto q4_input_state = pipeline(device, library, @"q4_input_projection");
+            const auto gdn_prework_state = pipeline(device, library, @"gdn_prework");
+            const auto gdn_recurrence_state = pipeline(device, library, @"gdn_recurrence");
+            const auto gdn_norm_gate_state = pipeline(device, library, @"gdn_norm_gate");
+            const auto gdn_output_state = pipeline(device, library, @"gdn_output_projection");
             const auto hc_write_state = pipeline(device, library, @"hc_write");
             const auto hc_normalize_state = pipeline(device, library, @"hc_normalize");
             const auto hc_down_state = pipeline(device, library, @"hc_down_injection");
@@ -1993,6 +2231,8 @@ int main(int argc, char **argv) {
             Shard router_shard(device, manifest.directory() / router_shard_name);
             Shard healing_shard(device,
                                 manifest.directory() / manifest.weight_map().at(healing_left));
+            Shard gdn_shard(device,
+                            manifest.directory() / manifest.weight_map().at(gdn_qkv.weight));
 
             std::vector<float> input_f32(hidden_size);
             for (int i = 0; i < hidden_size; ++i)
@@ -2183,6 +2423,39 @@ int main(int argc, char **argv) {
             id<MTLBuffer> attention_output_stream =
                 [device newBufferWithLength:10240 * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_projected =
+                [device newBufferWithLength:16480 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_convolution_state =
+                [device newBufferWithLength:3 * 10240 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_query_buffer =
+                [device newBufferWithLength:2048 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_key_buffer =
+                [device newBufferWithLength:2048 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_value_buffer =
+                [device newBufferWithLength:6144 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_decay_buffer =
+                [device newBufferWithLength:48 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_beta_buffer =
+                [device newBufferWithLength:48 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_recurrent_state_buffer =
+                [device newBufferWithLength:48ULL * 128 * 128 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_recurrent_output =
+                [device newBufferWithLength:6144 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_gated_output =
+                [device newBufferWithLength:6144 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
+            id<MTLBuffer> gdn_block_output =
+                [device newBufferWithLength:2560 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> logits = [device newBufferWithLength:512 * sizeof(float)
                                                        options:MTLResourceStorageModeShared];
             id<MTLBuffer> cache_evict = [device newBufferWithLength:64ULL * 1024 * 1024
@@ -2202,7 +2475,12 @@ int main(int argc, char **argv) {
                 attention_selector_query == nil || attention_query_normalized == nil ||
                 attention_key_normalized == nil || attention_hot_keys == nil ||
                 attention_hot_values == nil || qsa_pending_raw == nil || attention_gated == nil ||
-                attention_block_output == nil || attention_output_stream == nil)
+                attention_block_output == nil || attention_output_stream == nil ||
+                gdn_projected == nil || gdn_convolution_state == nil ||
+                gdn_query_buffer == nil || gdn_key_buffer == nil || gdn_value_buffer == nil ||
+                gdn_decay_buffer == nil || gdn_beta_buffer == nil ||
+                gdn_recurrent_state_buffer == nil || gdn_recurrent_output == nil ||
+                gdn_gated_output == nil || gdn_block_output == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
 
             auto *qkw = static_cast<std::uint32_t *>(qsa_key_weight.contents);
@@ -2220,6 +2498,149 @@ int main(int argc, char **argv) {
                 qkb[i] = bf16(-0.255F);
                 qvs[i] = bf16(0.0018F + static_cast<float>(i % 7) * 0.00004F);
                 qvb[i] = bf16(-0.230F);
+            }
+
+            const auto run_gdn = [&](const bool reset_state) {
+                if (reset_state) {
+                    std::memset(gdn_convolution_state.contents, 0,
+                                3 * 10240 * sizeof(std::uint16_t));
+                    std::memset(gdn_recurrent_state_buffer.contents, 0,
+                                48ULL * 128 * 128 * sizeof(std::uint16_t));
+                }
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> encoder = nil;
+                const auto encode_input_projection = [&](const ProjectionNames &projection,
+                                                         const std::uint32_t rows,
+                                                         const NSUInteger output_offset) {
+                    id<MTLComputeCommandEncoder> projection_encoder =
+                        [command computeCommandEncoder];
+                    [projection_encoder setComputePipelineState:q4_input_state];
+                    [projection_encoder setBuffer:input offset:0 atIndex:0];
+                    bind_projection(projection_encoder, gdn_shard, projection, 1);
+                    [projection_encoder setBuffer:gdn_projected
+                                           offset:output_offset * sizeof(std::uint16_t)
+                                          atIndex:4];
+                    [projection_encoder setBytes:&rows length:sizeof(rows) atIndex:5];
+                    [projection_encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
+                                                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [projection_encoder endEncoding];
+                };
+                encode_input_projection(gdn_qkv, 10240, 0);
+                encode_input_projection(gdn_z, 6144, 10240);
+                encode_input_projection(gdn_beta, 48, 16384);
+                encode_input_projection(gdn_decay, 48, 16432);
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_prework_state];
+                [encoder setBuffer:gdn_projected offset:0 atIndex:0];
+                [encoder setBuffer:gdn_convolution_state offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_shard, gdn_convolution, 2);
+                bind_tensor(encoder, gdn_shard, gdn_decay_log, 3);
+                bind_tensor(encoder, gdn_shard, gdn_decay_bias, 4);
+                [encoder setBuffer:gdn_query_buffer offset:0 atIndex:5];
+                [encoder setBuffer:gdn_key_buffer offset:0 atIndex:6];
+                [encoder setBuffer:gdn_value_buffer offset:0 atIndex:7];
+                [encoder setBuffer:gdn_decay_buffer offset:0 atIndex:8];
+                [encoder setBuffer:gdn_beta_buffer offset:0 atIndex:9];
+                [encoder dispatchThreadgroups:MTLSizeMake(80, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_recurrence_state];
+                [encoder setBuffer:gdn_query_buffer offset:0 atIndex:0];
+                [encoder setBuffer:gdn_key_buffer offset:0 atIndex:1];
+                [encoder setBuffer:gdn_value_buffer offset:0 atIndex:2];
+                [encoder setBuffer:gdn_decay_buffer offset:0 atIndex:3];
+                [encoder setBuffer:gdn_beta_buffer offset:0 atIndex:4];
+                [encoder setBuffer:gdn_recurrent_state_buffer offset:0 atIndex:5];
+                [encoder setBuffer:gdn_recurrent_output offset:0 atIndex:6];
+                [encoder dispatchThreadgroups:MTLSizeMake(128, 48, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_norm_gate_state];
+                [encoder setBuffer:gdn_recurrent_output offset:0 atIndex:0];
+                [encoder setBuffer:gdn_projected offset:0 atIndex:1];
+                bind_tensor(encoder, gdn_shard, gdn_norm, 2);
+                [encoder setBuffer:gdn_gated_output offset:0 atIndex:3];
+                [encoder dispatchThreadgroups:MTLSizeMake(48, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:gdn_output_state];
+                [encoder setBuffer:gdn_gated_output offset:0 atIndex:0];
+                bind_projection(encoder, gdn_shard, gdn_output, 1);
+                [encoder setBuffer:gdn_block_output offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+            };
+
+            static_cast<void>(run_gdn(true));
+            const auto gdn_projection_oracle = mlx_attention_projection_oracle(
+                manifest, gdn_qkv, gdn_z, gdn_beta, gdn_decay, input_f32);
+            const GdnOracleResult gdn_oracle = mlx_gdn_oracle(manifest, gdn_prefix, input_bf16);
+            const auto *gdn_projected_bits =
+                static_cast<const std::uint16_t *>(gdn_projected.contents);
+            const auto *gdn_direct_bits =
+                static_cast<const std::uint16_t *>(gdn_block_output.contents);
+            const auto *gdn_conv_bits =
+                static_cast<const std::uint16_t *>(gdn_convolution_state.contents);
+            const auto *gdn_recurrent_bits =
+                static_cast<const std::uint16_t *>(gdn_recurrent_state_buffer.contents);
+            double gdn_dot = 0.0, gdn_aa = 0.0, gdn_bb = 0.0, gdn_squared_error = 0.0;
+            double gdn_max_abs = 0.0, gdn_conv_max_abs = 0.0, gdn_recurrent_max_abs = 0.0;
+            double gdn_projection_max_abs = 0.0;
+            std::size_t gdn_direct_nonfinite = 0, gdn_oracle_nonfinite = 0;
+            std::array<std::size_t, 4> gdn_projection_nonfinite{};
+            for (std::size_t component = 0; component < 16480; ++component) {
+                const double actual = from_bf16(gdn_projected_bits[component]);
+                const double expected = gdn_projection_oracle[component];
+                const std::size_t section = component < 10240 ? 0
+                    : (component < 16384 ? 1 : (component < 16432 ? 2 : 3));
+                gdn_projection_nonfinite[section] += !std::isfinite(actual);
+                gdn_projection_max_abs =
+                    std::max(gdn_projection_max_abs, std::abs(actual - expected));
+            }
+            for (std::size_t component = 0; component < 2560; ++component) {
+                const double actual = from_bf16(gdn_direct_bits[component]);
+                const double expected = gdn_oracle.output[component];
+                gdn_direct_nonfinite += !std::isfinite(actual);
+                gdn_oracle_nonfinite += !std::isfinite(expected);
+                const double delta = actual - expected;
+                gdn_dot += actual * expected;
+                gdn_aa += actual * actual;
+                gdn_bb += expected * expected;
+                gdn_squared_error += delta * delta;
+                gdn_max_abs = std::max(gdn_max_abs, std::abs(delta));
+            }
+            for (std::size_t component = 0; component < gdn_oracle.convolution.size(); ++component)
+                gdn_conv_max_abs = std::max(
+                    gdn_conv_max_abs,
+                    std::abs(static_cast<double>(from_bf16(gdn_conv_bits[component]) -
+                                                 gdn_oracle.convolution[component])));
+            for (std::size_t component = 0; component < gdn_oracle.recurrent.size(); ++component)
+                gdn_recurrent_max_abs = std::max(
+                    gdn_recurrent_max_abs,
+                    std::abs(static_cast<double>(from_bf16(gdn_recurrent_bits[component]) -
+                                                 gdn_oracle.recurrent[component])));
+            if (gdn_direct_nonfinite != 0 || gdn_oracle_nonfinite != 0 ||
+                std::ranges::any_of(gdn_projection_nonfinite,
+                                    [](const std::size_t count) { return count != 0; }))
+                throw std::runtime_error("non-finite persistent GDN result");
+            for (int warmup = 0; warmup < 5; ++warmup) static_cast<void>(run_gdn(true));
+            std::vector<double> gdn_gpu;
+            for (int iteration = 0; iteration < 31; ++iteration) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(iteration + 181));
+                gdn_gpu.push_back(run_gdn(true));
             }
 
             const auto run_attention_half = [&](const bool include_mlp,
@@ -3114,6 +3535,51 @@ int main(int argc, char **argv) {
                 layer_squared_error += delta * delta;
                 layer_max_abs = std::max(layer_max_abs, std::abs(delta));
             }
+            const GdnTrajectoryResult gdn_trajectory_oracle =
+                mlx_gdn_trajectory_oracle(manifest, gdn_prefix, input_bf16, 4);
+            std::memcpy(input.contents, input_bf16.data(),
+                        input_bf16.size() * sizeof(std::uint16_t));
+            double gdn_trajectory_min_cosine = 1.0, gdn_trajectory_max_rmse = 0.0;
+            double gdn_trajectory_max_abs = 0.0;
+            for (std::uint32_t step = 0; step < 4; ++step) {
+                static_cast<void>(run_gdn(step == 0));
+                const auto *actual_bits =
+                    static_cast<const std::uint16_t *>(gdn_block_output.contents);
+                double dot = 0.0, aa = 0.0, bb = 0.0, squared_error = 0.0;
+                for (std::size_t component = 0; component < 2560; ++component) {
+                    const double actual = from_bf16(actual_bits[component]);
+                    const double expected = gdn_trajectory_oracle.outputs[step][component];
+                    const double delta = actual - expected;
+                    dot += actual * expected;
+                    aa += actual * actual;
+                    bb += expected * expected;
+                    squared_error += delta * delta;
+                    gdn_trajectory_max_abs =
+                        std::max(gdn_trajectory_max_abs, std::abs(delta));
+                }
+                gdn_trajectory_min_cosine =
+                    std::min(gdn_trajectory_min_cosine, dot / std::sqrt(aa * bb));
+                gdn_trajectory_max_rmse = std::max(
+                    gdn_trajectory_max_rmse, std::sqrt(squared_error / 2560.0));
+                std::memcpy(input.contents, actual_bits, 2560 * sizeof(std::uint16_t));
+            }
+            const auto *gdn_final_conv =
+                static_cast<const std::uint16_t *>(gdn_convolution_state.contents);
+            const auto *gdn_final_recurrent =
+                static_cast<const std::uint16_t *>(gdn_recurrent_state_buffer.contents);
+            double gdn_trajectory_conv_max_abs = 0.0, gdn_trajectory_recurrent_max_abs = 0.0;
+            for (std::size_t component = 0;
+                 component < gdn_trajectory_oracle.convolution.size(); ++component)
+                gdn_trajectory_conv_max_abs = std::max(
+                    gdn_trajectory_conv_max_abs,
+                    std::abs(static_cast<double>(from_bf16(gdn_final_conv[component]) -
+                                                 gdn_trajectory_oracle.convolution[component])));
+            for (std::size_t component = 0;
+                 component < gdn_trajectory_oracle.recurrent.size(); ++component)
+                gdn_trajectory_recurrent_max_abs = std::max(
+                    gdn_trajectory_recurrent_max_abs,
+                    std::abs(static_cast<double>(from_bf16(gdn_final_recurrent[component]) -
+                                                 gdn_trajectory_oracle.recurrent[component])));
             const auto trajectory_oracle = mlx_full_layer_trajectory_oracle(
                 manifest, stream_bf16, qsa_pooled_values, qkw, qks, qkb, qvw, qvs, qvb,
                 qsa_tokens, 4);
@@ -3158,8 +3624,28 @@ int main(int argc, char **argv) {
             }
             std::cout
                 << "{\"device\":\"" << device.name.UTF8String
-                << "\",\"layer\":3,\"experts\":10,\"mmap_backed\":true"
+                << "\",\"layer\":3,\"gdn_layer\":0,\"experts\":10,\"mmap_backed\":true"
                 << ",\"joined_gpu_median_ms\":" << median(joined)
+                << ",\"gdn_gpu_median_ms\":" << median(gdn_gpu)
+                << ",\"gdn_projection_max_abs\":" << gdn_projection_max_abs
+                << ",\"gdn_projection_nonfinite\":[" << gdn_projection_nonfinite[0] << ','
+                << gdn_projection_nonfinite[1] << ',' << gdn_projection_nonfinite[2] << ','
+                << gdn_projection_nonfinite[3] << ']'
+                << ",\"gdn_direct_nonfinite\":" << gdn_direct_nonfinite
+                << ",\"gdn_oracle_nonfinite\":" << gdn_oracle_nonfinite
+                << ",\"gdn_cosine\":" << gdn_dot / std::sqrt(gdn_aa * gdn_bb)
+                << ",\"gdn_rmse\":" << std::sqrt(gdn_squared_error / 2560.0)
+                << ",\"gdn_max_abs\":" << gdn_max_abs
+                << ",\"gdn_convolution_max_abs\":" << gdn_conv_max_abs
+                << ",\"gdn_recurrent_max_abs\":" << gdn_recurrent_max_abs
+                << ",\"gdn_trajectory_tokens\":4"
+                << ",\"gdn_trajectory_min_cosine\":" << gdn_trajectory_min_cosine
+                << ",\"gdn_trajectory_max_rmse\":" << gdn_trajectory_max_rmse
+                << ",\"gdn_trajectory_max_abs\":" << gdn_trajectory_max_abs
+                << ",\"gdn_trajectory_convolution_max_abs\":"
+                << gdn_trajectory_conv_max_abs
+                << ",\"gdn_trajectory_recurrent_max_abs\":"
+                << gdn_trajectory_recurrent_max_abs
                 << ",\"qsa_selector_gpu_median_ms\":" << median(qsa_selector_gpu)
                 << ",\"qsa_selector_wall_median_ms\":" << median(qsa_selector_wall)
                 << ",\"qsa_selected_match\":" << (qsa_selected_match ? "true" : "false")

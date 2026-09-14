@@ -132,9 +132,32 @@ deterministic recursive stream, a synthetic 131,072-token affine-Q8 cold KV
 history, a 512-token QSA budget, greedy/no-sampling execution and no MTP. It is
 a layer-backend correctness gate, not whole-model throughput or retrieval data.
 
+The seventh gate covers the complete stateful GDN block used by the 36 linear
+attention layers. Four real Q4/group-32 input projections, width-four causal
+convolution and state shift, normalized Q/K, sigmoid beta, exponential decay,
+the in-place BF16 `[48,128,128]` recurrence, sigmoid-gated RMSNorm and the real
+Q4/group-32 output projection execute in one command buffer. Across five
+independent processes with 31 cache-evicted samples each, GPU medians were
+0.232--0.276 ms. First-token output matched MLX at
+0.999790 cosine, 2.45e-4 RMSE and 1.10e-3 maximum absolute error; recurrent
+state max error was 3.97e-4. A four-token recursive trajectory bounded output
+error at 2.45e-4 RMSE/1.10e-3 max and final recurrent-state error at 5.49e-4,
+so the state error did not grow materially in this gate.
+
+This work also exposed a required loader rule: safetensors tensor payloads are
+not guaranteed to begin at naturally aligned addresses. Several Niwaki layer-0
+BF16 scale/bias tensors begin at odd byte offsets. Binding those bytes directly
+as `bfloat*` produced non-finite results even though packed U32 weights read
+correctly. The retained kernel reads such BF16 parameters bytewise and
+reconstructs their 16-bit value; persistent runtime imports must use the same
+unaligned-safe contract or copy into aligned storage. Measurements used Apple
+M5 Pro 64 GiB, real Niwaki 99B layer-0 weights, deterministic recursive BF16
+inputs, zero initial GDN state, greedy/no-sampling execution and no MTP. This is
+still a block-level result without HyperConnection, MoE or whole-model timing.
+
 The next acceptance gates are:
 
-1. extend the same backend contract to GDN layers;
+1. connect GDN, HyperConnection and the correct routed/shared-only MoE variants;
 2. integrate the persistent state and layer dispatch into the runtime;
 3. require an adjacent 16K needle improvement, then repeat at 65K and 128K;
 4. validate long-run Q8 hot-slab flushes before the 40 GiB memory gate.
