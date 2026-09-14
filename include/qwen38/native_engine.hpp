@@ -57,11 +57,13 @@ public:
 
     [[nodiscard]] GenerationResult complete(
         std::string_view prompt,
-        std::size_t max_tokens) override;
+        std::size_t max_tokens,
+        const SamplingOptions& sampling = {}) override;
     [[nodiscard]] GenerationResult complete_stream(
         std::string_view prompt,
         std::size_t max_tokens,
-        const TextDeltaCallback& on_delta) override;
+        const TextDeltaCallback& on_delta,
+        const SamplingOptions& sampling = {}) override;
     void clear_cache() override;
 
 private:
@@ -96,7 +98,8 @@ private:
     [[nodiscard]] GenerationResult complete_impl(
         std::string_view prompt,
         std::size_t max_tokens,
-        const TextDeltaCallback* on_delta);
+        const TextDeltaCallback* on_delta,
+        const SamplingOptions& sampling);
     [[nodiscard]] PersistedPrefixState snapshot_prefix_cache(
         const PrefixCacheEntry& entry) const;
     bool persist_prefix_cache(const PrefixCacheEntry& entry) const;
@@ -117,11 +120,13 @@ public:
 
     [[nodiscard]] GenerationResult complete(
         std::string_view prompt,
-        std::size_t max_tokens) override;
+        std::size_t max_tokens,
+        const SamplingOptions& sampling = {}) override;
     [[nodiscard]] GenerationResult complete_stream(
         std::string_view prompt,
         std::size_t max_tokens,
-        const TextDeltaCallback& on_delta) override;
+        const TextDeltaCallback& on_delta,
+        const SamplingOptions& sampling = {}) override;
     void clear_cache() override;
 
 private:

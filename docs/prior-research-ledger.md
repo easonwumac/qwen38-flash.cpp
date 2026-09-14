@@ -356,6 +356,16 @@ throughput improvement has yet been measured. If the previous SSD write failed
 or its entry was evicted, a later request may need to recompute the discarded
 prefix; inference arithmetic is unchanged.
 
+2026-09-14 thinking evaluation correction: do not evaluate Qwen thinking mode
+with greedy argmax. In a three-prompt IFBench pilot, temperature-zero xhigh
+thinking repeated or exhausted 4,096 tokens and scored 1/3 strict. Implementing
+bounded top-k/top-p sampling changed the matched pilot to 2/3 strict, with two
+properly separated final answers and one remaining length exhaustion. Sampled
+generation intentionally bypasses greedy MTP, history/context drafts, and the
+persistent greedy backend. Future acceleration requires stochastic speculative
+acceptance; re-enabling greedy verification for sampled requests is a rejected
+shortcut.
+
 The implementation order is deliberately narrow:
 
 1. **Exact MTP model and lifecycle.** Load the Q8 sidecar, apply delta norms,

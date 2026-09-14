@@ -41,7 +41,20 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-thinking", action="store_true")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("low", "medium", "xhigh"),
+        default="xhigh",
+        help="Thinking budget hint; matches the model chat-template default (xhigh).",
+    )
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    temperature = args.temperature
+    if temperature is None:
+        temperature = 0.0 if args.no_thinking else 1.0
 
     raw_input = args.input.read_bytes()
     cases = load_jsonl(args.input)
@@ -69,12 +82,15 @@ def main() -> int:
         body = {
             "model": args.model,
             "messages": [{"role": "user", "content": case["prompt"]}],
-            "temperature": 0,
+            "temperature": temperature,
             "max_tokens": args.max_tokens,
             "stream": False,
         }
         if args.no_thinking:
             body["thinking"] = False
+        else:
+            body["reasoning_effort"] = args.reasoning_effort
+            body.update(top_p=args.top_p, top_k=args.top_k, seed=args.seed)
         request = urllib.request.Request(
             args.url.rstrip("/") + "/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -130,8 +146,12 @@ def main() -> int:
     summary = {
         "protocol": {
             "benchmark": "IFBench single-turn OOD test",
-            "temperature": 0,
+            "temperature": temperature,
+            "top_p": None if args.no_thinking else args.top_p,
+            "top_k": None if args.no_thinking else args.top_k,
+            "seed": None if args.no_thinking else args.seed,
             "thinking": not args.no_thinking,
+            "reasoning_effort": None if args.no_thinking else args.reasoning_effort,
             "max_tokens": args.max_tokens,
             "dataset_sha256": hashlib.sha256(raw_input).hexdigest(),
             "dataset_rows": len(load_jsonl(args.input)),

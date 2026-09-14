@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <iomanip>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <sstream>
 #include <thread>
@@ -69,6 +71,66 @@ std::uint32_t argmax_token(const MlxArray& logits, const ModelDecodeState& state
     MlxArray token = logits.argmax_all();
     eval_with_decode_state(token, state);
     return token.item_uint32();
+}
+
+std::uint32_t sample_token(
+    const MlxArray& logits,
+    const ModelDecodeState& state,
+    const SamplingOptions& options,
+    std::mt19937_64& random) {
+    if (options.temperature <= 0.0F) return argmax_token(logits, state);
+    const std::vector<int> shape = logits.shape();
+    if (shape.empty() || shape.back() <= 0) {
+        throw std::runtime_error("sampling requires a vocabulary axis");
+    }
+    const int vocabulary = shape.back();
+    const int count = static_cast<int>(std::min<std::size_t>(
+        options.top_k, static_cast<std::size_t>(vocabulary)));
+    if (count <= 0) throw std::runtime_error("sampling requires top_k to be positive");
+
+    std::vector<int> start(shape.size(), 0);
+    std::vector<int> stop = shape;
+    std::vector<int> strides(shape.size(), 1);
+    start.back() = vocabulary - count;
+    MlxArray indices = logits.argpartition_axis(-count, -1)
+                           .slice(start, stop, strides)
+                           .reshape(std::vector<int>{count});
+    MlxArray values = MlxArray::take(logits, indices)
+                          .reshape(std::vector<int>{count})
+                          .astype(MLX_FLOAT32);
+    eval_with_decode_state(values, state);
+    const std::vector<float> candidate_values = values.to_float32();
+    const std::vector<float> candidate_indices = indices.astype(MLX_FLOAT32).to_float32();
+    std::vector<std::size_t> order(static_cast<std::size_t>(count));
+    for (std::size_t index = 0; index < order.size(); ++index) order[index] = index;
+    std::ranges::sort(order, {}, [&](const std::size_t index) {
+        return -candidate_values[index];
+    });
+
+    const float maximum = candidate_values[order.front()];
+    std::vector<double> weights(order.size());
+    double total = 0.0;
+    for (std::size_t rank = 0; rank < order.size(); ++rank) {
+        weights[rank] = std::exp(
+            static_cast<double>(candidate_values[order[rank]] - maximum) /
+            static_cast<double>(options.temperature));
+        total += weights[rank];
+    }
+    double retained = 0.0;
+    std::size_t retained_count = 0;
+    do {
+        retained += weights[retained_count++];
+    } while (retained_count < weights.size() && retained / total < options.top_p);
+    std::uniform_real_distribution<double> draw(0.0, retained);
+    const double target = draw(random);
+    double cumulative = 0.0;
+    for (std::size_t rank = 0; rank < retained_count; ++rank) {
+        cumulative += weights[rank];
+        if (target <= cumulative) {
+            return static_cast<std::uint32_t>(candidate_indices[order[rank]]);
+        }
+    }
+    return static_cast<std::uint32_t>(candidate_indices[order[retained_count - 1]]);
 }
 
 bool is_prefix(
@@ -377,26 +439,38 @@ NativeEngine::NativeEngine(
 
 GenerationResult NativeEngine::complete(
     const std::string_view prompt,
-    const std::size_t max_tokens) {
-    return complete_impl(prompt, max_tokens, nullptr);
+    const std::size_t max_tokens,
+    const SamplingOptions& sampling) {
+    return complete_impl(prompt, max_tokens, nullptr, sampling);
 }
 
 GenerationResult NativeEngine::complete_stream(
     const std::string_view prompt,
     const std::size_t max_tokens,
-    const TextDeltaCallback& on_delta) {
-    return complete_impl(prompt, max_tokens, &on_delta);
+    const TextDeltaCallback& on_delta,
+    const SamplingOptions& sampling) {
+    return complete_impl(prompt, max_tokens, &on_delta, sampling);
 }
 
 GenerationResult NativeEngine::complete_impl(
     const std::string_view prompt,
     const std::size_t max_tokens,
-    const TextDeltaCallback* on_delta) {
+    const TextDeltaCallback* on_delta,
+    const SamplingOptions& sampling) {
     if (max_tokens == 0 || max_tokens > options_.max_generation_tokens) {
         throw std::runtime_error(
             "max_tokens must be between 1 and the configured generation limit (" +
             std::to_string(options_.max_generation_tokens) + ")");
     }
+    if (sampling.temperature < 0.0F || sampling.top_p <= 0.0F ||
+        sampling.top_p > 1.0F ||
+        (sampling.temperature > 0.0F &&
+            (sampling.top_k == 0 || sampling.top_k > 256))) {
+        throw std::runtime_error(
+            "sampling requires temperature >= 0, top_p in (0, 1], and top_k in 1..256");
+    }
+    const bool sampling_enabled = sampling.temperature > 0.0F;
+    std::mt19937_64 sampling_random(sampling.seed);
     std::scoped_lock lock(inference_mutex_);
     if (persistent_backend_ != nullptr) {
         persistent_backend_->release_shared_weights();
@@ -681,7 +755,7 @@ GenerationResult NativeEngine::complete_impl(
         persistent_active = true;
         persistent_reset = false;
     };
-    if (persistent_backend_ != nullptr && mtp_head_ == nullptr &&
+    if (!sampling_enabled && persistent_backend_ != nullptr && mtp_head_ == nullptr &&
         persistent_anchor_remaining == 0) {
         const auto prepare_started = std::chrono::steady_clock::now();
         if (!persistent_reset) {
@@ -701,11 +775,11 @@ GenerationResult NativeEngine::complete_impl(
                   ? HistoryDraftMode::disabled
                   : HistoryDraftMode::forced);
     HistoryDraftPolicy history_draft_policy(history_draft_mode);
-    const bool history_draft_enabled = history_draft_policy.enabled();
+    const bool history_draft_enabled = !sampling_enabled && history_draft_policy.enabled();
     HistoryDraftCache history_draft;
     if (history_draft_enabled) history_draft.append(prompt_tokens);
     const char* context_copy_environment = std::getenv("QWEN38_CONTEXT_COPY");
-    const bool context_copy_enabled = context_copy_environment != nullptr &&
+    const bool context_copy_enabled = !sampling_enabled && context_copy_environment != nullptr &&
         std::string_view(context_copy_environment) == "1" && mtp_head_ != nullptr;
     std::size_t context_copy_max_tokens = 16;
     if (const char* value = std::getenv("QWEN38_CONTEXT_COPY_MAX_TOKENS")) {
@@ -730,7 +804,7 @@ GenerationResult NativeEngine::complete_impl(
     std::size_t context_copy_backoff = 64;
     double context_copy_acceptance_ema = 0.5;
     MtpProfitabilityGuard profitability_guard;
-    bool mtp_profitable = mtp_head_ != nullptr &&
+    bool mtp_profitable = !sampling_enabled && mtp_head_ != nullptr &&
         cached_mtp_profitability.value_or(true);
     result.mtp_profitability_cache_skip =
         cached_mtp_profitability.has_value() && !*cached_mtp_profitability;
@@ -743,7 +817,7 @@ GenerationResult NativeEngine::complete_impl(
         }
     }
     MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
-    result.mtp_final_depth = depth_policy.depth();
+    result.mtp_final_depth = sampling_enabled ? 0 : depth_policy.depth();
     bool stopped_on_terminator = false;
     const auto is_stop_token = [&](const std::uint32_t token) {
         return token == tensors_.manifest().config().end_of_sequence_token ||
@@ -830,7 +904,8 @@ GenerationResult NativeEngine::complete_impl(
                 ++state.token_count;
             } else {
                 TargetDecodeStep step = model_.forward_decode_capture(current, state);
-                const std::uint32_t token = argmax_token(step.logits, state);
+                const std::uint32_t token = sample_token(
+                    step.logits, state, sampling, sampling_random);
                 previous_target_stream = std::move(step.pre_mixer_stream);
                 current = token;
                 if (persistent_anchor_remaining != 0 &&
@@ -1006,7 +1081,7 @@ GenerationResult NativeEngine::complete_impl(
         if (should_fallback) {
             mtp_profitable = false;
             ++result.mtp_fallbacks;
-            if (persistent_backend_ != nullptr && !persistent_active) {
+            if (!sampling_enabled && persistent_backend_ != nullptr && !persistent_active) {
                 activate_persistent();
             }
         }
@@ -1196,17 +1271,18 @@ struct NativeEngineExecutor::Impl final {
     GenerationResult generate(
         std::string prompt,
         const std::size_t max_tokens,
-        std::optional<TextDeltaCallback> on_delta) {
+        std::optional<TextDeltaCallback> on_delta,
+        SamplingOptions sampling) {
         auto result = std::make_shared<std::promise<GenerationResult>>();
         std::future<GenerationResult> future = result->get_future();
-        enqueue([prompt = std::move(prompt), max_tokens,
+        enqueue([prompt = std::move(prompt), max_tokens, sampling,
                     on_delta = std::move(on_delta), result](NativeEngine& native) mutable {
             try {
                 if (on_delta.has_value()) {
                     result->set_value(native.complete_stream(
-                        prompt, max_tokens, *on_delta));
+                        prompt, max_tokens, *on_delta, sampling));
                 } else {
-                    result->set_value(native.complete(prompt, max_tokens));
+                    result->set_value(native.complete(prompt, max_tokens, sampling));
                 }
             } catch (...) {
                 result->set_exception(std::current_exception());
@@ -1257,15 +1333,17 @@ NativeEngineExecutor::~NativeEngineExecutor() = default;
 
 GenerationResult NativeEngineExecutor::complete(
     const std::string_view prompt,
-    const std::size_t max_tokens) {
-    return impl_->generate(std::string(prompt), max_tokens, std::nullopt);
+    const std::size_t max_tokens,
+    const SamplingOptions& sampling) {
+    return impl_->generate(std::string(prompt), max_tokens, std::nullopt, sampling);
 }
 
 GenerationResult NativeEngineExecutor::complete_stream(
     const std::string_view prompt,
     const std::size_t max_tokens,
-    const TextDeltaCallback& on_delta) {
-    return impl_->generate(std::string(prompt), max_tokens, on_delta);
+    const TextDeltaCallback& on_delta,
+    const SamplingOptions& sampling) {
+    return impl_->generate(std::string(prompt), max_tokens, on_delta, sampling);
 }
 
 void NativeEngineExecutor::clear_cache() {

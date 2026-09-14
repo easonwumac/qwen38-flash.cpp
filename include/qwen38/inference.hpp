@@ -48,17 +48,26 @@ struct GenerationResult {
     std::size_t context_copy_suspensions{0};
 };
 
+struct SamplingOptions {
+    float temperature{0.0F};
+    float top_p{1.0F};
+    std::size_t top_k{0};
+    std::uint64_t seed{0};
+};
+
 class InferenceEngine {
 public:
     virtual ~InferenceEngine() = default;
     [[nodiscard]] virtual GenerationResult complete(
         std::string_view prompt,
-        std::size_t max_tokens) = 0;
+        std::size_t max_tokens,
+        const SamplingOptions& sampling = {}) = 0;
     [[nodiscard]] virtual GenerationResult complete_stream(
         std::string_view prompt,
         std::size_t max_tokens,
-        const TextDeltaCallback& on_delta) {
-        GenerationResult result = complete(prompt, max_tokens);
+        const TextDeltaCallback& on_delta,
+        const SamplingOptions& sampling = {}) {
+        GenerationResult result = complete(prompt, max_tokens, sampling);
         if (!result.text.empty() && !on_delta(result.text)) {
             result.finish_reason = "cancelled";
         }

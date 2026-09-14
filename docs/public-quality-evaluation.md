@@ -84,11 +84,30 @@ or exhausted its allowance in both this engine and a stock `mlx-vlm` generation
 on the same checkpoint, consistent with the checkpoint author's documented
 long/repetitive reasoning limitation.
 
+### Thinking-mode qualification
+
+Thinking results must not reuse the temperature-zero contract above. Qwen's
+published guidance warns that greedy thinking can degrade quality and repeat
+indefinitely. The server now implements request-level temperature, top-p,
+top-k, and deterministic seed controls. Sampling selects the candidate set on
+the accelerator and transfers only the bounded top-k logits for the seeded CPU
+draw. Because the retained MTP and persistent backends are greedy, the runtime
+automatically bypasses them for sampled requests rather than applying invalid
+speculative acceptance semantics.
+
+A three-prompt bring-up used REAP-288, xhigh thinking, temperature 1.0, top-p
+0.95, top-k 20, seed 0, maximum 4,096 generated tokens, and the same machine
+and official scorer as above. Strict and loose prompt accuracy were both 2/3.
+Two responses closed normally at 3,982 and 2,060 tokens; the third reached the
+4,096-token limit. Aggregate decode was 35.09 tok/s (per-request median 35.89,
+range 33.79--36.20). This pilot validates the sampling and response-splitting
+path; three prompts are not an estimate of full-suite accuracy.
+
 ## Other published Qwen3.8-27B rows
 
-GPQA Diamond and LiveCodeBench v6 remain pending because the published Qwen
-generation recommendations use sampling (`temperature`, `top_p`, and `top_k`),
-while this engine currently implements target-authoritative greedy decoding.
+GPQA Diamond and LiveCodeBench v6 remain pending until their full harness and
+prompt contracts are frozen. The engine now supports their required sampling
+controls, but sampling support alone is not benchmark parity.
 Terminal-Bench, SWE-bench Pro, NL2Repo, and DeepSWE require an agent harness and
 tool loop; HLE additionally uses an external GPT-4o judge. None should be
 reported as same-protocol results until those dependencies and sampling

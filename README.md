@@ -86,6 +86,9 @@ reference. Full conditions are in the
   optional MTP state can be reused in RAM or restored from bounded SSD storage.
 - **Thread-affine serving:** one accelerator executor owns MLX state while four
   bounded HTTP workers keep health and status endpoints responsive.
+- **Correct thinking sampling:** OpenAI-compatible temperature, top-p, top-k,
+  and seed controls use device-side top-k selection and a bounded CPU draw.
+  Sampling automatically bypasses greedy-only speculative and persistent paths.
 
 ## Final evaluation
 

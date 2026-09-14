@@ -14,9 +14,11 @@ class FakeEngine final : public qwen38::InferenceEngine {
 public:
     qwen38::GenerationResult complete(
         std::string_view prompt,
-        const std::size_t max_tokens) override {
+        const std::size_t max_tokens,
+        const qwen38::SamplingOptions& sampling = {}) override {
         last_prompt = std::string(prompt);
         last_max_tokens = max_tokens;
+        last_sampling = sampling;
         return {
             .text = response_text,
             .tokens = {1, 2},
@@ -30,9 +32,10 @@ public:
     qwen38::GenerationResult complete_stream(
         std::string_view prompt,
         const std::size_t max_tokens,
-        const qwen38::TextDeltaCallback& on_delta) override {
+        const qwen38::TextDeltaCallback& on_delta,
+        const qwen38::SamplingOptions& sampling = {}) override {
         ++stream_calls;
-        qwen38::GenerationResult result = complete(prompt, max_tokens);
+        qwen38::GenerationResult result = complete(prompt, max_tokens, sampling);
         if (!on_delta(result.text)) {
             stream_cancelled = true;
             result.finish_reason = "cancelled";
@@ -42,6 +45,7 @@ public:
     void clear_cache() override { cleared = true; }
     std::string last_prompt;
     std::size_t last_max_tokens{0};
+    qwen38::SamplingOptions last_sampling;
     std::string response_text{"answer"};
     bool cleared{false};
     std::size_t stream_calls{0};
@@ -101,6 +105,22 @@ void run_api_tests() {
         "/v1/completions", R"({"prompt":"hello","max_tokens":512})"));
     QWEN38_CHECK(long_completion.status == 200);
     QWEN38_CHECK(engine.last_max_tokens == 512);
+    const auto sampled_completion = inference_api.handle(post(
+        "/v1/completions",
+        R"({"prompt":"hello","temperature":0.6,"top_p":0.95,"top_k":20,"seed":42})"));
+    QWEN38_CHECK(sampled_completion.status == 200);
+    QWEN38_CHECK(engine.last_sampling.temperature == 0.6F);
+    QWEN38_CHECK(engine.last_sampling.top_p == 0.95F);
+    QWEN38_CHECK(engine.last_sampling.top_k == 20);
+    QWEN38_CHECK(engine.last_sampling.seed == 42);
+    QWEN38_CHECK(inference_api.handle(post(
+        "/v1/completions",
+        R"({"prompt":"hello","temperature":0.6,"top_p":0.95,"top_k":0})"))
+        .status == 400);
+    QWEN38_CHECK(inference_api.handle(post(
+        "/v1/completions",
+        R"({"prompt":"hello","temperature":-1,"top_k":20})"))
+        .status == 400);
     const auto invalid_token_limit = inference_api.handle(post(
         "/v1/completions", R"({"prompt":"hello","max_tokens":0})"));
     QWEN38_CHECK(invalid_token_limit.status == 400);
@@ -228,7 +248,7 @@ void run_api_tests() {
         [](const std::string_view) { return false; });
     QWEN38_CHECK(engine.stream_calls == stream_calls_before_early_disconnect);
     QWEN38_CHECK(runtime.snapshot().requests_cancelled == 2);
-    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 24);
+    QWEN38_CHECK(runtime.snapshot().generated_tokens_total == 26);
     QWEN38_CHECK(inference_api.handle(get("/v1/status")).body.find(
         "\"cancelled\":2") != std::string::npos);
     QWEN38_CHECK(inference_api.handle(get("/metrics")).body.find(

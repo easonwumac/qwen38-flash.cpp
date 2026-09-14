@@ -35,6 +35,34 @@ std::size_t max_tokens(const Json& body) {
     return static_cast<std::size_t>(parsed);
 }
 
+SamplingOptions sampling_options(const Json& body) {
+    SamplingOptions options;
+    if (const Json* value = body.find("temperature"); value != nullptr) {
+        options.temperature = static_cast<float>(value->as_number());
+    }
+    if (const Json* value = body.find("top_p"); value != nullptr) {
+        options.top_p = static_cast<float>(value->as_number());
+    }
+    if (const Json* value = body.find("top_k"); value != nullptr) {
+        const std::int64_t parsed = value->as_integer();
+        if (parsed < 0) throw std::runtime_error("top_k must not be negative");
+        options.top_k = static_cast<std::size_t>(parsed);
+    }
+    if (const Json* value = body.find("seed"); value != nullptr) {
+        const std::int64_t parsed = value->as_integer();
+        if (parsed < 0) throw std::runtime_error("seed must not be negative");
+        options.seed = static_cast<std::uint64_t>(parsed);
+    }
+    if (options.temperature < 0.0F || options.top_p <= 0.0F ||
+        options.top_p > 1.0F ||
+        (options.temperature > 0.0F &&
+            (options.top_k == 0 || options.top_k > 256))) {
+        throw std::runtime_error(
+            "sampling requires temperature >= 0, top_p in (0, 1], and top_k in 1..256");
+    }
+    return options;
+}
+
 bool streaming_enabled(const Json& body) {
     const Json* stream = body.find("stream");
     return stream != nullptr && stream->as_boolean();
@@ -407,13 +435,14 @@ HttpResponse Api::handle(const HttpRequest& request) const {
                 prompt = body.at("prompt").as_string();
             }
             const std::size_t requested_tokens = max_tokens(body);
+            const SamplingOptions sampling = sampling_options(body);
             if (stream) {
                 return {
                     .status = 200,
                     .content_type = "text/event-stream; charset=utf-8",
                     .body = {},
                     .body_stream = [this, prompt = std::move(prompt), requested_tokens,
-                                       chat, template_options, include_stream_usage,
+                                       chat, template_options, sampling, include_stream_usage,
                                        snapshot](const auto& sink) {
                         bool connected = true;
                         const auto emit_json = [&](const std::string_view json) {
@@ -522,7 +551,7 @@ HttpResponse Api::handle(const HttpRequest& request) const {
 
                         try {
                             GenerationResult result = engine_->complete_stream(
-                                prompt, requested_tokens, on_delta);
+                                prompt, requested_tokens, on_delta, sampling);
                             if (!thinking_carry.empty()) {
                                 if (in_reasoning) emit_text("reasoning_content", thinking_carry);
                                 else emit_content(thinking_carry);
@@ -560,7 +589,8 @@ HttpResponse Api::handle(const HttpRequest& request) const {
             }
             runtime_.request_started();
             try {
-                GenerationResult result = engine_->complete(prompt, requested_tokens);
+                GenerationResult result = engine_->complete(
+                    prompt, requested_tokens, sampling);
                 runtime_.request_finished(result.prompt_tokens, result.tokens.size());
                 return {.body = completion_json(
                     snapshot, result, chat, template_options.enable_thinking,
