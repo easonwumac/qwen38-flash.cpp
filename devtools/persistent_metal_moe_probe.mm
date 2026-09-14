@@ -461,6 +461,8 @@ kernel void qsa_attention_q8_blocks(
     const device uint* value_weight [[buffer(4)]], const device bfloat* value_scale [[buffer(5)]],
     const device bfloat* value_bias [[buffer(6)]], const device uint* selected [[buffer(7)]],
     device bfloat* output [[buffer(8)]], constant uint& token_count [[buffer(9)]],
+    const device bfloat* hot_key [[buffer(10)]], const device bfloat* hot_value [[buffer(11)]],
+    constant uint& include_hot [[buffer(12)]],
     uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint simd [[simdgroup_index_in_threadgroup]], uint kv_head [[threadgroup_position_in_grid]]) {
     constexpr uint tile = 16, dimension = 256, packed_dimension = 64;
@@ -517,6 +519,20 @@ kernel void qsa_attention_q8_blocks(
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (active && include_hot != 0) {
+        float partial = 0.0f;
+        const uint base = kv_head * dimension + lane * 8;
+        for (uint component = 0; component < 8; ++component)
+            partial += q[component] * float(hot_key[base + component]);
+        const float score = simd_sum(partial) * 0.0625f;
+        const float next_max = max(running_max, score);
+        const float alpha = metal::exp(running_max - next_max);
+        const float probability = metal::exp(score - next_max);
+        running_sum = running_sum * alpha + probability;
+        for (uint component = 0; component < 8; ++component)
+            accumulator[component] = accumulator[component] * alpha +
+                probability * float(hot_value[base + component]);
     }
     if (active) {
         const float inverse_sum = 1.0f / running_sum;
@@ -633,6 +649,17 @@ kernel void attention_output_projection(
     }
     dot = simd_sum(dot);
     if (lane == 0) output[row] = bfloat(dot);
+}
+
+kernel void hc_write(
+    const device bfloat* stream [[buffer(0)]], const device bfloat* block [[buffer(1)]],
+    const device bfloat* injection [[buffer(2)]], device bfloat* output [[buffer(3)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= 10240) return;
+    const uint hc = index / 2560;
+    const uint column = index % 2560;
+    const bfloat update = bfloat(float(block[column]) * float(injection[hc]));
+    output[index] = bfloat(float(stream[index]) + float(update));
 }
 
 kernel void hc_normalize(
@@ -944,6 +971,10 @@ double run_qsa_attention(id<MTLCommandQueue> queue, id<MTLComputePipelineState> 
     [encoder setBuffer:selected offset:0 atIndex:7];
     [encoder setBuffer:output offset:0 atIndex:8];
     [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
+    [encoder setBuffer:query offset:0 atIndex:10];
+    [encoder setBuffer:query offset:0 atIndex:11];
+    const std::uint32_t include_hot = 0;
+    [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -1012,6 +1043,10 @@ double run_qsa_selected_attention(
     [encoder setBuffer:selected offset:0 atIndex:7];
     [encoder setBuffer:output offset:0 atIndex:8];
     [encoder setBytes:&token_count length:sizeof(token_count) atIndex:9];
+    [encoder setBuffer:attention_query offset:0 atIndex:10];
+    [encoder setBuffer:attention_query offset:0 atIndex:11];
+    const std::uint32_t include_hot = 0;
+    [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
     [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
     [encoder endEncoding];
@@ -1688,6 +1723,14 @@ int main(int argc, char **argv) {
             const auto hc_up = projection(hc_prefix + ".input_mix_weight_up");
             const auto hc_injection = projection(hc_prefix + ".block_inject_weight");
             const std::string attention_prefix = "language_model.model.layers.3.self_attn";
+            const std::string attention_hc_prefix =
+                "language_model.model.layers.3.attn_hyper_connection";
+            const std::string attention_hc_norm = attention_hc_prefix + ".hc_norm.weight";
+            const auto attention_hc_down =
+                projection(attention_hc_prefix + ".input_mix_weight_down");
+            const auto attention_hc_up = projection(attention_hc_prefix + ".input_mix_weight_up");
+            const auto attention_hc_injection =
+                projection(attention_hc_prefix + ".block_inject_weight");
             const auto attention_index = projection(attention_prefix + ".indexer.index_qk_proj");
             const auto attention_query = projection(attention_prefix + ".q_proj");
             const auto attention_key = projection(attention_prefix + ".k_proj");
@@ -1742,6 +1785,7 @@ int main(int argc, char **argv) {
             const auto attention_gate_state = pipeline(device, library, @"attention_apply_gate");
             const auto attention_output_state =
                 pipeline(device, library, @"attention_output_projection");
+            const auto hc_write_state = pipeline(device, library, @"hc_write");
             const auto hc_normalize_state = pipeline(device, library, @"hc_normalize");
             const auto hc_down_state = pipeline(device, library, @"hc_down_injection");
             const auto hc_up_state = pipeline(device, library, @"hc_up_mix");
@@ -1918,6 +1962,9 @@ int main(int argc, char **argv) {
             id<MTLBuffer> attention_block_output =
                 [device newBufferWithLength:2560 * sizeof(std::uint16_t)
                                     options:MTLResourceStorageModeShared];
+            id<MTLBuffer> attention_output_stream =
+                [device newBufferWithLength:10240 * sizeof(std::uint16_t)
+                                    options:MTLResourceStorageModeShared];
             id<MTLBuffer> logits = [device newBufferWithLength:512 * sizeof(float)
                                                        options:MTLResourceStorageModeShared];
             id<MTLBuffer> cache_evict = [device newBufferWithLength:64ULL * 1024 * 1024
@@ -1935,7 +1982,7 @@ int main(int argc, char **argv) {
                 attention_projection_output == nil || rope_cos == nil || rope_sin == nil ||
                 attention_selector_query == nil || attention_query_normalized == nil ||
                 attention_key_normalized == nil || attention_gated == nil ||
-                attention_block_output == nil)
+                attention_block_output == nil || attention_output_stream == nil)
                 throw std::runtime_error("Metal scratch allocation failed");
 
             auto *qkw = static_cast<std::uint32_t *>(qsa_key_weight.contents);
@@ -1953,6 +2000,299 @@ int main(int argc, char **argv) {
                 qkb[i] = bf16(-0.255F);
                 qvs[i] = bf16(0.0018F + static_cast<float>(i % 7) * 0.00004F);
                 qvb[i] = bf16(-0.230F);
+            }
+
+            const auto run_attention_half = [&](const bool include_mlp) {
+                id<MTLCommandBuffer> command = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_normalize_state];
+                [encoder setBuffer:hc_stream offset:0 atIndex:0];
+                bind_tensor(encoder, router_shard, attention_hc_norm, 1);
+                [encoder setBuffer:hc_normalized offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_down_state];
+                [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                bind_projection(encoder, router_shard, attention_hc_down, 1);
+                bind_projection(encoder, router_shard, attention_hc_injection, 4);
+                [encoder setBuffer:hc_activation offset:0 atIndex:7];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(324, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_up_state];
+                [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                [encoder setBuffer:hc_activation offset:0 atIndex:1];
+                bind_projection(encoder, router_shard, attention_hc_up, 2);
+                [encoder setBuffer:hc_mixed offset:0 atIndex:5];
+                [encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_projection_state];
+                [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                bind_projection(encoder, router_shard, attention_index, 1);
+                bind_projection(encoder, router_shard, attention_query, 4);
+                bind_projection(encoder, router_shard, attention_key, 7);
+                bind_projection(encoder, router_shard, attention_value, 10);
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:13];
+                [encoder dispatchThreadgroups:MTLSizeMake((13952 + 3) / 4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_normalize_state];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:0];
+                bind_tensor(encoder, router_shard, attention_query_norm, 1);
+                bind_tensor(encoder, router_shard, attention_key_norm, 2);
+                bind_tensor(encoder, router_shard, attention_index_norm, 3);
+                [encoder setBuffer:rope_cos offset:0 atIndex:4];
+                [encoder setBuffer:rope_sin offset:0 atIndex:5];
+                [encoder setBuffer:attention_selector_query offset:0 atIndex:6];
+                [encoder setBuffer:attention_query_normalized offset:0 atIndex:7];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(30, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_score_state];
+                [encoder setBuffer:attention_selector_query offset:0 atIndex:0];
+                [encoder setBuffer:qsa_pooled offset:0 atIndex:1];
+                [encoder setBuffer:qsa_scores offset:0 atIndex:2];
+                [encoder setBytes:&qsa_blocks length:sizeof(qsa_blocks) atIndex:3];
+                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_first_state];
+                [encoder setBuffer:qsa_scores offset:0 atIndex:0];
+                [encoder setBuffer:qsa_temp_scores_a offset:0 atIndex:1];
+                [encoder setBuffer:qsa_temp_ids_a offset:0 atIndex:2];
+                [encoder dispatchThreadgroups:MTLSizeMake(qsa_blocks / 256, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                std::uint32_t selection_count = qsa_blocks / 2;
+                bool selection_source_a = true;
+                while (selection_count > 128) {
+                    const std::uint32_t output_count = selection_count / 2;
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:qsa_merge_state];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_scores_a : qsa_temp_scores_b)
+                                offset:0
+                               atIndex:0];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_ids_a : qsa_temp_ids_b)
+                                offset:0
+                               atIndex:1];
+                    [encoder setBuffer:(selection_source_a ? qsa_temp_scores_b : qsa_temp_scores_a)
+                                offset:0
+                               atIndex:2];
+                    [encoder setBuffer:(output_count == 128 ? qsa_selected
+                                                            : (selection_source_a ? qsa_temp_ids_b
+                                                                                  : qsa_temp_ids_a))
+                                offset:0
+                               atIndex:3];
+                    [encoder dispatchThreadgroups:MTLSizeMake(output_count / 128, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+                    selection_count = output_count;
+                    selection_source_a = !selection_source_a;
+                }
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:qsa_attention_state];
+                [encoder setBuffer:attention_query_normalized offset:0 atIndex:0];
+                [encoder setBuffer:qsa_key_weight offset:0 atIndex:1];
+                [encoder setBuffer:qsa_key_scale offset:0 atIndex:2];
+                [encoder setBuffer:qsa_key_bias offset:0 atIndex:3];
+                [encoder setBuffer:qsa_value_weight offset:0 atIndex:4];
+                [encoder setBuffer:qsa_value_scale offset:0 atIndex:5];
+                [encoder setBuffer:qsa_value_bias offset:0 atIndex:6];
+                [encoder setBuffer:qsa_selected offset:0 atIndex:7];
+                [encoder setBuffer:qsa_attention_output offset:0 atIndex:8];
+                [encoder setBytes:&qsa_tokens length:sizeof(qsa_tokens) atIndex:9];
+                [encoder setBuffer:attention_key_normalized offset:0 atIndex:10];
+                [encoder setBuffer:attention_projection_output
+                            offset:13440 * sizeof(std::uint16_t)
+                           atIndex:11];
+                const std::uint32_t include_hot = 1;
+                [encoder setBytes:&include_hot length:sizeof(include_hot) atIndex:12];
+                [encoder dispatchThreadgroups:MTLSizeMake(2, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(384, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_gate_state];
+                [encoder setBuffer:qsa_attention_output offset:0 atIndex:0];
+                [encoder setBuffer:attention_projection_output offset:0 atIndex:1];
+                [encoder setBuffer:attention_gated offset:0 atIndex:2];
+                [encoder dispatchThreads:MTLSizeMake(6144, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:attention_output_state];
+                [encoder setBuffer:attention_gated offset:0 atIndex:0];
+                bind_projection(encoder, router_shard, attention_output_projection, 1);
+                [encoder setBuffer:attention_block_output offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:hc_write_state];
+                [encoder setBuffer:hc_stream offset:0 atIndex:0];
+                [encoder setBuffer:attention_block_output offset:0 atIndex:1];
+                [encoder setBuffer:hc_injection_output offset:0 atIndex:2];
+                [encoder setBuffer:attention_output_stream offset:0 atIndex:3];
+                [encoder dispatchThreads:MTLSizeMake(10240, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                [encoder endEncoding];
+
+                if (include_mlp) {
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:hc_normalize_state];
+                    [encoder setBuffer:attention_output_stream offset:0 atIndex:0];
+                    bind_tensor(encoder, router_shard, hc_norm, 1);
+                    [encoder setBuffer:hc_normalized offset:0 atIndex:2];
+                    [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:hc_down_state];
+                    [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                    bind_projection(encoder, router_shard, hc_down, 1);
+                    bind_projection(encoder, router_shard, hc_injection, 4);
+                    [encoder setBuffer:hc_activation offset:0 atIndex:7];
+                    [encoder setBuffer:hc_injection_output offset:0 atIndex:8];
+                    [encoder dispatchThreadgroups:MTLSizeMake(324, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:hc_up_state];
+                    [encoder setBuffer:hc_normalized offset:0 atIndex:0];
+                    [encoder setBuffer:hc_activation offset:0 atIndex:1];
+                    bind_projection(encoder, router_shard, hc_up, 2);
+                    [encoder setBuffer:hc_mixed offset:0 atIndex:5];
+                    [encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:router_state];
+                    [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                    bind_projection(encoder, router_shard, device_router, 1);
+                    [encoder setBuffer:logits offset:0 atIndex:4];
+                    [encoder dispatchThreadgroups:MTLSizeMake(128, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:select_state];
+                    [encoder setBuffer:logits offset:0 atIndex:0];
+                    [encoder setBuffer:experts offset:0 atIndex:1];
+                    [encoder setBuffer:weights offset:0 atIndex:2];
+                    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:fused_gate_state];
+                    [encoder setBuffer:hc_mixed offset:0 atIndex:0];
+                    bind_projection(encoder, shard, gate, 1);
+                    bind_projection(encoder, shard, up, 4);
+                    [encoder setBuffer:experts offset:0 atIndex:7];
+                    [encoder setBuffer:hidden offset:0 atIndex:8];
+                    bind_projection(encoder, shard, shared_gate, 9);
+                    bind_projection(encoder, shard, shared_up, 12);
+                    [encoder setBuffer:shared_hidden offset:0 atIndex:15];
+                    bind_projection(encoder, router_shard, shared_router, 16);
+                    [encoder setBuffer:shared_router_output offset:0 atIndex:19];
+                    [encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:fused_down_state];
+                    [encoder setBuffer:hidden offset:0 atIndex:0];
+                    bind_projection(encoder, shard, down, 1);
+                    [encoder setBuffer:experts offset:0 atIndex:4];
+                    [encoder setBuffer:weights offset:0 atIndex:5];
+                    [encoder setBuffer:shared_hidden offset:0 atIndex:6];
+                    bind_projection(encoder, shard, shared_down, 7);
+                    [encoder setBuffer:shared_router_output offset:0 atIndex:10];
+                    [encoder setBuffer:full_output offset:0 atIndex:11];
+                    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:healing_left_state];
+                    [encoder setBuffer:full_output offset:0 atIndex:0];
+                    bind_tensor(encoder, healing_shard, healing_left, 1);
+                    [encoder setBuffer:healing_hidden offset:0 atIndex:2];
+                    [encoder dispatchThreadgroups:MTLSizeMake(16, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+
+                    encoder = [command computeCommandEncoder];
+                    [encoder setComputePipelineState:healing_right_state];
+                    [encoder setBuffer:full_output offset:0 atIndex:0];
+                    [encoder setBuffer:healing_hidden offset:0 atIndex:1];
+                    bind_tensor(encoder, healing_shard, healing_right, 2);
+                    [encoder setBuffer:attention_output_stream offset:0 atIndex:3];
+                    [encoder setBuffer:hc_injection_output offset:0 atIndex:4];
+                    [encoder setBuffer:hc_output_stream offset:0 atIndex:5];
+                    [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                            threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                    [encoder endEncoding];
+                }
+                [command commit];
+                [command waitUntilCompleted];
+                if (command.status != MTLCommandBufferStatusCompleted)
+                    throw std::runtime_error(command.error.localizedDescription.UTF8String);
+                return (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+            };
+
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_attention_half(false));
+            std::vector<double> attention_half_gpu, attention_half_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 101));
+                const auto started = std::chrono::steady_clock::now();
+                attention_half_gpu.push_back(run_attention_half(false));
+                attention_half_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                  std::chrono::steady_clock::now() - started)
+                                                  .count());
+            }
+            for (int i = 0; i < 5; ++i)
+                static_cast<void>(run_attention_half(true));
+            std::vector<double> persistent_layer_gpu, persistent_layer_wall;
+            for (int i = 0; i < 31; ++i) {
+                evict_device_cache(queue, cache_evict, static_cast<std::uint8_t>(i + 137));
+                const auto started = std::chrono::steady_clock::now();
+                persistent_layer_gpu.push_back(run_attention_half(true));
+                persistent_layer_wall.push_back(std::chrono::duration<double, std::milli>(
+                                                    std::chrono::steady_clock::now() - started)
+                                                    .count());
+            }
+            std::uint64_t persistent_layer_hash = 1469598103934665603ULL;
+            const auto *persistent_layer_bits =
+                static_cast<const std::uint16_t *>(hc_output_stream.contents);
+            for (int i = 0; i < 10240; ++i) {
+                if (!std::isfinite(from_bf16(persistent_layer_bits[i])))
+                    throw std::runtime_error("non-finite persistent layer output");
+                persistent_layer_hash ^= persistent_layer_bits[i];
+                persistent_layer_hash *= 1099511628211ULL;
             }
 
             for (int i = 0; i < 5; ++i)
@@ -2406,6 +2746,11 @@ int main(int argc, char **argv) {
                 << ",\"attention_normalize_wall_median_ms\":" << median(attention_normalize_wall)
                 << ",\"attention_output_gpu_median_ms\":" << median(attention_output_gpu)
                 << ",\"attention_output_wall_median_ms\":" << median(attention_output_wall)
+                << ",\"attention_half_gpu_median_ms\":" << median(attention_half_gpu)
+                << ",\"attention_half_wall_median_ms\":" << median(attention_half_wall)
+                << ",\"persistent_layer_gpu_median_ms\":" << median(persistent_layer_gpu)
+                << ",\"persistent_layer_wall_median_ms\":" << median(persistent_layer_wall)
+                << ",\"persistent_layer_hash\":\"" << persistent_layer_hash << "\""
                 << ",\"split_gpu_median_ms\":" << median(split)
                 << ",\"joined_wall_median_ms\":" << median(joined_wall)
                 << ",\"split_wall_median_ms\":" << median(split_wall)

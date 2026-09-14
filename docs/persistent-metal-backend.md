@@ -90,12 +90,24 @@ uses deterministic synthetic pooled keys and a fully cold 131,072-token affine
 Q8 K/V cache; it does not yet include the current-token BF16 tail, state update,
 or an end-to-end retrieval claim.
 
+The fifth gate connects both HyperConnection halves, real attention and MoE
+weights, exact device routing, the rank-64 healing map, and the current token's
+BF16 K/V tail in one command buffer. On five independent processes, the
+complete layer-3 GPU median was 0.690--0.850 ms and wall median was
+0.884--1.041 ms, with the same final BF16 output hash in every process. The
+attention half alone was 0.505--0.669 ms GPU and 0.698--0.856 ms wall. For
+directional context, the existing guarded MLX synthetic 128K layer probe had
+per-process medians of 1.231--2.284 ms in five adjacent runs. This is not yet a
+production speedup claim: the direct path uses different deterministic content,
+does not persist the appended hot K/V or QSA raw/pooled state, and still needs a
+complete-layer MLX parity oracle plus token-trajectory and needle gates.
+
 The next acceptance gates are:
 
-1. combine the full-attention primitives, current-token tail/state update and
-   both HyperConnections into one fixed-buffer layer command;
-2. match the retained MLX token trajectory before extending beyond one layer;
-3. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
+1. persist the appended hot K/V and QSA raw/pooled state in the fixed buffers;
+2. add a complete-layer MLX oracle and match the retained token trajectory;
+3. extend the same backend contract to GDN layers;
+4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 
 Run the bounded primitive probe with:
 
