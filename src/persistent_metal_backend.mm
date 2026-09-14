@@ -10,6 +10,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
@@ -23,7 +24,7 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 30> pipeline_names{
+constexpr std::array<const char*, 33> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "fused_all_gate_up", "fused_all_down",
     "q8_router_logits", "select_top10", "qsa_score_blocks",
@@ -32,7 +33,8 @@ constexpr std::array<const char*, 30> pipeline_names{
     "attention_apply_gate", "attention_output_projection", "q4_input_projection",
     "gdn_prework", "gdn_recurrence", "gdn_norm_gate", "gdn_output_projection",
     "hc_write", "hc_normalize", "hc_down_injection", "hc_up_mix", "healing_left",
-    "healing_right_write", "ple_fused_update",
+    "healing_right_write", "ple_fused_update", "embedding_q4_stream",
+    "hc_down_only", "lm_head_q4",
 };
 
 bool has_expected_layer_split(const ModelConfig& config) noexcept {
@@ -208,6 +210,7 @@ public:
         ple_projected_ = make_buffer(12800 * sizeof(std::uint16_t));
         ple_stream_ = make_buffer(10240 * sizeof(std::uint16_t));
         ple_convolution_ = make_buffer(9ULL * 10240 * sizeof(std::uint16_t));
+        head_logits_ = make_buffer(config_.vocabulary_size * sizeof(float), false);
     }
 
     id<MTLComputePipelineState> pipeline(const char* name) const {
@@ -221,6 +224,23 @@ public:
         const auto mapped = shard.file.mapped_view();
         const auto view = shard.file.tensor(tensor);
         const auto offset = static_cast<NSUInteger>(view.bytes.data() - mapped.data());
+        [encoder setBuffer:shard.buffer offset:offset atIndex:index];
+    }
+
+    void bind_row(id<MTLComputeCommandEncoder> encoder, const std::string& tensor,
+                  std::size_t row, NSUInteger index) const {
+        const std::string& shard_name = weight_map_.at(tensor);
+        const Shard& shard = *shards_.at(shard_name);
+        const auto mapped = shard.file.mapped_view();
+        const auto view = shard.file.tensor(tensor);
+        if (view.shape.empty() || row >= view.shape.front() ||
+            view.bytes.size() % view.shape.front() != 0) {
+            throw std::runtime_error("invalid persistent row tensor geometry");
+        }
+        const std::size_t row_bytes = view.bytes.size() / view.shape.front();
+        const std::size_t tensor_offset = static_cast<std::size_t>(
+            view.bytes.data() - mapped.data());
+        const auto offset = static_cast<NSUInteger>(tensor_offset + row * row_bytes);
         [encoder setBuffer:shard.buffer offset:offset atIndex:index];
     }
 
@@ -817,6 +837,105 @@ public:
         return {begin, begin + 10240};
     }
 
+    std::vector<std::uint16_t> embed(std::uint32_t token, double* gpu_ms) {
+        if (token >= config_.vocabulary_size) throw std::out_of_range("token id out of range");
+        const std::string base = "language_model.model.embed_tokens";
+        id<MTLCommandBuffer> command = [queue_ commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("embedding_q4_stream")];
+        bind_row(encoder, base + ".weight", token, 0);
+        bind_row(encoder, base + ".scales", token, 1);
+        bind_row(encoder, base + ".biases", token, 2);
+        [encoder setBuffer:stream_ offset:0 atIndex:3];
+        [encoder dispatchThreads:MTLSizeMake(2560, 1, 1)
+             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            throw std::runtime_error(command.error.localizedDescription.UTF8String);
+        }
+        if (gpu_ms != nullptr) *gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0;
+        const auto* begin = static_cast<const std::uint16_t*>(stream_.contents);
+        return {begin, begin + 10240};
+    }
+
+    GreedyResult head(std::span<const std::uint16_t> stream) {
+        if (stream.size() != 10240) throw std::runtime_error("head stream width mismatch");
+        std::memcpy(stream_.contents, stream.data(), stream.size_bytes());
+        const auto started = std::chrono::steady_clock::now();
+        id<MTLCommandBuffer> command = [queue_ commandBuffer];
+        encode_hc_read_final(command, stream_);
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("lm_head_q4")];
+        [encoder setBuffer:mixed_ offset:0 atIndex:0];
+        bind_projection(encoder, "language_model.lm_head", 1);
+        [encoder setBuffer:head_logits_ offset:0 atIndex:4];
+        const std::uint32_t rows = static_cast<std::uint32_t>(config_.vocabulary_size);
+        [encoder setBytes:&rows length:sizeof(rows) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        if (command.status != MTLCommandBufferStatusCompleted) {
+            throw std::runtime_error(command.error.localizedDescription.UTF8String);
+        }
+        const auto* logits = static_cast<const float*>(head_logits_.contents);
+        std::uint32_t best = 0;
+        for (std::uint32_t index = 1; index < rows; ++index) {
+            if (logits[index] > logits[best]) best = index;
+        }
+        return {
+            .token = best,
+            .logit = logits[best],
+            .gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0,
+            .wall_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - started).count(),
+        };
+    }
+
+    void encode_hc_read_final(id<MTLCommandBuffer> command, id<MTLBuffer> input) {
+        const std::string base = "language_model.model.hyper_connection_mixer";
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("hc_normalize")];
+        [encoder setBuffer:input offset:0 atIndex:0];
+        bind(encoder, base + ".hc_norm.weight", 1);
+        [encoder setBuffer:normalized_ offset:0 atIndex:2];
+        [encoder dispatchThreadgroups:MTLSizeMake(4, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("hc_down_only")];
+        [encoder setBuffer:normalized_ offset:0 atIndex:0];
+        bind_projection(encoder, base + ".input_mix_weight_down", 1);
+        [encoder setBuffer:activation_ offset:0 atIndex:4];
+        [encoder dispatchThreadgroups:MTLSizeMake(80, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+        [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("hc_up_mix")];
+        [encoder setBuffer:normalized_ offset:0 atIndex:0];
+        [encoder setBuffer:activation_ offset:0 atIndex:1];
+        bind_projection(encoder, base + ".input_mix_weight_up", 2);
+        [encoder setBuffer:mixed_ offset:0 atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake(320, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+    }
+
+    GreedyResult greedy_decode(std::uint32_t token, bool reset) {
+        const auto started = std::chrono::steady_clock::now();
+        double embedding_gpu = 0.0, trunk_gpu = 0.0;
+        std::vector<std::uint16_t> initial = embed(token, &embedding_gpu);
+        std::vector<std::uint16_t> trunk = decode_trunk(token, initial, reset, &trunk_gpu);
+        GreedyResult result = head(trunk);
+        result.gpu_ms += embedding_gpu + trunk_gpu;
+        result.wall_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count();
+        return result;
+    }
+
     Inventory inventory_;
     id<MTLDevice> device_{nil};
     id<MTLLibrary> library_{nil};
@@ -845,6 +964,7 @@ public:
     id<MTLBuffer> temp_ids_a_{nil}, temp_ids_b_{nil}, q8_dummy_{nil};
     id<MTLBuffer> ple_embedding_{nil}, ple_projected_{nil}, ple_stream_{nil};
     id<MTLBuffer> ple_convolution_{nil};
+    id<MTLBuffer> head_logits_{nil};
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
@@ -901,6 +1021,21 @@ std::vector<std::uint16_t> PersistentMetalBackend::decode_ple(
     const std::uint32_t token, const std::span<const std::uint16_t> stream,
     const bool reset_state, double* gpu_ms) {
     return impl_->decode_ple(token, stream, reset_state, gpu_ms);
+}
+
+PersistentMetalBackend::GreedyResult PersistentMetalBackend::greedy_decode(
+    const std::uint32_t token, const bool reset_state) {
+    return impl_->greedy_decode(token, reset_state);
+}
+
+std::vector<std::uint16_t> PersistentMetalBackend::embed(
+    const std::uint32_t token, double* gpu_ms) {
+    return impl_->embed(token, gpu_ms);
+}
+
+PersistentMetalBackend::GreedyResult PersistentMetalBackend::greedy_head(
+    const std::span<const std::uint16_t> stream) {
+    return impl_->head(stream);
 }
 
 } // namespace qwen38

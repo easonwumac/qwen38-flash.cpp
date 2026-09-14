@@ -1,6 +1,7 @@
 #include "qwen38/decoder_layer.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
+#include "qwen38/model.hpp"
 #include "qwen38/persistent_metal_backend.hpp"
 #include "qwen38/ple.hpp"
 
@@ -288,6 +289,63 @@ void check_ple(qwen38::PersistentMetalBackend& backend,
     if (cosine < 0.999 || rmse > 0.05) throw std::runtime_error("persistent PLE parity failed");
 }
 
+void check_greedy(qwen38::PersistentMetalBackend& backend,
+                  qwen38::MlxTensorStore& tensors) {
+    qwen38::QwenModel model(tensors);
+    qwen38::ModelDecodeState head_state = model.make_state();
+    qwen38::TargetDecodeStep captured = model.forward_decode_capture(9419, head_state);
+    const std::vector<float> oracle_stream_f32 =
+        captured.pre_mixer_stream.astype(MLX_FLOAT32).to_float32();
+    std::vector<std::uint16_t> oracle_stream;
+    oracle_stream.reserve(oracle_stream_f32.size());
+    for (const float value : oracle_stream_f32) oracle_stream.push_back(bf16(value));
+    const auto direct_oracle_head = backend.greedy_head(oracle_stream);
+    qwen38::MlxArray oracle_token_array = captured.logits.argmax_all();
+    qwen38::MlxArray oracle_selected =
+        qwen38::MlxArray::take(captured.logits, oracle_token_array).astype(MLX_FLOAT32);
+    std::cout << "oracle_stream_head_token " << direct_oracle_head.token
+              << " mlx_token " << oracle_token_array.item_uint32()
+              << " direct_logit " << direct_oracle_head.logit
+              << " mlx_logit " << oracle_selected.item_float32() << '\n';
+
+    qwen38::ModelDecodeState state = model.make_state();
+    const qwen38::GreedyStep expected = model.greedy_decode(9419, state);
+    const auto actual = backend.greedy_decode(9419, true);
+    std::vector<double> gpu_samples, wall_samples;
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        static_cast<void>(backend.greedy_decode(9419, true));
+    }
+    for (int sample = 0; sample < 11; ++sample) {
+        const auto measured = backend.greedy_decode(9419, true);
+        gpu_samples.push_back(measured.gpu_ms);
+        wall_samples.push_back(measured.wall_ms);
+    }
+    std::ranges::sort(gpu_samples);
+    std::ranges::sort(wall_samples);
+    std::cout << "greedy_token " << actual.token << " mlx_token " << expected.token
+              << " greedy_logit " << actual.logit << " mlx_logit " << expected.logit
+              << " greedy_gpu_ms " << gpu_samples[gpu_samples.size() / 2]
+              << " greedy_wall_ms " << wall_samples[wall_samples.size() / 2] << '\n';
+    if (actual.token != expected.token) {
+        throw std::runtime_error("persistent greedy token parity failed");
+    }
+    std::uint32_t oracle_token = expected.token;
+    std::size_t matching_steps = 1;
+    for (std::size_t step = 1; step < 16; ++step) {
+        const qwen38::GreedyStep oracle_step = model.greedy_decode(oracle_token, state);
+        const auto direct_step = backend.greedy_decode(oracle_token, false);
+        oracle_token = oracle_step.token;
+        std::cout << "greedy_step " << (step + 1) << " direct " << direct_step.token
+                  << " mlx " << oracle_token << " direct_logit " << direct_step.logit
+                  << " mlx_logit " << oracle_step.logit << '\n';
+        if (direct_step.token == oracle_token) ++matching_steps;
+    }
+    std::cout << "teacher_forced_greedy_agreement " << matching_steps << " of 16\n";
+    if (matching_steps < 4) {
+        throw std::runtime_error("persistent teacher-forced greedy agreement regressed");
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -319,7 +377,8 @@ int main(int argc, char** argv) {
         check_ple(*backend, tensors, input_f32, input_bf16);
         trace_trunk_layers(*backend, tensors, input_f32, input_bf16);
         check_trunk(*backend, tensors, input_f32, input_bf16);
-        return inventory.pipeline_count == 30 && inventory.shard_count != 0 ? 0 : 1;
+        check_greedy(*backend, tensors);
+        return inventory.pipeline_count == 33 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

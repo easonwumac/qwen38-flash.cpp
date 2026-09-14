@@ -13,6 +13,12 @@ namespace qwen38 {
 
 class PersistentMetalBackend final {
 public:
+    struct GreedyResult {
+        std::uint32_t token{0};
+        float logit{0.0F};
+        double gpu_ms{0.0};
+        double wall_ms{0.0};
+    };
     struct Inventory {
         std::size_t pipeline_count{0};
         std::size_t shard_count{0};
@@ -51,6 +57,10 @@ public:
         std::span<const std::uint16_t> stream,
         bool reset_state = false,
         double* gpu_ms = nullptr);
+    [[nodiscard]] std::vector<std::uint16_t> embed(
+        std::uint32_t token, double* gpu_ms = nullptr);
+    [[nodiscard]] GreedyResult greedy_head(std::span<const std::uint16_t> stream);
+    [[nodiscard]] GreedyResult greedy_decode(std::uint32_t token, bool reset_state = false);
 
 private:
     class Impl;

@@ -266,6 +266,18 @@ GPU and 17.15 ms submit-to-completion for the full trunk. This is about
 yet an end-to-end token/s claim, but it leaves about 7.85 ms/token for those
 stages while retaining the 40 token/s target.
 
+The fifteenth gate adds direct Q4 embedding, the final HyperConnection mixer,
+the Q4 language head and host argmax. On the same Apple M5 Pro 64 GiB and
+Niwaki-99B checkpoint, with token 9419, empty state, greedy sampling, no MTP and
+the external REAP Q4 n-gram table, 11 warm samples measured 17.5 ms median GPU
+and 19.0 ms median wall time for embedding plus all 48 layers plus the head.
+That is 52.6 end-to-end calls/s at zero context. The direct and MLX paths chose
+the same first token, including when the direct head consumed MLX's exact
+pre-mixer stream. A 16-step teacher-forced diagnostic agreed on 6 greedy tokens;
+it is retained as a regression floor, not claimed as exact trajectory parity.
+Long-context quality remains gated on state import and needle retrieval before
+this backend can replace the MLX decode path.
+
 The next acceptance gates are:
 
 1. integrate the persistent state and layer dispatch into the runtime;

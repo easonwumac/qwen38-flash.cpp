@@ -1116,6 +1116,60 @@ kernel void ple_fused_update(
         conv_state[8 * 10240 + component] = normalized[column];
     }
 }
+
+kernel void embedding_q4_stream(
+    const device uchar* weight [[buffer(0)]], const device uchar* scale [[buffer(1)]],
+    const device uchar* bias [[buffer(2)]], device bfloat* stream [[buffer(3)]],
+    uint column [[thread_position_in_grid]]) {
+    if (column >= 2560) return;
+    const uint packed = uint(weight[column / 2]);
+    const uint quantized = (packed >> ((column & 1) * 4)) & 15;
+    const uint group = column / 32;
+    const bfloat value = bfloat(float(quantized) *
+        float(load_bf16_unaligned(scale, group)) +
+        float(load_bf16_unaligned(bias, group)));
+    for (uint hc = 0; hc < 4; ++hc) stream[hc * 2560 + column] = value;
+}
+
+kernel void hc_down_only(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]], const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]], device bfloat* activation [[buffer(4)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4 + simd;
+    if (row >= 320) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 10240; base += 256) {
+        float sum = 0.0f;
+        for (uint item = 0; item < 8; ++item) sum += float(input[base + item]);
+        dot += float(load_bf16_unaligned(scale, row * 320 + base / 32)) *
+                q4_dot8(weight + row * 5120 + base / 2, input + base) +
+            float(load_bf16_unaligned(bias, row * 320 + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) activation[row] = bfloat(dot);
+}
+
+kernel void lm_head_q4(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]], const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]], device float* logits [[buffer(4)]],
+    constant uint& rows [[buffer(5)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < 2560; base += 256) {
+        float sum = 0.0f;
+        for (uint item = 0; item < 8; ++item) sum += float(input[base + item]);
+        dot += float(load_bf16_unaligned(scale, row * 80 + base / 32)) *
+                q4_dot8(weight + row * 1280 + base / 2, input + base) +
+            float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) logits[row] = dot;
+}
 )metal";
 
 } // namespace qwen38::persistent_metal
