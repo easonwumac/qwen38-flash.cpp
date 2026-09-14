@@ -40,12 +40,21 @@ from 0.138--0.141 ms to 0.125--0.131 ms across five process runs. Submit wall
 time remained host-noise limited at 0.279--0.305 ms versus 0.291--0.302 ms for
 the five-dispatch control.
 
+The third gate moved the Q8/group-64 512-way router and top-10 selection into
+the same command buffer. Across five process runs its cache-evicted GPU median
+was 0.172--0.175 ms and submit wall median was 0.330--0.350 ms for router,
+selection, and the complete fused MoE. All ten expert IDs and all BF16 route
+weights matched the MLX router exactly. This removes the CPU routing barrier;
+the remaining full-output difference is in the quantized projection reduction
+order, not expert selection.
+
 The next acceptance gates are:
 
-1. match the retained MLX token trajectory before extending beyond one layer;
-2. encode one complete full-attention layer with fixed buffers and no MLX
+1. encode MLP HyperConnection read/write and rank-64 healing around this MoE;
+2. match the retained MLX token trajectory before extending beyond one layer;
+3. encode one complete full-attention layer with fixed buffers and no MLX
    synchronization inside the layer;
-3. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
+4. require an adjacent 16K needle improvement, then repeat at 65K and 128K.
 
 Run the bounded primitive probe with:
 
