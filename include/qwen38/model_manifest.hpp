@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -73,6 +74,24 @@ struct QuantizationSpec {
     std::size_t group_size{0};
 };
 
+struct VectorQuantizationSpec {
+    std::size_t expert_count{0};
+    std::size_t output_dimension{0};
+    std::size_t input_dimension{0};
+    std::size_t codebook_size{0};
+    std::size_t vector_dimension{0};
+    std::size_t group_size{0};
+    std::size_t packed_bits{0};
+};
+
+struct VectorQuantizedPleSpec {
+    std::size_t codebook_size{0};
+    std::size_t vector_dimension{0};
+    std::size_t group_size{0};
+    std::size_t row_bytes{0};
+    std::vector<std::string> keys;
+};
+
 class ModelManifest final {
 public:
     [[nodiscard]] static ModelManifest load(const std::filesystem::path& model_directory);
@@ -86,6 +105,11 @@ public:
         return weight_map_.contains(std::string(name));
     }
     [[nodiscard]] QuantizationSpec quantization_for(std::string_view module) const;
+    [[nodiscard]] const VectorQuantizationSpec* vector_quantization_for(
+        std::string_view module) const;
+    [[nodiscard]] const std::optional<VectorQuantizedPleSpec>& vector_quantized_ple() const noexcept {
+        return vector_quantized_ple_;
+    }
     [[nodiscard]] std::uint64_t declared_weight_bytes() const noexcept { return declared_weight_bytes_; }
 
 private:
@@ -93,6 +117,8 @@ private:
     ModelConfig config_;
     std::unordered_map<std::string, std::string> weight_map_;
     std::unordered_map<std::string, QuantizationSpec> quantization_overrides_;
+    std::unordered_map<std::string, VectorQuantizationSpec> vector_quantization_;
+    std::optional<VectorQuantizedPleSpec> vector_quantized_ple_;
     std::uint64_t declared_weight_bytes_{0};
 };
 

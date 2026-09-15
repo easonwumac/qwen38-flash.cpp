@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -238,7 +239,21 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
         result.symbol_to_byte_.emplace(symbol, static_cast<std::uint8_t>(byte));
     }
 
-    const Json vocabulary = Json::parse(read_text(tokenizer_directory / "vocab.json"));
+    std::optional<Json> tokenizer_json;
+    const bool split_files =
+        std::filesystem::is_regular_file(tokenizer_directory / "vocab.json") &&
+        std::filesystem::is_regular_file(tokenizer_directory / "merges.txt");
+    const Json vocabulary = split_files
+        ? Json::parse(read_text(tokenizer_directory / "vocab.json"))
+        : ([&]() {
+              tokenizer_json.emplace(
+                  Json::parse(read_text(tokenizer_directory / "tokenizer.json")));
+              const Json& model = tokenizer_json->at("model");
+              if (model.at("type").as_string() != "BPE") {
+                  throw std::runtime_error("tokenizer.json does not contain a BPE model");
+              }
+              return model.at("vocab");
+          })();
     std::size_t maximum_id = 0;
     for (const auto& [token, id_value] : vocabulary.as_object()) {
         const std::int64_t id = id_value.as_integer();
@@ -252,28 +267,34 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
     result.id_to_token_.resize(maximum_id + 1);
     for (const auto& [token, id] : result.token_to_id_) result.id_to_token_[id] = token;
 
-    std::istringstream merges(read_text(tokenizer_directory / "merges.txt"));
-    std::string line;
     std::uint32_t rank = 0;
-    while (std::getline(merges, line)) {
-        if (line.empty() || line.starts_with("#version")) continue;
-        const auto separator = line.find(' ');
-        if (separator == std::string::npos || separator == 0 || separator + 1 >= line.size()) {
-            throw std::runtime_error("invalid tokenizer merge rule");
+    if (split_files) {
+        std::istringstream merges(read_text(tokenizer_directory / "merges.txt"));
+        std::string line;
+        while (std::getline(merges, line)) {
+            if (line.empty() || line.starts_with("#version")) continue;
+            const auto separator = line.find(' ');
+            if (separator == std::string::npos || separator == 0 || separator + 1 >= line.size()) {
+                throw std::runtime_error("invalid tokenizer merge rule");
+            }
+            result.merge_rank_.emplace(pair_key(
+                std::string_view(line).substr(0, separator),
+                std::string_view(line).substr(separator + 1)), rank++);
         }
-        result.merge_rank_.emplace(pair_key(
-            std::string_view(line).substr(0, separator),
-            std::string_view(line).substr(separator + 1)), rank++);
+    } else {
+        for (const Json& merge : tokenizer_json->at("model").at("merges").as_array()) {
+            const auto& pair = merge.as_array();
+            if (pair.size() != 2 || pair[0].as_string().empty() || pair[1].as_string().empty()) {
+                throw std::runtime_error("invalid tokenizer.json merge rule");
+            }
+            result.merge_rank_.emplace(
+                pair_key(pair[0].as_string(), pair[1].as_string()), rank++);
+        }
     }
 
     const Json tokenizer_config = Json::parse(
         read_text(tokenizer_directory / "tokenizer_config.json"));
-    for (const auto& [id_text, description] : tokenizer_config.at("added_tokens_decoder").as_object()) {
-        std::uint32_t id = 0;
-        const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
-        if (parsed.ec != std::errc{} || parsed.ptr != id_text.data() + id_text.size()) {
-            throw std::runtime_error("invalid added token ID");
-        }
+    const auto add_token = [&](const std::uint32_t id, const Json& description) {
         const std::string token = description.at("content").as_string();
         if (result.id_to_token_.size() <= id) result.id_to_token_.resize(static_cast<std::size_t>(id) + 1);
         result.id_to_token_[id] = token;
@@ -285,6 +306,28 @@ Tokenizer Tokenizer::load(const std::filesystem::path& model_directory) {
         if (description.at("special").as_boolean()) {
             result.special_ids_.insert(id);
         }
+    };
+    const Json* added_decoder = tokenizer_config.find("added_tokens_decoder");
+    if (added_decoder != nullptr && added_decoder->is_object()) {
+        for (const auto& [id_text, description] : added_decoder->as_object()) {
+            std::uint32_t id = 0;
+            const auto parsed = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
+            if (parsed.ec != std::errc{} || parsed.ptr != id_text.data() + id_text.size()) {
+                throw std::runtime_error("invalid added token ID");
+            }
+            add_token(id, description);
+        }
+    } else if (tokenizer_json.has_value()) {
+        for (const Json& description : tokenizer_json->at("added_tokens").as_array()) {
+            const std::int64_t raw_id = description.at("id").as_integer();
+            if (raw_id < 0 ||
+                static_cast<std::uint64_t>(raw_id) > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::runtime_error("invalid tokenizer.json added token ID");
+            }
+            add_token(static_cast<std::uint32_t>(raw_id), description);
+        }
+    } else {
+        throw std::runtime_error("tokenizer config is missing added token metadata");
     }
     return result;
 }

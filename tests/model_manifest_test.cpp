@@ -62,6 +62,11 @@ void run_model_manifest_tests() {
       "quantization":{"bits":4,"group_size":64,
         "language_model.model.layers.0.mlp.switch_mlp.gate_proj":{
           "bits":3,"group_size":64,"mode":"affine"}},
+      "vq_modules":{"model.layers.0.mlp.switch_mlp.gate_proj":{
+        "experts":288,"out":640,"in":2560,"k":16384,"dim":8,
+        "group":64,"pack_bits":14}},
+      "vq_ple":{"geometry":{"k":256,"dim":8,"group":32,"row_bytes":20},
+        "keys":["model.layers.1.ple.ple_embedding.ngram_embedding.shard_0"]},
       "niwaki":{"shared_only_layers":[10,11],"maps_unfolded":true},
       "text_config":{
         "model_type":"qwen4_exp_text","hidden_size":2560,
@@ -113,6 +118,17 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.quantization_for(
         "language_model.model.layers.0.mlp.switch_mlp.gate_proj").bits == 3);
     QWEN38_CHECK(manifest.quantization_for("unlisted").group_size == 64);
+    const auto* vq = manifest.vector_quantization_for(
+        "model.layers.0.mlp.switch_mlp.gate_proj");
+    QWEN38_CHECK(vq != nullptr);
+    QWEN38_CHECK(vq->expert_count == 288);
+    QWEN38_CHECK(vq->codebook_size == 16384);
+    QWEN38_CHECK(vq->vector_dimension == 8);
+    QWEN38_CHECK(vq->packed_bits == 14);
+    QWEN38_CHECK(manifest.vector_quantization_for("unlisted") == nullptr);
+    QWEN38_CHECK(manifest.vector_quantized_ple().has_value());
+    QWEN38_CHECK(manifest.vector_quantized_ple()->row_bytes == 20);
+    QWEN38_CHECK(manifest.vector_quantized_ple()->keys.size() == 1);
     QWEN38_CHECK(manifest.config().shared_only_layers ==
         std::vector<std::size_t>({10, 11}));
     QWEN38_CHECK(manifest.config().niwaki_maps_unfolded);

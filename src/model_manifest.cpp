@@ -29,6 +29,14 @@ std::size_t size_value(const Json& value, const std::string_view name) {
     return static_cast<std::size_t>(integer);
 }
 
+std::size_t optional_size_value(
+    const Json& object,
+    const std::string_view key,
+    const std::string_view name) {
+    const Json* value = object.find(key);
+    return value == nullptr || value->is_null() ? 0 : size_value(*value, name);
+}
+
 } // namespace
 
 ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) {
@@ -195,6 +203,47 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         result.quantization_overrides_.emplace(module, spec);
     }
 
+    if (const Json* modules = root.find("vq_modules")) {
+        for (const auto& [module, value] : modules->as_object()) {
+            const VectorQuantizationSpec spec{
+                .expert_count = size_value(value.at("experts"), "vq_modules.experts"),
+                .output_dimension = size_value(value.at("out"), "vq_modules.out"),
+                .input_dimension = size_value(value.at("in"), "vq_modules.in"),
+                .codebook_size = size_value(value.at("k"), "vq_modules.k"),
+                .vector_dimension = size_value(value.at("dim"), "vq_modules.dim"),
+                .group_size = size_value(value.at("group"), "vq_modules.group"),
+                .packed_bits = optional_size_value(value, "pack_bits", "vq_modules.pack_bits"),
+            };
+            if (spec.expert_count != result.config_.expert_count ||
+                spec.output_dimension == 0 || spec.input_dimension == 0 ||
+                spec.codebook_size < 2 || spec.vector_dimension == 0 ||
+                spec.group_size == 0 || spec.input_dimension % spec.vector_dimension != 0 ||
+                spec.input_dimension % spec.group_size != 0 ||
+                (spec.packed_bits != 0 && spec.packed_bits > 31)) {
+                throw std::runtime_error("unsupported vector quantization geometry for " + module);
+            }
+            result.vector_quantization_.emplace(module, spec);
+        }
+    }
+
+    if (const Json* ple = root.find("vq_ple")) {
+        const Json& geometry = ple->at("geometry");
+        VectorQuantizedPleSpec spec{
+            .codebook_size = size_value(geometry.at("k"), "vq_ple.geometry.k"),
+            .vector_dimension = size_value(geometry.at("dim"), "vq_ple.geometry.dim"),
+            .group_size = size_value(geometry.at("group"), "vq_ple.geometry.group"),
+            .row_bytes = size_value(geometry.at("row_bytes"), "vq_ple.geometry.row_bytes"),
+        };
+        for (const Json& key : ple->at("keys").as_array()) {
+            spec.keys.push_back(key.as_string());
+        }
+        if (spec.codebook_size < 2 || spec.vector_dimension == 0 ||
+            spec.group_size == 0 || spec.row_bytes == 0 || spec.keys.empty()) {
+            throw std::runtime_error("unsupported vector-quantized PLE geometry");
+        }
+        result.vector_quantized_ple_ = std::move(spec);
+    }
+
     if (const Json* niwaki = root.find("niwaki")) {
         if (const Json* maps = niwaki->find("maps_unfolded")) {
             result.config_.niwaki_maps_unfolded = maps->as_boolean();
@@ -268,6 +317,12 @@ QuantizationSpec ModelManifest::quantization_for(const std::string_view module) 
         .bits = config_.quantization_bits,
         .group_size = config_.quantization_group_size,
     };
+}
+
+const VectorQuantizationSpec* ModelManifest::vector_quantization_for(
+    const std::string_view module) const {
+    const auto found = vector_quantization_.find(std::string(module));
+    return found == vector_quantization_.end() ? nullptr : &found->second;
 }
 
 TensorView TensorStore::tensor(const std::string_view name) {
