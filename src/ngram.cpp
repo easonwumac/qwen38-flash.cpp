@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
@@ -58,6 +59,48 @@ Integer read_integer(const std::byte* data) {
 
 float bf16_to_float(const std::uint16_t value) {
     return std::bit_cast<float>(static_cast<std::uint32_t>(value) << 16U);
+}
+
+float f16_to_float(const std::uint16_t value) {
+    const std::uint32_t sign = static_cast<std::uint32_t>(value & 0x8000U) << 16U;
+    const std::uint32_t exponent = (value >> 10U) & 0x1FU;
+    const std::uint32_t fraction = value & 0x03FFU;
+    std::uint32_t bits = 0;
+    if (exponent == 0) {
+        if (fraction == 0) {
+            bits = sign;
+        } else {
+            std::uint32_t normalized = fraction;
+            int shift = 0;
+            while ((normalized & 0x0400U) == 0) {
+                normalized <<= 1U;
+                ++shift;
+            }
+            normalized &= 0x03FFU;
+            bits = sign | (static_cast<std::uint32_t>(113 - shift) << 23U) |
+                (normalized << 13U);
+        }
+    } else if (exponent == 0x1FU) {
+        bits = sign | 0x7F800000U | (fraction << 13U);
+    } else {
+        bits = sign | ((exponent + 112U) << 23U) | (fraction << 13U);
+    }
+    return std::bit_cast<float>(bits);
+}
+
+std::size_t shard_number(const std::string& key) {
+    const std::size_t separator = key.rfind('_');
+    if (separator == std::string::npos || separator + 1 == key.size()) {
+        throw std::runtime_error("invalid vector-quantized PLE shard key");
+    }
+    std::size_t result = 0;
+    const char* begin = key.data() + separator + 1;
+    const char* end = key.data() + key.size();
+    const auto parsed = std::from_chars(begin, end, result);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        throw std::runtime_error("invalid vector-quantized PLE shard number");
+    }
+    return result;
 }
 
 } // namespace
@@ -154,7 +197,12 @@ NgramTable::NgramTable(
     }
     const std::filesystem::path fallback_path = model_directory / "ngram_table.bin";
     if (!std::filesystem::is_regular_file(fallback_path)) {
-        initialize_paired(ModelManifest::load(model_directory));
+        ModelManifest manifest = ModelManifest::load(model_directory);
+        if (manifest.vector_quantized_ple().has_value()) {
+            initialize_vector_quantized(std::move(manifest));
+        } else {
+            initialize_paired(std::move(manifest));
+        }
         return;
     }
     fallback_ = std::make_unique<SafetensorsFile>(fallback_path);
@@ -170,6 +218,55 @@ NgramTable::NgramTable(
         biases_shape.size() != 2 || biases_shape[0] != rows_ ||
         biases_shape[1] != scale_count_) {
         throw std::runtime_error("n-gram table geometry mismatch");
+    }
+}
+
+void NgramTable::initialize_vector_quantized(ModelManifest manifest) {
+    const VectorQuantizedPleSpec& spec = *manifest.vector_quantized_ple();
+    if (spec.codebook_size != 256 || spec.vector_dimension != 8 ||
+        spec.group_size != 32 || spec.row_bytes != dimension_ / spec.vector_dimension) {
+        throw std::runtime_error("unsupported vector-quantized PLE table geometry");
+    }
+    std::vector<std::string> keys = spec.keys;
+    std::sort(keys.begin(), keys.end(), [](const std::string& left, const std::string& right) {
+        return shard_number(left) < shard_number(right);
+    });
+    for (std::size_t index = 0; index < keys.size(); ++index) {
+        if (shard_number(keys[index]) != index) {
+            throw std::runtime_error("vector-quantized PLE shard sequence is incomplete");
+        }
+    }
+
+    vector_quantized_store_ = std::make_unique<TensorStore>(std::move(manifest));
+    std::uint64_t logical_begin = 0;
+    for (const std::string& base : keys) {
+        TensorView codes = vector_quantized_store_->tensor(base + ".codes");
+        TensorView codebook = vector_quantized_store_->tensor(base + ".codebook");
+        TensorView scales = vector_quantized_store_->tensor(base + ".vq_scales");
+        if (codes.dtype != "U8" || codebook.dtype != "F16" || scales.dtype != "F16" ||
+            codes.shape.size() != 2 || codes.shape[1] != spec.row_bytes ||
+            codebook.shape.size() != 2 ||
+            codebook.shape[0] != spec.codebook_size ||
+            codebook.shape[1] != spec.vector_dimension ||
+            scales.shape.size() != 2 || scales.shape[0] != codes.shape[0] ||
+            scales.shape[1] != dimension_ / spec.group_size) {
+            throw std::runtime_error("vector-quantized PLE shard geometry mismatch: " + base);
+        }
+        const std::uint64_t logical_end = logical_begin + codes.shape[0];
+        if (logical_end < logical_begin) {
+            throw std::runtime_error("vector-quantized PLE row count overflows");
+        }
+        vector_quantized_shards_.push_back({
+            .logical_begin = logical_begin,
+            .logical_end = logical_end,
+            .codes = codes,
+            .codebook = codebook,
+            .scales = scales,
+        });
+        logical_begin = logical_end;
+    }
+    if (vector_quantized_shards_.empty() || logical_begin != rows_) {
+        throw std::runtime_error("vector-quantized PLE total row count mismatch");
     }
 }
 
@@ -287,6 +384,33 @@ void NgramTable::decode_paired_row(
     }
 }
 
+void NgramTable::decode_vector_quantized_row(
+    const VectorQuantizedShard& shard,
+    const std::uint64_t logical_row,
+    const std::span<float> output) const {
+    if (output.size() != dimension_ || logical_row < shard.logical_begin ||
+        logical_row >= shard.logical_end) {
+        throw std::runtime_error("invalid vector-quantized PLE row");
+    }
+    const std::size_t row = static_cast<std::size_t>(logical_row - shard.logical_begin);
+    const std::size_t codes_per_row = dimension_ / 8;
+    const std::size_t scales_per_row = dimension_ / 32;
+    const std::byte* codes = shard.codes.bytes.data() + row * codes_per_row;
+    const std::byte* scales = shard.scales.bytes.data() +
+        row * scales_per_row * sizeof(std::uint16_t);
+    for (std::size_t code_index = 0; code_index < codes_per_row; ++code_index) {
+        const std::uint8_t code = read_integer<std::uint8_t>(codes + code_index);
+        const float scale = f16_to_float(read_integer<std::uint16_t>(
+            scales + (code_index / 4) * sizeof(std::uint16_t)));
+        const std::byte* vector = shard.codebook.bytes.data() +
+            (static_cast<std::size_t>(code) * 8) * sizeof(std::uint16_t);
+        for (std::size_t element = 0; element < 8; ++element) {
+            output[code_index * 8 + element] = scale * f16_to_float(
+                read_integer<std::uint16_t>(vector + element * sizeof(std::uint16_t)));
+        }
+    }
+}
+
 std::vector<float> NgramTable::gather(
     const std::span<const std::int64_t> row_ids) const {
     const std::size_t weight_bytes = packed_word_count_ * 4;
@@ -310,6 +434,21 @@ std::vector<float> NgramTable::gather(
                 throw std::runtime_error("Niwaki paired PLE shard lookup failed");
             }
             decode_paired_row(
+                *shard, logical_row,
+                std::span<float>(result).subspan(index * dimension_, dimension_));
+            continue;
+        }
+        if (vector_quantized_store_ != nullptr) {
+            const std::uint64_t logical_row = static_cast<std::uint64_t>(row_ids[index]);
+            const auto shard = std::upper_bound(
+                vector_quantized_shards_.begin(), vector_quantized_shards_.end(), logical_row,
+                [](const std::uint64_t row_id, const VectorQuantizedShard& candidate) {
+                    return row_id < candidate.logical_end;
+                });
+            if (shard == vector_quantized_shards_.end() || logical_row < shard->logical_begin) {
+                throw std::runtime_error("vector-quantized PLE shard lookup failed");
+            }
+            decode_vector_quantized_row(
                 *shard, logical_row,
                 std::span<float>(result).subspan(index * dimension_, dimension_));
             continue;

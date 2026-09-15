@@ -19,7 +19,7 @@ void write_file(const std::filesystem::path& path, const std::string& contents) 
 
 void write_shard(const std::filesystem::path& path) {
     const std::string header =
-        R"({"tensor":{"dtype":"U8","shape":[2],"data_offsets":[0,2]}})";
+        R"({"model.tensor":{"dtype":"U8","shape":[2],"data_offsets":[0,2]}})";
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     const std::uint64_t size = header.size();
     for (unsigned int i = 0; i < 8; ++i) {
@@ -103,7 +103,7 @@ void run_model_manifest_tests() {
     })");
     write_file(directory / "model.safetensors.index.json", R"({
       "metadata":{"total_size":2},
-      "weight_map":{"tensor":"model-00001-of-00001.safetensors"}
+      "weight_map":{"model.tensor":"model-00001-of-00001.safetensors"}
     })");
     write_shard(directory / "model-00001-of-00001.safetensors");
     write_qmeta_sidecar(directory / "model-qmeta-joint9.safetensors", 9, 5);
@@ -152,7 +152,9 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.config().niwaki_ple_bits == 2);
     QWEN38_CHECK(manifest.config().niwaki_ple_group_size == 128);
     QWEN38_CHECK(manifest.declared_weight_bytes() == 2);
-    QWEN38_CHECK(manifest.has_tensor("tensor"));
+    QWEN38_CHECK(manifest.has_tensor("model.tensor"));
+    QWEN38_CHECK(manifest.has_tensor("language_model.model.tensor"));
+    QWEN38_CHECK(manifest.resolve_tensor_name("language_model.model.tensor") == "model.tensor");
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_tags"));
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta9_dict"));
     QWEN38_CHECK(manifest.has_tensor("layer.qmeta16_tags"));
@@ -161,7 +163,7 @@ void run_model_manifest_tests() {
 
     qwen38::TensorStore store(std::move(manifest));
     QWEN38_CHECK(store.open_shard_count() == 0);
-    const auto tensor = store.tensor("tensor");
+    const auto tensor = store.tensor("language_model.model.tensor");
     QWEN38_CHECK(store.open_shard_count() == 1);
     QWEN38_CHECK(tensor.bytes.size() == 2);
     QWEN38_CHECK(std::to_integer<unsigned char>(tensor.bytes[1]) == 9);

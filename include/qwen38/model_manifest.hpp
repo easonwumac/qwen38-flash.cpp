@@ -101,9 +101,8 @@ public:
     [[nodiscard]] const std::unordered_map<std::string, std::string>& weight_map() const noexcept {
         return weight_map_;
     }
-    [[nodiscard]] bool has_tensor(std::string_view name) const {
-        return weight_map_.contains(std::string(name));
-    }
+    [[nodiscard]] bool has_tensor(std::string_view name) const;
+    [[nodiscard]] std::string resolve_tensor_name(std::string_view name) const;
     [[nodiscard]] QuantizationSpec quantization_for(std::string_view module) const;
     [[nodiscard]] const VectorQuantizationSpec* vector_quantization_for(
         std::string_view module) const;

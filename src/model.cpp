@@ -103,9 +103,18 @@ QwenModel::QwenModel(MlxTensorStore& tensors)
     : hidden_size_(tensors.manifest().config().hidden_size),
       stream_count_(tensors.manifest().config().hyper_connection_count),
       vocabulary_size_(tensors.manifest().config().vocabulary_size),
-      bits_(dimension(tensors.manifest().config().quantization_bits, "quantization bits")),
-      group_size_(dimension(
-          tensors.manifest().config().quantization_group_size, "quantization group size")),
+      embedding_bits_(dimension(
+          tensors.manifest().quantization_for("language_model.model.embed_tokens").bits,
+          "embedding quantization bits")),
+      embedding_group_size_(dimension(
+          tensors.manifest().quantization_for("language_model.model.embed_tokens").group_size,
+          "embedding quantization group size")),
+      head_bits_(dimension(
+          tensors.manifest().quantization_for("language_model.lm_head").bits,
+          "head quantization bits")),
+      head_group_size_(dimension(
+          tensors.manifest().quantization_for("language_model.lm_head").group_size,
+          "head quantization group size")),
       embedding_(load_quantized(tensors, "language_model.model.embed_tokens")),
       language_head_(load_quantized(tensors, "language_model.lm_head")),
       final_mixer_(
@@ -160,8 +169,8 @@ MlxArray QwenModel::embed(const std::uint32_t token) const {
         MlxArray::take_axis(embedding_.weight, ids, 0),
         MlxArray::take_axis(embedding_.scales, ids, 0),
         MlxArray::take_axis(embedding_.biases, ids, 0),
-        group_size_,
-        bits_);
+        embedding_group_size_,
+        embedding_bits_);
     const std::vector<int> shape{1, 1, dimension(hidden_size_, "hidden size")};
     return value.reshape(shape);
 }
@@ -179,8 +188,8 @@ TargetDecodeStep QwenModel::forward_decode_capture(
         language_head_.weight,
         language_head_.scales,
         language_head_.biases,
-        group_size_,
-        bits_);
+        head_group_size_,
+        head_bits_);
     return {
         .logits = std::move(logits),
         .pre_mixer_stream = std::move(hidden.pre_mixer_stream),
@@ -265,8 +274,8 @@ ModelPrefillChunk QwenModel::begin_prefill_chunk_batch(
                 tokens,
                 vocabulary_size_,
                 hidden_size_,
-                group_size_,
-                bits_),
+                embedding_group_size_,
+                embedding_bits_),
             stream_count_),
         .next_layer = 0,
         .row_count = tokens.size(),
@@ -388,8 +397,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
                 language_head_.weight,
                 language_head_.scales,
                 language_head_.biases,
-                group_size_,
-                bits_);
+                head_group_size_,
+                head_bits_);
             result.push_back({
                 .logits = std::move(logits),
                 .final_mixed = std::move(final.mixed),
@@ -409,8 +418,8 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
         language_head_.weight,
         language_head_.scales,
         language_head_.biases,
-        group_size_,
-        bits_);
+        head_group_size_,
+        head_bits_);
     const char* defer_head_eval = std::getenv("QWEN38_DEFER_VERIFY_HEAD_EVAL");
     const bool defer_head_eval_enabled =
         defer_head_eval == nullptr || std::string_view(defer_head_eval) != "0";
@@ -478,8 +487,8 @@ std::vector<TargetDecodeStep> QwenModel::forward_decode_capture_multi(
             language_head_.weight,
             language_head_.scales,
             language_head_.biases,
-            group_size_,
-            bits_));
+            head_group_size_,
+            head_bits_));
     }
     std::vector<const MlxArray*> logits_to_eval;
     logits_to_eval.reserve(logits.size());
@@ -522,8 +531,8 @@ MlxArray QwenModel::forward_decode_impl(
         language_head_.weight,
         language_head_.scales,
         language_head_.biases,
-        group_size_,
-        bits_);
+        head_group_size_,
+        head_bits_);
 }
 
 QwenModel::HiddenDecodeStep QwenModel::forward_hidden_decode_impl(

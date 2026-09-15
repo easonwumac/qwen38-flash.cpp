@@ -130,8 +130,10 @@ private:
     std::size_t hidden_size_;
     std::size_t stream_count_;
     std::size_t vocabulary_size_;
-    int bits_;
-    int group_size_;
+    int embedding_bits_;
+    int embedding_group_size_;
+    int head_bits_;
+    int head_group_size_;
     QuantizedTensor embedding_;
     QuantizedTensor language_head_;
     std::vector<std::unique_ptr<DecoderLayer>> layers_;

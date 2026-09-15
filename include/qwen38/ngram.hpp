@@ -58,6 +58,9 @@ public:
     }
     [[nodiscard]] bool uses_bf16_aos() const noexcept { return bf16_aos_fd_ >= 0; }
     [[nodiscard]] bool uses_paired_shards() const noexcept { return paired_store_ != nullptr; }
+    [[nodiscard]] bool uses_vector_quantized_shards() const noexcept {
+        return vector_quantized_store_ != nullptr;
+    }
     [[nodiscard]] std::size_t row_dimension() const noexcept { return dimension_; }
 
 private:
@@ -69,10 +72,23 @@ private:
         TensorView biases;
     };
 
+    struct VectorQuantizedShard {
+        std::uint64_t logical_begin{0};
+        std::uint64_t logical_end{0};
+        TensorView codes;
+        TensorView codebook;
+        TensorView scales;
+    };
+
     void initialize_paired(ModelManifest manifest);
+    void initialize_vector_quantized(ModelManifest manifest);
     void decode_row(std::span<const std::byte> packed, std::span<float> output) const;
     void decode_paired_row(
         const PairedShard& shard,
+        std::uint64_t logical_row,
+        std::span<float> output) const;
+    void decode_vector_quantized_row(
+        const VectorQuantizedShard& shard,
         std::uint64_t logical_row,
         std::span<float> output) const;
 
@@ -91,6 +107,8 @@ private:
     TensorView fallback_biases_;
     std::unique_ptr<TensorStore> paired_store_;
     std::vector<PairedShard> paired_shards_;
+    std::unique_ptr<TensorStore> vector_quantized_store_;
+    std::vector<VectorQuantizedShard> vector_quantized_shards_;
 };
 
 } // namespace qwen38

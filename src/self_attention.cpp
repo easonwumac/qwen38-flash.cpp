@@ -451,21 +451,28 @@ SelfAttention::SelfAttention(
       indexer_head_dimension_(config.indexer_head_dimension),
       indexer_budget_(config.indexer_budget),
       indexer_compress_ratio_(config.indexer_compress_ratio),
-      group_size_(dimension(config.quantization_group_size, "quantization group size")),
+      group_size_(dimension(
+          tensors.manifest().quantization_for(std::string(prefix) + ".q_proj").group_size,
+          "quantization group size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       rope_theta_(config.rope_theta),
       query_projection_(load_projection(
-          tensors, std::string(prefix) + ".q_proj", config.quantization_group_size)),
+          tensors, std::string(prefix) + ".q_proj",
+          tensors.manifest().quantization_for(std::string(prefix) + ".q_proj").group_size)),
       key_projection_(load_projection(
-          tensors, std::string(prefix) + ".k_proj", config.quantization_group_size)),
+          tensors, std::string(prefix) + ".k_proj",
+          tensors.manifest().quantization_for(std::string(prefix) + ".k_proj").group_size)),
       value_projection_(load_projection(
-          tensors, std::string(prefix) + ".v_proj", config.quantization_group_size)),
+          tensors, std::string(prefix) + ".v_proj",
+          tensors.manifest().quantization_for(std::string(prefix) + ".v_proj").group_size)),
       output_projection_(load_projection(
-          tensors, std::string(prefix) + ".o_proj", config.quantization_group_size)),
+          tensors, std::string(prefix) + ".o_proj",
+          tensors.manifest().quantization_for(std::string(prefix) + ".o_proj").group_size)),
       indexer_projection_(load_projection(
           tensors,
           std::string(prefix) + ".indexer.index_qk_proj",
-          config.quantization_group_size)),
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".indexer.index_qk_proj").group_size)),
       query_norm_weight_(effective_norm_weight(
           tensors.tensor(std::string(prefix) + ".q_norm.weight"),
           config.head_dimension,

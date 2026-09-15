@@ -135,8 +135,14 @@ GatedDeltaNet::GatedDeltaNet(
       key_head_dimension_(config.linear_key_head_dimension),
       value_head_dimension_(config.linear_value_head_dimension),
       convolution_kernel_size_(config.linear_convolution_kernel_size),
-      bits_(dimension(config.quantization_bits, "quantization_bits")),
-      group_size_(dimension(config.quantization_group_size, "quantization_group_size")),
+      bits_(dimension(
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".in_proj_qkv").bits,
+          "quantization_bits")),
+      group_size_(dimension(
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".in_proj_qkv").group_size,
+          "quantization_group_size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       output_gate_type_(config.output_gate_type),
       projection_hook_(projection_hook),

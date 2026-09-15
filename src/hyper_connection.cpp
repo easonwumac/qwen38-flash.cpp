@@ -94,8 +94,14 @@ HyperConnection::HyperConnection(
     const bool with_injection)
     : hidden_size_(hidden_size),
       stream_count_(stream_count),
-      bits_(checked_dimension(quantization_bits, "quantization_bits")),
-      group_size_(checked_dimension(quantization_group_size, "quantization_group_size")),
+      bits_(checked_dimension(
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".input_mix_weight_down").bits,
+          "quantization_bits")),
+      group_size_(checked_dimension(
+          tensors.manifest().quantization_for(
+              std::string(prefix) + ".input_mix_weight_down").group_size,
+          "quantization_group_size")),
       rms_norm_epsilon_(rms_norm_epsilon),
       with_injection_(with_injection),
       norm_weight_(),
@@ -104,6 +110,8 @@ HyperConnection::HyperConnection(
       injection_(with_injection
               ? load_projection(tensors, std::string(prefix) + ".block_inject_weight")
               : Projection{}) {
+    static_cast<void>(quantization_bits);
+    static_cast<void>(quantization_group_size);
     static_cast<void>(checked_dimension(hidden_size_, "hidden_size"));
     static_cast<void>(checked_dimension(stream_count_, "stream_count"));
     if (!(rms_norm_epsilon_ > 0.0F)) throw std::runtime_error("RMS norm epsilon must be positive");
@@ -142,7 +150,7 @@ HyperConnection::Projection HyperConnection::load_projection(
     MlxTensorStore& tensors,
     const std::string_view name) const {
     const std::string base(name);
-    const bool quantized = tensors.manifest().weight_map().contains(base + ".scales");
+    const bool quantized = tensors.manifest().has_tensor(base + ".scales");
     if (!quantized) {
         return {
             .weight = tensors.tensor(base + ".weight"),

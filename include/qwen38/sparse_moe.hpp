@@ -81,11 +81,17 @@ private:
         MlxArray weight;
         MlxArray scales;
         MlxArray biases;
+        MlxArray codebook;
         CompactQmeta qmeta;
         mutable DecodedQmeta cached_qmeta;
         mutable bool qmeta_cached{false};
         int bits{0};
         int group_size{0};
+        int input_dimension{0};
+        int output_dimension{0};
+        int vector_dimension{0};
+        int packed_bits{0};
+        bool vector_quantized{false};
     };
 
     struct LinearProjection {
@@ -114,6 +120,9 @@ private:
         const MlxArray& input,
         const QuantizedProjection& projection,
         std::size_t expert) const;
+    [[nodiscard]] static MlxArray decode_vector_quantized_expert(
+        const QuantizedProjection& projection,
+        const MlxArray& expert);
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_grouped(const MlxArray& input) const;
@@ -150,6 +159,7 @@ private:
     std::shared_ptr<MlxMetalKernel> fused_gate_up_;
     std::shared_ptr<MlxMetalKernel> fused_down_;
     bool fused_q8_exact_{false};
+    bool fused_vq_{false};
     bool compact_qmeta_{false};
     mutable bool prefill_qmeta_cache_allowed_{true};
 };

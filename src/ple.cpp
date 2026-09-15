@@ -67,8 +67,12 @@ Ple::Ple(
       stream_count_(config.hyper_connection_count),
       convolution_state_length_(
           (config.ple_convolution_kernel_size - 1) * config.ngram_size),
-      bits_(dimension(config.quantization_bits, "quantization bits")),
-      group_size_(dimension(config.quantization_group_size, "quantization group size")),
+      bits_(dimension(
+          tensors.manifest().quantization_for(std::string(prefix) + ".key_proj").bits,
+          "quantization bits")),
+      group_size_(dimension(
+          tensors.manifest().quantization_for(std::string(prefix) + ".key_proj").group_size,
+          "quantization group size")),
       epsilon_(static_cast<float>(config.rms_norm_epsilon)),
       hash_(config),
       table_(ngram_table_directory(tensors), hash_.total_rows()),

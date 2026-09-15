@@ -32,12 +32,14 @@ qwen38::MlxArray make_input(
     const auto weight = tensors.tensor("language_model.model.embed_tokens.weight");
     const auto scales = tensors.tensor("language_model.model.embed_tokens.scales");
     const auto biases = tensors.tensor("language_model.model.embed_tokens.biases");
+    const auto embedding_quantization =
+        tensors.manifest().quantization_for("language_model.model.embed_tokens");
     auto embedding = qwen38::MlxArray::dequantize(
         qwen38::MlxArray::take_axis(weight, ids, 0),
         qwen38::MlxArray::take_axis(scales, ids, 0),
         qwen38::MlxArray::take_axis(biases, ids, 0),
-        static_cast<int>(config.quantization_group_size),
-        static_cast<int>(config.quantization_bits));
+        static_cast<int>(embedding_quantization.group_size),
+        static_cast<int>(embedding_quantization.bits));
     const std::vector<int> embedding_shape{
         1, static_cast<int>(rows), static_cast<int>(config.hidden_size)};
     auto stream = qwen38::HyperConnection::initialize_stream(

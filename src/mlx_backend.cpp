@@ -1068,8 +1068,9 @@ void MlxSafetensors::save(
 
 MlxArray MlxTensorStore::tensor(const std::string_view name) {
     std::scoped_lock lock(mutex_);
-    if (paged_) return read_tensor(std::string(name), std::nullopt);
-    const auto mapping = manifest_.weight_map().find(std::string(name));
+    const std::string resolved = manifest_.resolve_tensor_name(name);
+    if (paged_) return read_tensor(resolved, std::nullopt);
+    const auto mapping = manifest_.weight_map().find(resolved);
     if (mapping == manifest_.weight_map().end()) {
         throw std::out_of_range("tensor is not present in model index: " + std::string(name));
     }
@@ -1078,7 +1079,7 @@ MlxArray MlxTensorStore::tensor(const std::string_view name) {
         auto file = std::make_unique<MlxSafetensors>(manifest_.directory() / mapping->second);
         shard = shards_.emplace(mapping->second, std::move(file)).first;
     }
-    return shard->second->tensor(name);
+    return shard->second->tensor(resolved);
 }
 
 TensorView MlxTensorStore::disk_view(const std::string& name) {

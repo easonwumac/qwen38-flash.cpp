@@ -20,7 +20,8 @@ int main(int argc, char** argv) {
         const qwen38::ModelManifest manifest = qwen38::ModelManifest::load(argv[1]);
         qwen38::NgramHash hash(manifest.config());
         qwen38::NgramTable table(manifest.directory(), hash.total_rows(), true);
-        if (!table.uses_aos() && !table.uses_paired_shards()) {
+        if (!table.uses_aos() && !table.uses_paired_shards() &&
+            !table.uses_vector_quantized_shards()) {
             throw std::runtime_error("supported n-gram storage is unavailable");
         }
         qwen38::NgramState state;
@@ -58,7 +59,8 @@ int main(int argc, char** argv) {
         }
         const double first_checksum = std::accumulate(first.begin(), first.end(), 0.0);
         const double second_checksum = std::accumulate(second.begin(), second.end(), 0.0);
-        const char* storage = table.uses_paired_shards() ? "niwaki-paired-q2-mmap" :
+        const char* storage = table.uses_vector_quantized_shards() ? "vq-d8-k256-mmap" :
+            table.uses_paired_shards() ? "niwaki-paired-q2-mmap" :
             table.uses_bf16_aos() ? "bf16-aos-pread" :
             table.uses_q8_aos() ? "q8-aos-pread" : "q4-aos-pread";
         std::cout << "{\"storage\":\"" << storage << "\",\"first_row\":" << first_rows.front()

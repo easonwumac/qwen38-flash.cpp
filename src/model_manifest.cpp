@@ -313,6 +313,11 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
 QuantizationSpec ModelManifest::quantization_for(const std::string_view module) const {
     const auto found = quantization_overrides_.find(std::string(module));
     if (found != quantization_overrides_.end()) return found->second;
+    constexpr std::string_view wrapper = "language_model.";
+    if (module.starts_with(wrapper)) {
+        const auto flat = quantization_overrides_.find(std::string(module.substr(wrapper.size())));
+        if (flat != quantization_overrides_.end()) return flat->second;
+    }
     return {
         .bits = config_.quantization_bits,
         .group_size = config_.quantization_group_size,
@@ -321,13 +326,32 @@ QuantizationSpec ModelManifest::quantization_for(const std::string_view module) 
 
 const VectorQuantizationSpec* ModelManifest::vector_quantization_for(
     const std::string_view module) const {
-    const auto found = vector_quantization_.find(std::string(module));
+    auto found = vector_quantization_.find(std::string(module));
+    constexpr std::string_view wrapper = "language_model.";
+    if (found == vector_quantization_.end() && module.starts_with(wrapper)) {
+        found = vector_quantization_.find(std::string(module.substr(wrapper.size())));
+    }
     return found == vector_quantization_.end() ? nullptr : &found->second;
+}
+
+std::string ModelManifest::resolve_tensor_name(const std::string_view name) const {
+    if (weight_map_.contains(std::string(name))) return std::string(name);
+    constexpr std::string_view wrapper = "language_model.";
+    if (name.starts_with(wrapper)) {
+        std::string flat(name.substr(wrapper.size()));
+        if (weight_map_.contains(flat)) return flat;
+    }
+    return std::string(name);
+}
+
+bool ModelManifest::has_tensor(const std::string_view name) const {
+    return weight_map_.contains(resolve_tensor_name(name));
 }
 
 TensorView TensorStore::tensor(const std::string_view name) {
     std::scoped_lock lock(mutex_);
-    const auto mapping = manifest_.weight_map().find(std::string(name));
+    const std::string resolved = manifest_.resolve_tensor_name(name);
+    const auto mapping = manifest_.weight_map().find(resolved);
     if (mapping == manifest_.weight_map().end()) {
         throw std::out_of_range("tensor is not present in model index: " + std::string(name));
     }
@@ -336,7 +360,7 @@ TensorView TensorStore::tensor(const std::string_view name) {
         auto file = std::make_unique<SafetensorsFile>(manifest_.directory() / mapping->second);
         shard = shards_.emplace(mapping->second, std::move(file)).first;
     }
-    return shard->second->tensor(name);
+    return shard->second->tensor(resolved);
 }
 
 std::size_t TensorStore::open_shard_count() const {
