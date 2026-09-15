@@ -539,6 +539,11 @@ SparseMoe::LinearProjection SparseMoe::load_linear(
 
 void SparseMoe::make_resident(QuantizedProjection& projection) {
     projection.weight.lock_pages();
+    if (projection.vector_quantized) {
+        projection.scales.lock_pages();
+        projection.codebook.lock_pages();
+        return;
+    }
     if (projection.qmeta.present()) {
         projection.qmeta.tags.lock_pages();
         projection.qmeta.dictionary.lock_pages();
@@ -834,6 +839,17 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             } else if (normalize_topk_probability_) {
                 weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
             }
+            weights = weights.reshape(
+                std::vector<int>{1, static_cast<int>(experts_per_token_)});
+            // argpartition does not order the selected slots.  The fused VQ
+            // reduction is intentionally sequential across slots, so keep the
+            // same descending-probability accumulation order as route_decode.
+            MlxArray route_order = weights.negative().argsort_axis(-1);
+            experts = MlxArray::take_along_axis(
+                experts.reshape(std::vector<int>{1, static_cast<int>(experts_per_token_)}),
+                route_order, -1).reshape(
+                    std::vector<int>{static_cast<int>(experts_per_token_)});
+            weights = MlxArray::take_along_axis(weights, route_order, -1);
             weights = weights.reshape(
                 std::vector<int>{static_cast<int>(experts_per_token_)});
             weights = weights.astype(MLX_FLOAT32);

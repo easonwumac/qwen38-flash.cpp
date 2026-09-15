@@ -2,6 +2,7 @@
 #include "qwen38/runtime_profile.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -54,6 +55,67 @@ int main(int argc, char** argv) {
         const std::size_t batch_width = argc == 4 ? parse_batch_width(argv[3]) : 1;
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
+        if (std::getenv("QWEN38_ROUTE_PARITY") != nullptr) {
+            if (batch_width != 1) {
+                throw std::runtime_error("route parity requires BATCH=1");
+            }
+            qwen38::ModelDecodeState baseline_state = model.make_state();
+            qwen38::ModelDecodeState device_state = model.make_state();
+            std::uint32_t teacher_token = 9419;
+            bool all_top1_match = true;
+            std::cout << "{\"route_parity\":[";
+            for (std::size_t step = 0; step < steps; ++step) {
+                unsetenv("QWEN38_DEVICE_ROUTER");
+                unsetenv("QWEN38_SELECTED_SOFTMAX_ROUTER");
+                const std::vector<float> baseline = model.forward_decode(
+                    teacher_token, baseline_state).astype(MLX_FLOAT32).to_float32();
+                if (setenv("QWEN38_DEVICE_ROUTER", "1", 1) != 0 ||
+                    setenv("QWEN38_SELECTED_SOFTMAX_ROUTER", "1", 1) != 0) {
+                    throw std::runtime_error("cannot configure route parity candidate");
+                }
+                const std::vector<float> candidate = model.forward_decode(
+                    teacher_token, device_state).astype(MLX_FLOAT32).to_float32();
+                if (baseline.size() != candidate.size() || baseline.size() < 2) {
+                    throw std::runtime_error("route parity logits shape mismatch");
+                }
+                const auto baseline_best = std::ranges::max_element(baseline);
+                const auto candidate_best = std::ranges::max_element(candidate);
+                const std::uint32_t baseline_token = static_cast<std::uint32_t>(
+                    std::distance(baseline.begin(), baseline_best));
+                const std::uint32_t candidate_token = static_cast<std::uint32_t>(
+                    std::distance(candidate.begin(), candidate_best));
+                float baseline_second = -std::numeric_limits<float>::infinity();
+                double squared = 0.0;
+                double max_abs = 0.0;
+                for (std::size_t index = 0; index < baseline.size(); ++index) {
+                    if (index != baseline_token) {
+                        baseline_second = std::max(baseline_second, baseline[index]);
+                    }
+                    const double difference = static_cast<double>(candidate[index]) -
+                        static_cast<double>(baseline[index]);
+                    squared += difference * difference;
+                    max_abs = std::max(max_abs, std::abs(difference));
+                }
+                const bool top1_match = baseline_token == candidate_token;
+                all_top1_match = all_top1_match && top1_match;
+                if (step != 0) std::cout << ',';
+                std::cout << "{\"step\":" << step
+                          << ",\"input\":" << teacher_token
+                          << ",\"baseline_top1\":" << baseline_token
+                          << ",\"candidate_top1\":" << candidate_token
+                          << ",\"top1_match\":" << (top1_match ? "true" : "false")
+                          << ",\"baseline_margin\":" << (*baseline_best - baseline_second)
+                          << ",\"max_abs\":" << max_abs
+                          << ",\"rmse\":" << std::sqrt(
+                              squared / static_cast<double>(baseline.size())) << '}';
+                teacher_token = baseline_token;
+            }
+            unsetenv("QWEN38_DEVICE_ROUTER");
+            unsetenv("QWEN38_SELECTED_SOFTMAX_ROUTER");
+            std::cout << "],\"all_top1_match\":"
+                      << (all_top1_match ? "true" : "false") << "}\n";
+            return EXIT_SUCCESS;
+        }
         if (batch_width > 1) {
             std::vector<qwen38::ModelDecodeState> serial_states;
             std::vector<qwen38::ModelDecodeState> batched_states;
