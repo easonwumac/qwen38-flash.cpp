@@ -15,7 +15,9 @@ from mlx_vlm.sample_utils import make_sampler
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # JSON strings may legally contain Unicode line/paragraph separators.  Only
+    # an ASCII newline delimits JSONL records.
+    return [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -29,6 +31,7 @@ def main() -> int:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--benchmark", default="IFBench single-turn OOD test")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--offset", type=int, default=0)
@@ -161,7 +164,7 @@ def main() -> int:
     write_jsonl(args.responses, response_rows)
     summary = {
         "protocol": {
-            "benchmark": "IFBench single-turn OOD test",
+            "benchmark": args.benchmark,
             "dataset_sha256": hashlib.sha256(raw_input).hexdigest(),
             "dataset_rows": len(load_jsonl(args.input)),
             "evaluated_rows": len(rows),

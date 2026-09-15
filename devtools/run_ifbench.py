@@ -15,7 +15,9 @@ from typing import Any
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    # JSON strings may legally contain Unicode line/paragraph separators.  Only
+    # an ASCII newline delimits JSONL records.
+    return [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -35,6 +37,7 @@ def main() -> int:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--responses", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--benchmark", default="IFBench single-turn OOD test")
     parser.add_argument("--url", default="http://127.0.0.1:11438")
     parser.add_argument("--model", default="qwen38-flash")
     parser.add_argument("--max-tokens", type=int, default=4096)
@@ -187,7 +190,7 @@ def main() -> int:
     )
     summary = {
         "protocol": {
-            "benchmark": "IFBench single-turn OOD test",
+            "benchmark": args.benchmark,
             "temperature": temperature,
             "top_p": None if args.no_thinking else args.top_p,
             "top_k": None if args.no_thinking else args.top_k,
