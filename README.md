@@ -120,6 +120,7 @@ Long-context distributions below use independent cold server starts.
 | Niwaki 113B native-PLE bounded-thinking pilot, 3 prompts | native paired Q2/group-128 PLE mmap + REAP tokenizer; temperature 1, top-p .95, top-k 20, seed 0, xhigh bounded thinking, 105--188 prompt tokens, max 4,096; MTP off | **0/3 explicit keyword gates**; **37.76 aggregate decode tok/s** (36.65--38.70); 26.6 GiB peak footprint |
 | Niwaki 113B stock control, first pilot prompt | stock `mlx-vlm` 0.7.0/MLX 0.32.2 and native 2-bit PLE; sampled xhigh thinking, max 4,096 | no `</think>` or final answer; 29.13 tok/s; 43.58 GB MLX peak / 41.3 GiB guarded footprint |
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
+| Four-request continuous decode, 4 x 128 tokens | REAP-288 Q4 + Q8 SSD PLE; `speed`, MTP/thinking off, greedy; warm HTTP A/B on four short prompts | **45.70 aggregate decode tok/s** vs 41.5--41.7 serial; exact per-request output parity; 38.9 GiB peak footprint |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
@@ -179,9 +180,10 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   product claim is therefore not made.
 - The Q8 drafter increases admission pressure. `--mtp-depth off` is retained as
   a resource-limit override for smaller machines.
-- Four HTTP connections can queue concurrently, but inference is serialized.
-  Replicating four MLX engines exceeded 49 GiB in a short-request probe; true
-  four-way service under 40 GiB requires single-model continuous batching.
+- The executor automatically coalesces up to four ordinary requests into one
+  exact-arithmetic continuous decode batch. Thinking requests and batches above
+  the 131,072-token aggregate admission limit remain serial; MTP is bypassed
+  while a cross-request batch is active.
 - Multimodal input is not supported.
 - The server currently exposes Chat Completions, not the Responses API required
   by current Codex custom providers.
@@ -267,8 +269,9 @@ telemetry. See [API details](docs/api.md).
 
 - C++20 owns the runtime, scheduling, caches, tokenizer, and HTTP server.
 - Metal and MLX-C provide Apple Silicon execution.
-- Model requests are serialized intentionally; HTTP health/status work remains
-  concurrent and bounded.
+- One thread-affine model serves up to four independent request states through
+  layer-major continuous decode; HTTP health/status work remains concurrent and
+  bounded. Single requests retain the normal serial/MTP path.
 - The release suite covers unit tests, real tokenizer fixtures, MLX ABI,
   component parity, full generation, API/tool/SSE behavior, cancellation,
   malformed requests, cache restart/clear, retrieval, and soak behavior.

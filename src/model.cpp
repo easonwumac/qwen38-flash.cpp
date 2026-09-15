@@ -403,6 +403,74 @@ std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(
     return result;
 }
 
+std::vector<TargetDecodeStep> QwenModel::forward_decode_capture_multi(
+    const std::span<const std::uint32_t> tokens,
+    const std::span<ModelDecodeState* const> states) const {
+    if (tokens.empty() || tokens.size() != states.size() || tokens.size() > 64) {
+        throw std::runtime_error("multi-request model decode requires 1 to 64 matching rows");
+    }
+    for (std::size_t row = 0; row < states.size(); ++row) {
+        if (states[row] == nullptr || states[row]->layers.size() != layers_.size()) {
+            throw std::runtime_error("multi-request model state layer count mismatch");
+        }
+        if (tokens[row] >= vocabulary_size_) {
+            throw std::runtime_error("multi-request token id is out of range");
+        }
+    }
+
+    std::vector<MlxArray> streams;
+    streams.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        streams.push_back(HyperConnection::initialize_stream(
+            embed(tokens[row]), stream_count_));
+    }
+
+    const std::size_t barrier_stride = decode_barrier_stride();
+    std::vector<DecoderLayerState*> layer_states(states.size());
+    for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
+        for (std::size_t row = 0; row < states.size(); ++row) {
+            layer_states[row] = &states[row]->layers[layer];
+        }
+        streams = layers_[layer]->forward_decode_multi(
+            std::move(streams), tokens, layer_states);
+        if ((layer + 1) % barrier_stride == 0 || layer + 1 == layers_.size()) {
+            std::vector<const MlxArray*> arrays;
+            arrays.reserve(streams.size() + states.size() * layers_.size() * 2);
+            for (const MlxArray& stream : streams) arrays.push_back(&stream);
+            for (const ModelDecodeState* state : states) append_qsa_arrays(arrays, *state);
+            MlxArray::eval_all(arrays);
+        }
+    }
+
+    std::vector<MlxArray> logits;
+    logits.reserve(tokens.size());
+    for (const MlxArray& stream : streams) {
+        HyperConnectionRead final = final_mixer_.read(stream);
+        logits.push_back(MlxArray::quantized_matmul(
+            final.mixed,
+            language_head_.weight,
+            language_head_.scales,
+            language_head_.biases,
+            group_size_,
+            bits_));
+    }
+    std::vector<const MlxArray*> logits_to_eval;
+    logits_to_eval.reserve(logits.size());
+    for (const MlxArray& row : logits) logits_to_eval.push_back(&row);
+    MlxArray::eval_all(logits_to_eval);
+
+    std::vector<TargetDecodeStep> result;
+    result.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        ++states[row]->token_count;
+        result.push_back({
+            .logits = std::move(logits[row]),
+            .pre_mixer_stream = std::move(streams[row]),
+        });
+    }
+    return result;
+}
+
 MlxArray QwenModel::trace_decode(
     const std::uint32_t token,
     ModelDecodeState& state,

@@ -51,6 +51,9 @@ public:
     [[nodiscard]] TargetDecodeStep forward_decode_capture(
         std::uint32_t token,
         ModelDecodeState& state) const;
+    [[nodiscard]] std::vector<TargetDecodeStep> forward_decode_capture_multi(
+        std::span<const std::uint32_t> tokens,
+        std::span<ModelDecodeState* const> states) const;
     [[nodiscard]] MlxArray consume_decode_capture(
         std::uint32_t token,
         ModelDecodeState& state) const;

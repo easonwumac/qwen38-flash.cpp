@@ -4,10 +4,18 @@ All endpoints bind to `127.0.0.1` by default. The server handles one HTTP/1.1
 request per connection and closes it after the response. Four bounded HTTP
 workers let health, status, and metrics run while generation is active; the
 pending socket queue is capped at 128 and returns `503 server_busy` when full.
-Native inference is serialized through one dedicated MLX executor thread, so
-model construction, evaluation, cache mutation, and destruction retain stream
-affinity without duplicating weights. Authentication and concurrent model
-scheduling remain later milestones.
+One dedicated MLX executor thread preserves stream affinity without duplicating
+weights. It waits up to 2 ms and coalesces as many as four compatible queued
+requests into one layer-major continuous decode batch. Each request has an
+independent KV/GDN/PLE state and sampler; finished or cancelled rows leave the
+batch without delaying the remaining rows.
+
+The automatic aggregate admission limit is 131,072 prompt-plus-reserved-output
+tokens (`QWEN38_BATCH_CONTEXT_TOKENS` can override it). Larger groups and
+thinking requests run serially. Cross-request batches bypass MTP because the
+batch already amortizes target execution; a lone request retains the configured
+serial/MTP path. This keeps the normal path automatic while bounding unified
+memory use.
 
 The server defaults to stable serial inference. MTP companion execution is
 enabled only when `--mtp-depth auto`, `2`, `3`, or `4` is passed explicitly;
@@ -23,7 +31,7 @@ contain a drafter from silently increasing the steady memory requirement.
 | `GET` | `/metrics` | Prometheus text metrics. |
 | `POST` | `/v1/chat/completions` | Native chat-template, tokenization, greedy generation, usage and timing. |
 | `POST` | `/v1/completions` | Native tokenization and greedy generation, usage and timing. |
-| `POST` | `/admin/cache/clear` | Clears unused MLX allocator/cache blocks; active request state is serialized and never invalidated. |
+| `POST` | `/admin/cache/clear` | Clears unused MLX allocator/cache blocks after active request states complete. |
 
 Completion requests accept a string `prompt` and a positive `max_tokens` up to
 the server's `--max-generation-tokens` limit (4096 by default). The combined

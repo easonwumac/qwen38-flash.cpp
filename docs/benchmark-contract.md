@@ -40,3 +40,19 @@ reported as diagnostics but cannot prove a universal acceptance gate.
 - Prefix-cache correctness and a context sweep through the maximum feasible size,
   with an explicit 262,144-token result or a measured hardware-memory limit.
 - No leaks, sanitizer errors, request corruption, or unrecovered failed state.
+
+## Continuous-decode gate
+
+Cross-request batching is compared with four sequential requests using the same
+live server, prompts, sampler seeds, output limits, and MTP setting. Promotion
+requires exact per-request token parity, repeatability after reversing arrival
+order, higher aggregate decode throughput, and a peak footprint below 40 GiB on
+the 64 GB validation Mac. Per-request tok/s is not presented as aggregate tok/s.
+
+The retained warm directional check uses REAP-288 Q4/group-64, standalone Q8
+PLE, the `speed` profile, MTP/thinking off, four distinct short prompts, and 128
+greedy output tokens each. It measured 45.70 aggregate decode tok/s versus four
+serial requests at 41.48--41.68 tok/s, with exact output parity and a 38.9 GiB
+peak footprint. The corresponding layer-major microbenchmark measured 45.86
+versus 38.41 aggregate tok/s (1.194x) across 4 x 14 measured steps. These are
+directional concurrency results, not single-stream decode claims.

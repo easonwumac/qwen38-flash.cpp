@@ -431,6 +431,20 @@ The implementation order is deliberately narrow:
    cost is lower than its acceptance benefit and all recurrent/QSA state is
    branch-local.
 
+## Cross-request batching decision
+
+- Replicating four complete engines remains rejected: the guarded serving probe
+  exceeded 49 GiB. The retained implementation owns one model/qmeta set and up
+  to four independent request states.
+- Batching HyperConnection and embedding reductions reached about 53.1
+  aggregate tok/s in the 4-row microbenchmark, but changed greedy trajectories
+  after near-tied logits. That form was removed. Evaluating four unchanged
+  single-row graphs at shared layer barriers is bit-exact against serial output
+  and still reaches 45.86 versus 38.41 aggregate tok/s in the same probe.
+- The HTTP executor coalesces for at most 2 ms, dynamically removes completed
+  rows, and falls back to serial for thinking or aggregate contexts above the
+  admission bound. This avoids a second user-facing concurrency profile.
+
 ## Promotion gates
 
 An optimization is promoted only when all of the following hold:

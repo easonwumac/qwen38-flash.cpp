@@ -56,6 +56,10 @@ public:
         std::uint32_t token,
         DecoderLayerState& state,
         DecoderLayerTrace* trace = nullptr) const;
+    [[nodiscard]] std::vector<MlxArray> forward_decode_multi(
+        std::vector<MlxArray> streams,
+        std::span<const std::uint32_t> tokens,
+        std::span<DecoderLayerState* const> states) const;
     [[nodiscard]] std::vector<MlxArray> forward_verify_dense_batched(
         std::vector<MlxArray> streams,
         std::span<const std::uint32_t> tokens,

@@ -228,6 +228,28 @@ MlxArray DecoderLayer::forward_decode(
     return forward_decode_graph(input_stream, token, state, trace);
 }
 
+std::vector<MlxArray> DecoderLayer::forward_decode_multi(
+    std::vector<MlxArray> streams,
+    const std::span<const std::uint32_t> tokens,
+    const std::span<DecoderLayerState* const> states) const {
+    if (streams.empty() || streams.size() != tokens.size() ||
+        streams.size() != states.size() || streams.size() > 64) {
+        throw std::runtime_error("multi-request decode requires 1 to 64 matching rows");
+    }
+    std::vector<MlxArray> result;
+    result.reserve(streams.size());
+    for (std::size_t row = 0; row < streams.size(); ++row) {
+        if (states[row] == nullptr) {
+            throw std::runtime_error("multi-request decode state is null");
+        }
+        // Preserve the exact single-row graph. Throughput comes from evaluating
+        // several independent lazy graphs at each shared barrier, not from
+        // changing reduction order inside a request.
+        result.push_back(forward_decode(streams[row], tokens[row], *states[row]));
+    }
+    return result;
+}
+
 std::vector<MlxArray> DecoderLayer::forward_verify_dense_batched(
     std::vector<MlxArray> streams,
     const std::span<const std::uint32_t> tokens,

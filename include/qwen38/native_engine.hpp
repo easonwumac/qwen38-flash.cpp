@@ -51,6 +51,13 @@ struct NativeEngineOptions {
 
 class NativeEngine final : public InferenceEngine {
 public:
+    struct BatchRequest {
+        std::string prompt;
+        std::size_t max_tokens{0};
+        std::optional<TextDeltaCallback> on_delta;
+        SamplingOptions sampling;
+    };
+
     explicit NativeEngine(
         const std::filesystem::path& model_directory,
         NativeEngineOptions options = {});
@@ -64,6 +71,11 @@ public:
         std::size_t max_tokens,
         const TextDeltaCallback& on_delta,
         const SamplingOptions& sampling = {}) override;
+    // Runs independent request states through one layer-major decode graph.
+    // MTP is intentionally disabled while multiple requests are active: the
+    // batch itself supplies the throughput gain without speculative memory.
+    [[nodiscard]] std::vector<GenerationResult> complete_batch(
+        std::vector<BatchRequest> requests);
     void clear_cache() override;
 
 private:
