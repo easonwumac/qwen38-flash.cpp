@@ -1522,6 +1522,7 @@ MlxArray SparseMoe::forward_prefill_impl(
     if (fused_vq_) {
         const int rows = shape[1];
         const int slots = checked_int(experts_per_token_, "VQ slots");
+        const auto routing_started = Clock::now();
         MlxArray gates = project_linear(input, router_).softmax_axis(-1);
         MlxArray partition = gates.argpartition_axis(-slots, -1);
         const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - slots};
@@ -1549,7 +1550,13 @@ MlxArray SparseMoe::forward_prefill_impl(
         }
         MlxArray experts = selected.reshape(std::vector<int>{rows * slots});
         weights = weights.reshape(std::vector<int>{rows * slots}).astype(MLX_FLOAT32);
+        if (timings != nullptr) {
+            experts.eval();
+            weights.eval();
+            timings->routing_ms = elapsed_ms(routing_started);
+        }
 
+        const auto gate_started = Clock::now();
         const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
             {.name = "T", .value = input.dtype()},
         }};
@@ -1578,7 +1585,12 @@ MlxArray SparseMoe::forward_prefill_impl(
         MlxArray hidden = std::move(vq_gate_up_kernel()->apply(
             gate_inputs, gate_outputs, gate_grid, threadgroup,
             dtype_templates, gate_templates).front());
+        if (timings != nullptr) {
+            hidden.eval();
+            timings->gate_up_ms = elapsed_ms(gate_started);
+        }
 
+        const auto down_started = Clock::now();
         const std::array<MlxMetalIntTemplate, 7> down_templates{{
             {.name = "OUT", .value = expert_down_.output_dimension},
             {.name = "IN", .value = expert_down_.input_dimension},
@@ -1599,7 +1611,23 @@ MlxArray SparseMoe::forward_prefill_impl(
         MlxArray routed = std::move(vq_down_reduce_kernel()->apply(
             down_inputs, down_outputs, down_grid, threadgroup,
             dtype_templates, down_templates).front());
-        return MlxArray::add(routed, forward_shared(input));
+        if (timings != nullptr) {
+            routed.eval();
+            timings->down_reduce_ms = elapsed_ms(down_started);
+        }
+        const auto shared_started = Clock::now();
+        MlxArray shared = forward_shared(input);
+        if (timings != nullptr) {
+            shared.eval();
+            timings->shared_expert_ms = elapsed_ms(shared_started);
+        }
+        const auto merge_started = Clock::now();
+        MlxArray output = MlxArray::add(routed, shared);
+        if (timings != nullptr) {
+            output.eval();
+            timings->merge_ms = elapsed_ms(merge_started);
+        }
+        return output;
     }
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     const bool mixed_quantization = !fused_gate_up_ || !fused_down_;
