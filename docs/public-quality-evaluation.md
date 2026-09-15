@@ -153,10 +153,72 @@ Q4 and BF16; separate-run throughput differences are not treated as speedups.
 
 The REAP model card reports 91.5% HumanEval pass@1 but identifies only the 164
 problems, one run per build, and unit-test verification; it does not publish its
-prompt template, stopping rules, or generation harness. We therefore ran the
-original OpenAI HumanEval problems as greedy raw completions with one sample,
-512 generated tokens, Q4/group-64 target weights, Q4/group-32 SSD PLE, and the
-official tests inside a network-denied macOS sandbox.
+prompt template, stopping rules, or generation harness. OpenAI HumanEval itself
+defines prompts, reference completions, and tests, but not a chat wrapper or
+generation stops. Results are consequently reported under two explicit
+protocols rather than treated as directly interchangeable with the model-card
+number.
+
+The raw-completion control used greedy decoding, one sample, at most 512 new
+tokens, and the EvalPlus direct-completion stop set. REAP used Q4/group-64
+target weights and Q8/group-32 SSD PLE in the custom engine; the dense
+Qwen3.8-27B control used the `mlx-community` affine Q4/group-64 checkpoint in
+`mlx-vlm` 0.7.1. MTP was disabled in both runs. The official HumanEval tests ran
+inside a network-denied macOS sandbox.
+
+| Raw-completion control | pass@1 | Median decode |
+|---|---:|---:|
+| REAP-288 Q4 target + Q8 SSD PLE, custom engine | **133/164 (81.10%)** | **38.13 tok/s** |
+| Qwen3.8-27B affine Q4/group-64, `mlx-vlm` | **132/164 (80.49%)** | **17.70 tok/s** |
+
+The standard EvalPlus instruction-model protocol instead asks for a
+self-contained Python script, pre-fills an empty `<think>` block and the
+opening Python fence, generates greedily for at most 768 tokens, and sanitizes
+the complete solution before testing. EvalPlus 0.3.1 was used here. For the
+test bridge, the sanitized solution was evaluated as the entire candidate
+program while the original HumanEval tests remained unchanged.
+
+| EvalPlus no-thinking chat control | pass@1 | Median decode | Runtime peak |
+|---|---:|---:|---:|
+| REAP-288 Q4 target + Q8 SSD PLE, custom engine | **149/164 (90.85%)** | **38.94 tok/s** | not captured |
+| Qwen3.8-27B affine Q4/group-64, `mlx-vlm` | **150/164 (91.46%)** | **17.21 tok/s** | **17.29 GB MLX** |
+
+The paired chat result was 143 both-pass, 6 REAP-only, 7 27B-only, and 8
+both-fail. A one-problem difference on the exact same benchmark contract rules
+out the custom backend as the source of the previously apparent large quality
+collapse. It also nearly reproduces the REAP card's 91.5% claim, although the
+card's unpublished protocol prevents claiming exact reproduction. The custom
+server did not yet accept request-level multi-token stop strings, so some REAP
+responses continued into generated self-tests; its generated-token count is
+not directly comparable with the better-stopped `mlx-vlm` run.
+
+Turning verified MTP off on the raw Q8-PLE REAP control changed the score from
+132/164 to 133/164. The paired result was 124 both-pass, 8 MTP-only, 9
+non-MTP-only, and 23 both-fail. This excludes a systematic MTP quality loss,
+while confirming that deterministic trajectories can change around close
+logits. Exact EvalPlus raw stop strings applied to the prior MTP outputs left
+their 132/164 score unchanged.
+
+The direct MLX runner also supports continuous batching through
+`--concurrency`. A directional first-four-problem smoke test at concurrency 4,
+raw prompts, greedy decoding, MTP off, and a 64-token limit generated 256 tokens
+at **50.22 aggregate tok/s** and a **17.68 GB MLX peak**. All four reached the
+limit, so this is only a scheduler/memory check, not a quality result or a
+single-stream decode claim. Future 27B bulk evaluations may use this mode when
+their protocol tolerates batched stopping.
+
+Sources:
+
+- <https://github.com/openai/human-eval>
+- <https://github.com/evalplus/evalplus/blob/master/docs/cli.md>
+- <https://github.com/evalplus/evalplus/blob/master/evalplus/provider/utility.py>
+- <https://huggingface.co/sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit>
+- <https://huggingface.co/mlx-community/Qwen3.8-27B-4bit>
+
+### Earlier same-checkpoint controls
+
+Before the exact EvalPlus protocol was identified, the project's conservative
+raw boundaries gave the following same-checkpoint runtime comparison.
 
 After removing accidental protocol suffixes from otherwise raw completions, the
 custom engine scored **127/164 (77.44%)**. Current stock `mlx-vlm` commit
@@ -182,7 +244,8 @@ failed under both. Median decode was 48.86 tok/s versus 50.01 tok/s with Q4, a
 BF16 recovered 3.66 pass@1 points, not the much larger gap caused by using the
 checkpoint's non-thinking instruction-following path.
 
-The affine Q8/group-32 table scored **132/164 (80.49%)** with a 46.55 tok/s
+With automatic MTP enabled, the affine Q8/group-32 table scored **132/164
+(80.49%)** with a 46.55 tok/s
 median decode rate. Against Q4 it retained 121 common passes, lost 6, and gained
 11; against BF16 it retained 122 common passes, lost 10, and gained 11. A fixed
 2,048-row reconstruction sample measured Q8 RMSE `3.59e-5` versus BF16, about

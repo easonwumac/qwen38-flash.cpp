@@ -112,7 +112,8 @@ Long-context distributions below use independent cold server starts.
 |---|---|---:|
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
 | Public IFBench bounded-thinking, first 30 prompts | REAP-288 Q4 target; temperature 1, top-p .95, top-k 20, seed 0, xhigh, max 4,096; MTP off; serial run on the validation Mac | Q4/Q8/BF16 SSD PLE: **63.33% / 66.67% / 70.00%** strict/loose; median decode 35.46 / 36.07 / 37.25 tok/s |
-| OpenAI HumanEval, 164 problems | REAP-288 Q4 target; raw completion, greedy, max 512, one sample; sandboxed unit tests; automatic verified MTP; validation Mac | Q4/Q8/BF16 SSD PLE: **77.44% / 80.49% / 81.10% pass@1**; median decode 50.01 / 46.55 / 48.86 tok/s; stock `mlx-vlm` with Q4 PLE: **79.27%**, 31.46 tok/s |
+| OpenAI HumanEval raw completion, 164 problems | REAP-288 Q4 target; greedy, max 512, one sample; sandboxed tests | Q4/Q8/BF16 SSD PLE with verified MTP: **77.44% / 80.49% / 81.10%**; Q8 PLE with MTP off: **81.10%**, 38.13 tok/s; Qwen3.8-27B affine Q4/group-64, MTP off: **80.49%** |
+| OpenAI HumanEval, EvalPlus no-thinking chat, 164 problems | self-contained-script prompt and assistant prefill; greedy, max 768, one sample; EvalPlus 0.3.1 sanitizer; sandboxed tests; MTP off | REAP-288 Q4 target + Q8 SSD PLE: **149/164 (90.85%)**, 38.94 tok/s; Qwen3.8-27B Q4: **150/164 (91.46%)**, 17.21 tok/s and 17.29 GB MLX peak |
 | REAP-288 bounded-thinking IFBench pilot, 3 prompts | corrected sampled xhigh thinking; automatic 2,730-token reasoning budget within max 4,096; MTP off | **2/3 strict and loose**; all three forced a close and returned a final answer; **35.81 aggregate decode tok/s**; 39.0 GiB peak footprint |
 | Niwaki 113B bounded-thinking IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; same protocol; MTP off | **0/3 strict and loose** despite three final answers; **40.07 aggregate decode tok/s**; 26.7 GiB peak footprint |
 | Niwaki 113B native-PLE bounded-thinking pilot, 3 prompts | native paired Q2/group-128 PLE mmap + REAP tokenizer; temperature 1, top-p .95, top-k 20, seed 0, xhigh bounded thinking, 105--188 prompt tokens, max 4,096; MTP off | **0/3 explicit keyword gates**; **37.76 aggregate decode tok/s** (36.65--38.70); 26.6 GiB peak footprint |
@@ -143,9 +144,15 @@ request or parse errors, matching the retained model baseline. This measures the
 checkpoint and request lifecycle; it is not a claim of universal model accuracy.
 The non-thinking IFBench result is not representative of this checkpoint's best
 instruction-following path: bounded thinking recovered 63.33% on the first 30
-public prompts. HumanEval shows only a 1.83-point gap from stock `mlx-vlm` on the
-same checkpoint and PLE, excluding the custom backend as the source of a large
-quality collapse. The public results and comparability limits are documented in the
+public prompts. HumanEval is strongly protocol-sensitive: raw completion puts
+REAP Q8 and Qwen3.8-27B Q4 at the same 80.49%, while the standard EvalPlus
+no-thinking chat scaffold raises them to 90.85% and 91.46%. The one-problem gap,
+plus the earlier 1.83-point stock-runtime control on the same REAP checkpoint,
+excludes this backend as the source of the apparent large quality collapse. The
+direct 27B reference runner supports continuous batching; a four-request,
+64-token smoke test reached 50.22 aggregate tok/s at a 17.68 GB MLX peak, but is
+not reported as single-stream decode or benchmark accuracy. The
+public results and comparability limits are documented in the
 [public quality evaluation](docs/public-quality-evaluation.md).
 
 Full workload definitions, hashes, distributions, guard reports, and rejected

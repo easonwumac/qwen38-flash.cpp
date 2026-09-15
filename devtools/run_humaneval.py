@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import re
 import statistics
 import time
 import urllib.request
@@ -20,13 +21,60 @@ def load_problems(path: Path) -> list[dict[str, Any]]:
 
 
 def trim_completion(text: str) -> str:
-    """Match the conventional HumanEval raw-completion stop boundaries."""
+    """Apply the project's original conservative completion boundaries."""
     boundaries = [
         "<|endoftext|>", "</s>", "</parameter>", "</function>", "</tool_call>",
         "```", "\n\n\n", "\n\ndef ", "\n\nclass ",
     ]
     stops = [text.find(marker) for marker in boundaries if text.find(marker) >= 0]
     return text[: min(stops)] if stops else text
+
+
+def evalplus_raw_trim(text: str) -> str:
+    """Apply EvalPlus direct-completion stop strings."""
+    boundaries = [
+        "<|endoftext|>", "<|endofmask|>", "</s>", "\nif __name__",
+        "\ndef main(", "\nprint(", "\ndef ", "\nclass ", "\nimport ",
+        "\nfrom ", "\nassert ",
+    ]
+    stops = [text.find(marker) for marker in boundaries if text.find(marker) >= 0]
+    return text[: min(stops)] if stops else text
+
+
+def evalplus_nonthinking_prompt(task_prompt: str) -> str:
+    """Render the EvalPlus chat protocol used for instruction-tuned models."""
+    instruction = (
+        "Please provide a self-contained Python script that solves the following "
+        "problem in a markdown code block:"
+    )
+    response = (
+        "Below is a Python script with a self-contained function that solves the "
+        "problem and passes corresponding tests:"
+    )
+    return (
+        f"<|im_start|>user\n{instruction}\n```\n{task_prompt.strip()}\n```"
+        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        f"{response}\n```python\n"
+    )
+
+
+def solution_to_completion(text: str, entrypoint: str) -> str:
+    """Extract an entry-point body so OpenAI HumanEval can append it."""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    blocks = re.findall(r"```(?:python)?\s*\n?(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    code = (blocks[-1] if blocks else text).strip("\n")
+    signature = re.search(
+        rf"(?m)^def\s+{re.escape(entrypoint)}\s*\([^\n]*\).*:\s*$", code,
+    )
+    if signature is None:
+        return "\n" + code if code and not code[0].isspace() else code
+    body: list[str] = []
+    for line in code[signature.end():].lstrip("\n").splitlines():
+        if line and not line[0].isspace():
+            break
+        body.append(line)
+    return "\n" + "\n".join(body).rstrip()
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -43,7 +91,13 @@ def main() -> int:
     parser.add_argument("--model", default="qwen38-flash")
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument(
-        "--mode", choices=("raw", "chat-nonthinking"), default="raw",
+        "--mode",
+        choices=("raw", "chat-nonthinking", "evalplus-nonthinking"),
+        default="raw",
+    )
+    parser.add_argument(
+        "--stop-profile", choices=("project", "evalplus", "none"), default="project",
+        help="Post-generation boundaries for raw/body modes.",
     )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--limit", type=int)
@@ -69,11 +123,14 @@ def main() -> int:
         if task_id in completed:
             rows.append(completed[task_id])
             continue
-        if args.mode == "raw":
+        if args.mode in ("raw", "evalplus-nonthinking"):
             endpoint = "/v1/completions"
             body = {
                 "model": args.model,
-                "prompt": problem["prompt"],
+                "prompt": (
+                    problem["prompt"] if args.mode == "raw"
+                    else evalplus_nonthinking_prompt(problem["prompt"])
+                ),
                 "temperature": 0,
                 "max_tokens": args.max_tokens,
                 "stream": False,
@@ -106,9 +163,21 @@ def main() -> int:
             with urllib.request.urlopen(request, timeout=args.timeout) as response:
                 payload = json.load(response)
             choice = payload["choices"][0]
-            raw = choice["text"] if args.mode == "raw" else choice["message"]["content"]
+            raw = (
+                choice["text"]
+                if args.mode != "chat-nonthinking"
+                else choice["message"]["content"]
+            )
+            if args.mode == "evalplus-nonthinking":
+                completion = solution_to_completion(raw, str(problem["entry_point"]))
+            elif args.stop_profile == "evalplus":
+                completion = evalplus_raw_trim(raw)
+            elif args.stop_profile == "none":
+                completion = raw
+            else:
+                completion = trim_completion(raw)
             row.update(
-                completion=trim_completion(raw),
+                completion=completion,
                 raw_completion=raw,
                 finish_reason=choice.get("finish_reason"),
                 usage=payload.get("usage", {}),
@@ -146,6 +215,7 @@ def main() -> int:
             "temperature": 0,
             "max_tokens": args.max_tokens,
             "completion_mode": args.mode,
+            "stop_profile": args.stop_profile,
             "samples_per_problem": 1,
         },
         "errors": sum(bool(row.get("error")) for row in rows),
