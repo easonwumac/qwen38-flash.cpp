@@ -32,6 +32,11 @@ def percentile(values: list[float], fraction: float) -> float | None:
     return ordered[round((len(ordered) - 1) * fraction)]
 
 
+def extract_reasoning_content(message: dict[str, Any]) -> str:
+    """Accept reasoning fields emitted by qwen38-flash.cpp and mlx-lm."""
+    return message.get("reasoning_content") or message.get("reasoning") or ""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
@@ -57,9 +62,18 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--frequency-penalty", type=float, default=0.0)
+    parser.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        help='JSON object passed to servers that support per-request chat template arguments',
+    )
     args = parser.parse_args()
     if args.concurrency < 1 or args.concurrency > 4:
         parser.error("--concurrency must be between 1 and 4")
+    if args.chat_template_kwargs is not None and not isinstance(
+        args.chat_template_kwargs, dict
+    ):
+        parser.error("--chat-template-kwargs must decode to a JSON object")
     temperature = args.temperature
     if temperature is None:
         temperature = 0.0 if args.no_thinking else 1.0
@@ -100,6 +114,8 @@ def main() -> int:
                 seed=args.seed,
                 frequency_penalty=args.frequency_penalty,
             )
+        if args.chat_template_kwargs is not None:
+            body["chat_template_kwargs"] = args.chat_template_kwargs
         request = urllib.request.Request(
             args.url.rstrip("/") + "/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -117,7 +133,10 @@ def main() -> int:
             message = payload["choices"][0]["message"]
             row.update(
                 response=message.get("content") or "",
-                reasoning_content=message.get("reasoning_content") or "",
+                # qwen38-flash.cpp uses the OpenAI-compatible
+                # `reasoning_content` extension. mlx-lm uses `reasoning` for
+                # the same separated thinking text.
+                reasoning_content=extract_reasoning_content(message),
                 finish_reason=payload["choices"][0].get("finish_reason"),
                 usage=payload.get("usage", {}),
                 performance=payload.get("performance", {}),
@@ -198,6 +217,7 @@ def main() -> int:
             "frequency_penalty": None if args.no_thinking else args.frequency_penalty,
             "thinking": not args.no_thinking,
             "reasoning_effort": None if args.no_thinking else args.reasoning_effort,
+            "chat_template_kwargs": args.chat_template_kwargs,
             "max_tokens": args.max_tokens,
             "dataset_sha256": hashlib.sha256(raw_input).hexdigest(),
             "dataset_rows": len(load_jsonl(args.input)),

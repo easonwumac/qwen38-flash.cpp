@@ -148,6 +148,48 @@ or exhausted its allowance in both this engine and a stock `mlx-vlm` generation
 on the same checkpoint, consistent with the checkpoint author's documented
 long/repetitive reasoning limitation.
 
+### VQ-2.1bpw native quality gate
+
+`TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw` revision
+`64b0fb0f98a552d91fb9abd5531d547b2e78c8a8` retains all 512 experts and routes
+top-10, but stores its expert projections with mixed VQ geometry and its PLE as
+d8/K256 VQ rows. The 49,156,164,890-byte non-MTP artifact was verified against
+its safetensors index before testing.
+
+The current head of `mlx-lm` PR 1788 is not compatible with this converted
+artifact's RMSNorm convention. Commit `ac83bb4` folds the Qwen `+1` only while
+converting the official nested layout; this artifact already has flat keys but
+still carries zero-centered non-gated norm weights. Current head therefore
+loaded successfully but emitted repeated garbage. Using the pre-fold commit
+`8a36d1ece51b34a2e76d9f7064a7f090334f39c4`, whose forward applies
+`1 + weight`, restored an exact deterministic smoke response. The failed
+current-head output is a runtime/checkpoint mismatch, not a model-quality
+result.
+
+On the same 30-row stratified no-thinking slice used by the REAP stock control,
+native VQ scored **12/30 strict and 13/30 loose**, exactly tying stock REAP.
+The paired loose result was 10 both-pass, 14 both-fail, 3 VQ-only, and 3
+REAP-only. Three VQ responses reached 4,096 tokens; total generation was 18,456
+tokens at 17.47 end-to-end tok/s across the two serial segments.
+
+The stronger gate reproduced this engine's bounded-thinking lifecycle in an
+offline `mlx-lm` runner: temperature 1.0, top-p 0.95, top-k 20, seed 0,
+2,730-token reasoning budget, 4,096-token total maximum, the identical forced
+suffix, serial requests, and MTP off. It scored **6/10 strict and 7/10 loose**
+with 7/10 interventions and no missing final answers. Prompt-level loose paired
+against REAP was 5 both-pass, 3 both-fail, and 2 VQ-only; paired against 27B was
+6 both-pass, 2 both-fail, 1 VQ-only, and 1 27B-only. Thus the VQ checkpoint
+beats REAP 7/10 to 5/10 and ties the local 27B control on this small slice.
+
+The bounded VQ run generated 25,663 tokens in 1,421.0 seconds. Per-request
+decode stayed near 18.1--18.5 tok/s; the memory guard recorded 46.1 GiB peak
+physical footprint, 25.2 GiB peak RSS, and 6.1 GiB minimum available on the
+64 GB M5 Pro. These are native-reference results, not product targets. They
+justify implementing the VQ backend, but do not demonstrate the project's
+PP, decode, or 40 GiB footprint goals.
+
+Source: <https://huggingface.co/TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw>
+
 ### Thinking-mode qualification
 
 Thinking results must not reuse the temperature-zero contract above. Qwen's
