@@ -111,6 +111,27 @@ inline constexpr std::string_view gate_up = R"metal(
     for (uint group = lane; group < groups; group += 32) {
         float gate_group = 0.0f;
         float up_group = 0.0f;
+        uint gate_words[4] = {0, 0, 0, 0};
+        uint up_words[4] = {0, 0, 0, 0};
+        uint cached_shift = 0;
+        // Eight 14-bit d8 codes occupy exactly 112 bits.  Cache their four
+        // covering words once per quant group instead of reloading overlapping
+        // words for every code.
+        if constexpr (BITS == 14 && D == 8 && GROUP == 64) {
+            const uint wpr = ((nsub + 31) / 32) * BITS;
+            const uint first_sub = group * spg;
+            const uint block_bit = (first_sub & 31) * BITS;
+            const uint first_word = (first_sub >> 5) * BITS + (block_bit >> 5);
+            cached_shift = block_bit & 31;
+            const device uint* gate_row = (const device uint*)gate_codes +
+                ((size_t)expert * OUT + row) * wpr + first_word;
+            const device uint* up_row = (const device uint*)up_codes +
+                ((size_t)expert * OUT + row) * wpr + first_word;
+            for (uint word = 0; word < 4; ++word) {
+                gate_words[word] = gate_row[word];
+                up_words[word] = up_row[word];
+            }
+        }
         for (uint local = 0; local < spg; ++local) {
             const uint sub = group * spg + local;
             uint gate_code = 0;
@@ -119,6 +140,18 @@ inline constexpr std::string_view gate_up = R"metal(
                 const size_t offset = ((size_t)expert * OUT + row) * nsub + sub;
                 gate_code = (uint)gate_codes[offset];
                 up_code = (uint)up_codes[offset];
+            } else if constexpr (BITS == 14 && D == 8 && GROUP == 64) {
+                const uint bit = cached_shift + local * BITS;
+                const uint word = bit >> 5;
+                const uint shift = bit & 31;
+                ulong gv = (ulong)(gate_words[word] >> shift);
+                ulong uv = (ulong)(up_words[word] >> shift);
+                if (shift + BITS > 32) {
+                    gv |= (ulong)gate_words[word + 1] << (32 - shift);
+                    uv |= (ulong)up_words[word + 1] << (32 - shift);
+                }
+                gate_code = (uint)(gv & 0x3ffful);
+                up_code = (uint)(uv & 0x3ffful);
             } else {
                 const uint wpr = ((nsub + 31) / 32) * BITS;
                 const uint within = sub & 31;
@@ -177,11 +210,35 @@ inline constexpr std::string_view down_reduce = R"metal(
         float acc = 0.0f;
         for (uint group = lane; group < groups; group += 32) {
             float group_acc = 0.0f;
+            uint packed_words[4] = {0, 0, 0, 0};
+            uint cached_shift = 0;
+            // See gate_up: one group is eight 14-bit d8 codes (four words).
+            if constexpr (BITS == 14 && D == 8 && GROUP == 64) {
+                const uint wpr = ((nsub + 31) / 32) * BITS;
+                const uint first_sub = group * spg;
+                const uint block_bit = (first_sub & 31) * BITS;
+                const uint first_word = (first_sub >> 5) * BITS + (block_bit >> 5);
+                cached_shift = block_bit & 31;
+                const device uint* code_row = (const device uint*)codes +
+                    ((size_t)expert * OUT + row) * wpr + first_word;
+                for (uint word = 0; word < 4; ++word) {
+                    packed_words[word] = code_row[word];
+                }
+            }
             for (uint local = 0; local < spg; ++local) {
                 const uint sub = group * spg + local;
                 uint code = 0;
                 if constexpr (BITS == 0) {
                     code = (uint)codes[((size_t)expert * OUT + row) * nsub + sub];
+                } else if constexpr (BITS == 14 && D == 8 && GROUP == 64) {
+                    const uint bit = cached_shift + local * BITS;
+                    const uint word = bit >> 5;
+                    const uint shift = bit & 31;
+                    ulong value = (ulong)(packed_words[word] >> shift);
+                    if (shift + BITS > 32) {
+                        value |= (ulong)packed_words[word + 1] << (32 - shift);
+                    }
+                    code = (uint)(value & 0x3ffful);
                 } else {
                     const uint wpr = ((nsub + 31) / 32) * BITS;
                     const uint within = sub & 31;
