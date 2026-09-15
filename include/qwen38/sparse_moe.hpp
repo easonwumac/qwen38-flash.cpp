@@ -48,6 +48,8 @@ public:
 
     [[nodiscard]] RouterSelection route_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_decode(const MlxArray& input) const;
+    [[nodiscard]] std::vector<MlxArray> forward_decode_multi(
+        const std::vector<MlxArray>& inputs) const;
     [[nodiscard]] MlxArray forward_verify(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_verify_profiled(
         const MlxArray& input,

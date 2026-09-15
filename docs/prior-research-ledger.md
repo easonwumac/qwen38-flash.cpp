@@ -458,6 +458,24 @@ The implementation order is deliberately narrow:
   without changing arithmetic, but is a fairness/latency improvement rather
   than a claimed throughput step. Thinking and over-budget aggregate contexts
   still fall back to serial as an automatic resource decision.
+- Independent requests now share one compact routed-expert dispatch in the 12
+  full-attention layers while retaining per-row routing, shared experts,
+  HyperConnection arithmetic, attention state, and logits. A guarded 32-step,
+  four-row real-model probe preserved all final tokens and reached 56.81 versus
+  39.38 aggregate tok/s (1.443x). The first 12 IFBench prompts generated 3,557
+  tokens with 12/12 byte-identical serial responses and reached 45.02 versus
+  38.74 aggregate tok/s (1.162x); peak footprint was 37.1 GiB. This is retained
+  as an exact throughput improvement, not evidence for a twofold product claim.
+- Extending that split across the 36 recurrent layers by compiling only the
+  attention prefix reached 58.85 tok/s in a short four-row probe, but changed
+  long IFBench trajectories. Batching the LM head raised the short probe to
+  62.13 tok/s but also changed trajectories. A purpose-built shared-expert
+  affine-Q4 kernel reached only 55.45 tok/s and diverged at step 3; generic
+  independent-state GDN batching reached 58.32 tok/s and also diverged. Eight
+  rows with only the exact retained batching fell to 46.56 tok/s (1.163x), so
+  increasing queue width is not a route to 2x. All four rejected prototypes
+  were removed. Revisit only with row-batched kernels that reproduce the native
+  MLX QMM reduction and BF16 rounding order, followed by long-generation parity.
 
 ## Promotion gates
 

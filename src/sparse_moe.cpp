@@ -997,6 +997,77 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
     return MlxArray::add(forward_experts_decode(input), forward_shared(input));
 }
 
+std::vector<MlxArray> SparseMoe::forward_decode_multi(
+    const std::vector<MlxArray>& inputs) const {
+    if (inputs.empty()) {
+        throw std::runtime_error("multi-request MoE requires at least one row");
+    }
+    if (inputs.size() == 1 || inputs.size() > 8 || !has_routed_ || paged_store_ ||
+        !compact_qmeta_) {
+        std::vector<MlxArray> outputs;
+        outputs.reserve(inputs.size());
+        for (const MlxArray& input : inputs) outputs.push_back(forward_decode(input));
+        return outputs;
+    }
+
+    const int rows = checked_int(inputs.size(), "multi-request MoE rows");
+    const int topk = checked_int(experts_per_token_, "multi-request MoE top-k");
+    const std::vector<int> route_shape{rows, topk};
+    std::vector<MlxArray> expert_rows;
+    std::vector<MlxArray> weight_rows;
+    expert_rows.reserve(inputs.size());
+    weight_rows.reserve(inputs.size());
+    const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+    const bool route_on_device = device_router != nullptr &&
+        std::string_view(device_router) == "1";
+    for (const MlxArray& input : inputs) {
+        if (route_on_device) {
+            MlxArray logits = project_linear(input, router_);
+            const bool use_selected_softmax =
+                selected_softmax_router_enabled(normalize_topk_probability_);
+            MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
+            MlxArray partition = gates.argpartition_axis(-topk, -1);
+            const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - topk};
+            const std::vector<int> stop{1, 1, static_cast<int>(expert_count_)};
+            const std::vector<int> strides{1, 1, 1};
+            MlxArray selected = partition.slice(start, stop, strides);
+            expert_rows.push_back(selected.reshape(std::vector<int>{1, topk}));
+            MlxArray weights = MlxArray::take_along_axis(gates, selected, -1);
+            if (use_selected_softmax) {
+                weights = weights.softmax_axis(-1);
+            } else if (normalize_topk_probability_) {
+                weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
+            }
+            weight_rows.push_back(
+                weights.reshape(std::vector<int>{1, topk}).astype(MLX_FLOAT32));
+        } else {
+            const RouterSelection selection = route_decode(input);
+            std::vector<std::int32_t> expert_values;
+            expert_values.reserve(experts_per_token_);
+            for (const std::size_t expert : selection.experts) {
+                expert_values.push_back(static_cast<std::int32_t>(expert));
+            }
+            expert_rows.push_back(MlxArray::from_int32(
+                expert_values, std::vector<int>{1, topk}));
+            weight_rows.push_back(MlxArray::from_float32(
+                selection.weights, std::vector<int>{1, topk}));
+        }
+    }
+    MlxArray experts = MlxArray::concatenate_many(expert_rows, 0).reshape(route_shape);
+    MlxArray weights = MlxArray::concatenate_many(weight_rows, 0).reshape(route_shape);
+    MlxArray routed = forward_compact_routed(
+        concatenate_sequence_rows(inputs), experts, weights);
+
+    std::vector<MlxArray> outputs;
+    outputs.reserve(inputs.size());
+    for (std::size_t row = 0; row < inputs.size(); ++row) {
+        outputs.push_back(MlxArray::add(
+            slice_sequence_row(routed, row),
+            forward_shared(inputs[row])));
+    }
+    return outputs;
+}
+
 MlxArray SparseMoe::forward_verify(const MlxArray& input) const {
     return forward_verify_impl(input, nullptr);
 }
