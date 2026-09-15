@@ -79,6 +79,30 @@ published 79.5, but the gap cannot be assigned to the runtime without a
 same-checkpoint stock-runtime run. It currently gates any claim that REAP-288 is
 a high-quality general instruction-following replacement for Qwen3.8-27B.
 
+### Five-row Qwen3.8-27B control
+
+A small cross-check used original dataset indices 0, 10, 20, 30, and 40, which
+cover multiple-keyword counts, an exact word position, number count, pronoun
+count, and punctuation. Both models used the same official strict and loose
+verifiers, temperature zero, thinking off, and a 4,096-token maximum. REAP used
+Q4/group-64 target weights, Q8/group-32 SSD PLE, MTP off, and serial requests;
+Qwen3.8-27B used affine Q4/group-64 in `mlx-vlm` 0.7.1 with four-way continuous
+batching followed by one final request.
+
+Both checkpoints scored **1/5 strict and 1/5 loose**, passing only the pronoun
+count. Their five paired verdicts were identical. REAP generated 853 tokens at
+a 38.28 tok/s per-request median and reached 38.81 GiB peak footprint. The 27B
+control generated 2,104 tokens; its four-request batch reported 19.06 aggregate
+tok/s, the final serial request 17.39 tok/s, and a 17.56 GB MLX peak. Batch and
+serial throughput are not directly comparable.
+
+This five-row slice is diagnostic rather than an accuracy estimate. In
+particular, it shows no REAP-specific backend loss under this no-thinking
+contract, but it does not reproduce Qwen's published 79.5: the Qwen model card
+does not disclose the IFBench generation contract, thinking is enabled by
+default, and its recommended sampling differs from IFBench's documented
+temperature-zero protocol.
+
 Niwaki 99B is not promoted as the quality default. A three-prompt pilot repeated
 or exhausted its allowance in both this engine and a stock `mlx-vlm` generation
 on the same checkpoint, consistent with the checkpoint author's documented
