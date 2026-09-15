@@ -131,6 +131,19 @@ NgramTable::NgramTable(
         }
         return;
     }
+    constexpr std::size_t q8_bits = 8;
+    const std::size_t q8_packed_word_count = dimension_ * q8_bits / 32;
+    const std::size_t q8_row_bytes = q8_packed_word_count * 4 + scale_count_ * 4;
+    const std::filesystem::path q8_aos_path =
+        model_directory / "ngram_table.q8.aos";
+    if (prefer_aos && std::filesystem::is_regular_file(q8_aos_path) &&
+        std::filesystem::file_size(q8_aos_path) == rows_ * q8_row_bytes) {
+        aos_fd_ = ::open(q8_aos_path.c_str(), O_RDONLY);
+        if (aos_fd_ < 0) throw std::runtime_error("cannot open Q8 n-gram AoS table");
+        bits_ = q8_bits;
+        packed_word_count_ = q8_packed_word_count;
+        return;
+    }
     const std::size_t row_bytes = packed_word_count_ * 4 + scale_count_ * 4;
     const std::filesystem::path aos_path = model_directory / "ngram_table.bin.aos";
     if (prefer_aos && std::filesystem::is_regular_file(aos_path) &&

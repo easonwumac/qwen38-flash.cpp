@@ -18,10 +18,11 @@ QWEN38_TEST_MODEL="$MODEL_DIR" \
 
 The checkpoint must contain `config.json`, `model.safetensors.index.json`, every
 indexed shard, tokenizer files, and at least one supported n-gram table.
-`ngram_table.bin.aos` is preferred by this engine and is read on demand with
-bounded `pread` calls, so the 29.8 GiB table remains SSD-backed. The original
-`ngram_table.bin` safetensors file is the fallback and remains useful for oMLX
-compatibility. Niwaki checkpoints can instead supply `niwaki_ple_pair` and
+Row-addressable `ngram_table.bf16.aos`, affine `ngram_table.q8.aos`, and Q4
+`ngram_table.bin.aos` are detected in that precision order and read with bounded
+`pread` calls, so they remain SSD-backed. The original `ngram_table.bin`
+safetensors file is the fallback and remains useful for oMLX compatibility.
+Niwaki checkpoints can instead supply `niwaki_ple_pair` and
 `niwaki_ple_quant`; their paired Q2 table is read directly from the indexed
 model shards through mmap. Compact qmeta and MTP are optional sidecars; never
 edit the upstream shard payloads to install them.

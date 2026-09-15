@@ -53,6 +53,9 @@ public:
     [[nodiscard]] bool uses_aos() const noexcept {
         return aos_fd_ >= 0 || bf16_aos_fd_ >= 0;
     }
+    [[nodiscard]] bool uses_q8_aos() const noexcept {
+        return aos_fd_ >= 0 && bits_ == 8;
+    }
     [[nodiscard]] bool uses_bf16_aos() const noexcept { return bf16_aos_fd_ >= 0; }
     [[nodiscard]] bool uses_paired_shards() const noexcept { return paired_store_ != nullptr; }
     [[nodiscard]] std::size_t row_dimension() const noexcept { return dimension_; }

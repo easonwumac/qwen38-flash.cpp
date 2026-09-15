@@ -142,6 +142,13 @@ on SSD versus 29.8 GiB for Q4; both are read on demand instead of being made
 resident. The directional speed difference is not treated as a throughput
 claim because these were separate serial runs.
 
+An affine Q8/group-32 PLE control occupied 53.64 GiB and scored **20/30
+(66.67%)** at both prompt-level strict and loose accuracy and 21/33 (63.64%) at
+instruction level. All 30 requests completed without errors or reaching the
+length limit. Aggregate decode was 35.73 tok/s and the per-request median was
+36.07 tok/s across 78,555 generated tokens. Its score and storage fall between
+Q4 and BF16; separate-run throughput differences are not treated as speedups.
+
 ## HumanEval runtime control
 
 The REAP model card reports 91.5% HumanEval pass@1 but identifies only the 164
@@ -174,6 +181,14 @@ failed under both. Median decode was 48.86 tok/s versus 50.01 tok/s with Q4, a
 2.3% reduction. PLE quantization therefore has a measurable but bounded effect:
 BF16 recovered 3.66 pass@1 points, not the much larger gap caused by using the
 checkpoint's non-thinking instruction-following path.
+
+The affine Q8/group-32 table scored **132/164 (80.49%)** with a 46.55 tok/s
+median decode rate. Against Q4 it retained 121 common passes, lost 6, and gained
+11; against BF16 it retained 122 common passes, lost 10, and gained 11. A fixed
+2,048-row reconstruction sample measured Q8 RMSE `3.59e-5` versus BF16, about
+17 times lower than Q4's `6.16e-4`. Q8 therefore retains nearly all measured
+BF16 quality while reducing the SSD table from 95.37 to 53.64 GiB; it does not
+reduce resident memory because all three formats are already demand-read.
 
 ### Niwaki 113B pilot
 

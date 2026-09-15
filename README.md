@@ -16,14 +16,15 @@ from the supplied model assets; tuning profiles are not required.
 - Optional drafter: Q8/group-64 layer-47 MTP sidecar
 - Context declared by the model: 262,144 tokens
 - Largest safe retrieval run proven on the 64 GB test Mac: 196,675 tokens
-- N-gram storage: 29.8 GiB row-major AoS file read from SSD on demand
+- N-gram storage: Q4 29.8 GiB, affine Q8 53.64 GiB, or BF16 95.37 GiB
+  row-major AoS file read from SSD on demand
 - Quantization metadata: lossless16 normally; lossless13 capacity sidecar
 - Compute runtime: MLX 0.32.2 through a pinned MLX-C ABI
 
-The production package does not need the original 29.8 GiB safetensors n-gram
-table. `ngram_table.bin.aos` stores each requested row contiguously, so one
-bounded `pread` retrieves its packed weights, scales, and biases without loading
-the table into RAM.
+The production package does not need the original safetensors n-gram table.
+`ngram_table.bin.aos`, `ngram_table.q8.aos`, and `ngram_table.bf16.aos` store
+each requested row contiguously, so one bounded `pread` retrieves it without
+loading the table into RAM.
 
 ### Niwaki fast path
 
@@ -110,8 +111,8 @@ Long-context distributions below use independent cold server starts.
 | Workload | Configuration | Result |
 |---|---|---:|
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
-| Public IFBench bounded-thinking, first 30 prompts | REAP-288 Q4 target; temperature 1, top-p .95, top-k 20, seed 0, xhigh, max 4,096; MTP off; serial run on the validation Mac | Q4 SSD PLE: **63.33%** strict/loose (19/30), 35.46 median decode; BF16 SSD PLE: **70.00%** (21/30), 37.25 tok/s |
-| OpenAI HumanEval, 164 problems | REAP-288 Q4 target; raw completion, greedy, max 512, one sample; sandboxed unit tests; automatic verified MTP; validation Mac | Q4 SSD PLE: **77.44% pass@1** (127/164), 50.01 median decode; BF16 SSD PLE: **81.10%** (133/164), 48.86 tok/s; stock `mlx-vlm` with Q4 PLE: **79.27%** (130/164), 31.46 tok/s |
+| Public IFBench bounded-thinking, first 30 prompts | REAP-288 Q4 target; temperature 1, top-p .95, top-k 20, seed 0, xhigh, max 4,096; MTP off; serial run on the validation Mac | Q4/Q8/BF16 SSD PLE: **63.33% / 66.67% / 70.00%** strict/loose; median decode 35.46 / 36.07 / 37.25 tok/s |
+| OpenAI HumanEval, 164 problems | REAP-288 Q4 target; raw completion, greedy, max 512, one sample; sandboxed unit tests; automatic verified MTP; validation Mac | Q4/Q8/BF16 SSD PLE: **77.44% / 80.49% / 81.10% pass@1**; median decode 50.01 / 46.55 / 48.86 tok/s; stock `mlx-vlm` with Q4 PLE: **79.27%**, 31.46 tok/s |
 | REAP-288 bounded-thinking IFBench pilot, 3 prompts | corrected sampled xhigh thinking; automatic 2,730-token reasoning budget within max 4,096; MTP off | **2/3 strict and loose**; all three forced a close and returned a final answer; **35.81 aggregate decode tok/s**; 39.0 GiB peak footprint |
 | Niwaki 113B bounded-thinking IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; same protocol; MTP off | **0/3 strict and loose** despite three final answers; **40.07 aggregate decode tok/s**; 26.7 GiB peak footprint |
 | Niwaki 113B native-PLE bounded-thinking pilot, 3 prompts | native paired Q2/group-128 PLE mmap + REAP tokenizer; temperature 1, top-p .95, top-k 20, seed 0, xhigh bounded thinking, 105--188 prompt tokens, max 4,096; MTP off | **0/3 explicit keyword gates**; **37.76 aggregate decode tok/s** (36.65--38.70); 26.6 GiB peak footprint |

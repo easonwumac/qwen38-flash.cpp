@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -60,6 +61,35 @@ void run_ngram_tests() {
         QWEN38_CHECK(values[1] == -2.0F);
         QWEN38_CHECK(values[158] == 1.0F);
         QWEN38_CHECK(values[159] == -2.0F);
+    }
+    std::filesystem::remove(table_path);
+    const std::filesystem::path q8_path =
+        std::filesystem::path(directory) / "ngram_table.q8.aos";
+    std::array<std::uint8_t, 360> q8_data{};
+    for (std::size_t column = 0; column < 160; ++column) {
+        q8_data[180 + column] = static_cast<std::uint8_t>(column);
+    }
+    for (std::size_t group = 0; group < 5; ++group) {
+        const std::uint16_t scale = 0x3f00; // BF16 0.5
+        const std::uint16_t bias = 0x3f80; // BF16 1.0
+        std::memcpy(q8_data.data() + 180 + 160 + group * 2, &scale, sizeof(scale));
+        std::memcpy(q8_data.data() + 180 + 170 + group * 2, &bias, sizeof(bias));
+    }
+    {
+        std::ofstream output(q8_path, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(q8_data.data()), sizeof(q8_data));
+    }
+    {
+        qwen38::NgramTable q8_table(directory, 2, true);
+        QWEN38_CHECK(q8_table.uses_aos());
+        QWEN38_CHECK(q8_table.uses_q8_aos());
+        const std::array<std::int64_t, 1> row{1};
+        const auto values = q8_table.gather(row);
+        QWEN38_CHECK(values.size() == 160);
+        QWEN38_CHECK(values[0] == 1.0F);
+        QWEN38_CHECK(values[31] == 16.5F);
+        QWEN38_CHECK(values[32] == 17.0F);
+        QWEN38_CHECK(values[159] == 80.5F);
     }
     std::filesystem::remove_all(directory);
 }
