@@ -21,6 +21,16 @@ Bring-up measurement, not a release benchmark: Apple M5 Pro (18 CPU cores),
 64 GB unified memory, macOS 26.5; single request; one-token raw prompt;
 greedy sampling; MTP off; short context; no thermal conditioning; one run.
 The correctness build measured a 36.2 GiB peak physical footprint and about
-1.03 decode tok/s. The low speed is not a target result: prefill is not yet
-wired to a grouped VQ path and decode still synchronizes routing on every
-layer. Release PP/decode claims require the full benchmark contract.
+1.03 decode tok/s. The low decode speed is not a target result: decode still
+synchronizes routing on every layer.
+
+The VQ prefill path now keeps routing on device, evaluates all rows in a fused
+gate/up kernel, and combines down projection with route reduction. The mmap
+PLE path also resolves and requests the needed pages before decoding rows.
+On the same machine, a 13-token non-thinking chat prompt improved from 812.63
+ms serial to 273.98 ms batched (2.97x), with identical next token 9419 and a
+36.3 GiB peak physical footprint. A separate 463-token sample from this file,
+64-token chunks, measured 7.34 s (63.0 PP tok/s) and 38.9 GiB. Both are single
+warm-cache observations, greedy, MTP off, single request, no thermal
+conditioning; they establish bring-up and parity, not a release distribution
+or the final performance target.

@@ -154,6 +154,33 @@ int main(int argc, char** argv) {
             })) {
             throw std::runtime_error("MoE output is invalid");
         }
+        double row_parity_max_abs = 0.0;
+        if (rows > 1 && std::getenv("QWEN38_MOE_ROW_PARITY") != nullptr) {
+            std::vector<float> serial;
+            serial.reserve(values.size());
+            for (std::size_t row = 0; row < rows; ++row) {
+                const auto one = input.slice(
+                    std::vector<int>{0, static_cast<int>(row), 0},
+                    std::vector<int>{1, static_cast<int>(row + 1),
+                                     static_cast<int>(config.hidden_size)},
+                    std::vector<int>{1, 1, 1});
+                const auto host_route = moe.route_decode(one);
+                std::clog << "qwen38-host-route row" << row << '=';
+                for (std::size_t slot = 0; slot < host_route.experts.size(); ++slot) {
+                    std::clog << (slot == 0 ? "" : ",") << host_route.experts[slot]
+                              << ':' << host_route.weights[slot];
+                }
+                std::clog << '\n';
+                std::vector<float> one_values =
+                    moe.forward_decode(one).astype(MLX_FLOAT32).to_float32();
+                serial.insert(serial.end(), one_values.begin(), one_values.end());
+            }
+            for (std::size_t index = 0; index < values.size(); ++index) {
+                row_parity_max_abs = std::max(
+                    row_parity_max_abs,
+                    std::abs(static_cast<double>(values[index]) - serial[index]));
+            }
+        }
         const double checksum = std::accumulate(values.begin(), values.end(), 0.0);
         std::uint64_t bit_hash = 1469598103934665603ULL;
         for (const float value : values) {
@@ -206,6 +233,9 @@ int main(int argc, char** argv) {
                   << ",\"prefill_tps\":"
                   << 1000.0 * static_cast<double>(rows) / warm[warm.size() / 2]
                   << ",\"open_shards\":" << tensors.open_shard_count();
+        if (rows > 1 && std::getenv("QWEN38_MOE_ROW_PARITY") != nullptr) {
+            std::cout << ",\"row_parity_max_abs\":" << row_parity_max_abs;
+        }
         if (profile_components) {
             std::cout << ",\"components_ms\":{"
                       << "\"routing\":"

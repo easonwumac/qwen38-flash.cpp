@@ -853,13 +853,14 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
                 {.name = "T", .value = input.dtype()},
             }};
-            const std::array<MlxMetalIntTemplate, 6> gate_templates{{
+            const std::array<MlxMetalIntTemplate, 7> gate_templates{{
                 {.name = "OUT", .value = expert_gate_.output_dimension},
                 {.name = "IN", .value = expert_gate_.input_dimension},
                 {.name = "D", .value = expert_gate_.vector_dimension},
                 {.name = "GROUP", .value = expert_gate_.group_size},
                 {.name = "BITS", .value = expert_gate_.packed_bits},
                 {.name = "SLOTS", .value = slots},
+                {.name = "BATCH", .value = 1},
             }};
             const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
                 {.shape = {slots, expert_gate_.output_dimension}, .dtype = input.dtype()},
@@ -877,13 +878,14 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
                 gate_inputs, gate_outputs, gate_grid, threadgroup,
                 dtype_templates, gate_templates).front());
 
-            const std::array<MlxMetalIntTemplate, 6> down_templates{{
+            const std::array<MlxMetalIntTemplate, 7> down_templates{{
                 {.name = "OUT", .value = expert_down_.output_dimension},
                 {.name = "IN", .value = expert_down_.input_dimension},
                 {.name = "D", .value = expert_down_.vector_dimension},
                 {.name = "GROUP", .value = expert_down_.group_size},
                 {.name = "BITS", .value = expert_down_.packed_bits},
                 {.name = "SLOTS", .value = slots},
+                {.name = "BATCH", .value = 1},
             }};
             const std::array<MlxMetalOutputSpec, 1> down_outputs{{
                 {.shape = {1, 1, expert_down_.output_dimension}, .dtype = input.dtype()},
@@ -1497,6 +1499,88 @@ MlxArray SparseMoe::forward_prefill_impl(
     const std::vector<int> shape = input.shape();
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
         throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..1024");
+    }
+    if (fused_vq_) {
+        const int rows = shape[1];
+        const int slots = checked_int(experts_per_token_, "VQ slots");
+        MlxArray gates = project_linear(input, router_).softmax_axis(-1);
+        MlxArray partition = gates.argpartition_axis(-slots, -1);
+        const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - slots};
+        const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};
+        const std::vector<int> strides{1, 1, 1};
+        MlxArray selected = partition.slice(start, stop, strides);
+        MlxArray weights = MlxArray::take_along_axis(gates, selected, -1);
+        if (normalize_topk_probability_) {
+            weights = MlxArray::divide(weights, weights.sum_axis(-1, true));
+        }
+        if (std::getenv("QWEN38_VQ_ROUTE_TRACE") != nullptr) {
+            const auto selected_host = selected.astype(MLX_FLOAT32).to_float32();
+            const auto weights_host = weights.astype(MLX_FLOAT32).to_float32();
+            std::clog << "qwen38-vq-route";
+            for (int row = 0; row < rows; ++row) {
+                std::clog << " row" << row << '=';
+                for (int slot = 0; slot < slots; ++slot) {
+                    const std::size_t offset = static_cast<std::size_t>(row * slots + slot);
+                    std::clog << (slot == 0 ? "" : ",")
+                              << static_cast<int>(selected_host[offset]) << ':'
+                              << weights_host[offset];
+                }
+            }
+            std::clog << '\n';
+        }
+        MlxArray experts = selected.reshape(std::vector<int>{rows * slots});
+        weights = weights.reshape(std::vector<int>{rows * slots}).astype(MLX_FLOAT32);
+
+        const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = input.dtype()},
+        }};
+        const std::array<MlxMetalIntTemplate, 7> gate_templates{{
+            {.name = "OUT", .value = expert_gate_.output_dimension},
+            {.name = "IN", .value = expert_gate_.input_dimension},
+            {.name = "D", .value = expert_gate_.vector_dimension},
+            {.name = "GROUP", .value = expert_gate_.group_size},
+            {.name = "BITS", .value = expert_gate_.packed_bits},
+            {.name = "SLOTS", .value = slots},
+            {.name = "BATCH", .value = rows},
+        }};
+        const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
+            {.shape = {rows * slots, expert_gate_.output_dimension},
+             .dtype = input.dtype()},
+        }};
+        const int gate_groups =
+            (rows * slots * expert_gate_.output_dimension + 7) / 8;
+        const std::array<int, 3> gate_grid{gate_groups * 256, 1, 1};
+        const std::array<int, 3> threadgroup{256, 1, 1};
+        const MlxArray* gate_inputs[]{
+            &input,
+            &expert_gate_.weight, &expert_gate_.codebook, &expert_gate_.scales,
+            &expert_up_.weight, &expert_up_.codebook, &expert_up_.scales,
+            &experts};
+        MlxArray hidden = std::move(vq_gate_up_kernel()->apply(
+            gate_inputs, gate_outputs, gate_grid, threadgroup,
+            dtype_templates, gate_templates).front());
+
+        const std::array<MlxMetalIntTemplate, 7> down_templates{{
+            {.name = "OUT", .value = expert_down_.output_dimension},
+            {.name = "IN", .value = expert_down_.input_dimension},
+            {.name = "D", .value = expert_down_.vector_dimension},
+            {.name = "GROUP", .value = expert_down_.group_size},
+            {.name = "BITS", .value = expert_down_.packed_bits},
+            {.name = "SLOTS", .value = slots},
+            {.name = "BATCH", .value = rows},
+        }};
+        const std::array<MlxMetalOutputSpec, 1> down_outputs{{
+            {.shape = {1, rows, expert_down_.output_dimension}, .dtype = input.dtype()},
+        }};
+        const int down_groups = (rows * expert_down_.output_dimension + 7) / 8;
+        const std::array<int, 3> down_grid{down_groups * 256, 1, 1};
+        const MlxArray* down_inputs[]{
+            &hidden, &expert_down_.weight, &expert_down_.codebook,
+            &expert_down_.scales, &experts, &weights};
+        MlxArray routed = std::move(vq_down_reduce_kernel()->apply(
+            down_inputs, down_outputs, down_grid, threadgroup,
+            dtype_templates, down_templates).front());
+        return MlxArray::add(routed, forward_shared(input));
     }
     const char* grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     const bool mixed_quantization = !fused_gate_up_ || !fused_down_;

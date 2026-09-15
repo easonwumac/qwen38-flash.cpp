@@ -8,6 +8,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
+#include <sys/mman.h>
 #include <unistd.h>
 
 namespace qwen38 {
@@ -419,6 +421,42 @@ std::vector<float> NgramTable::gather(
     std::vector<float> result(row_ids.size() * dimension_);
     std::vector<std::byte> row(row_bytes);
     std::vector<std::uint16_t> bf16_row(dimension_);
+    std::vector<const VectorQuantizedShard*> vector_locations;
+    if (vector_quantized_store_ != nullptr) {
+        vector_locations.reserve(row_ids.size());
+        std::unordered_set<std::uintptr_t> advised_pages;
+        const long raw_page_size = ::sysconf(_SC_PAGESIZE);
+        const std::size_t page_size = raw_page_size > 0
+            ? static_cast<std::size_t>(raw_page_size) : 4096;
+        const auto advise = [&](const std::byte* address) {
+            const std::uintptr_t page =
+                reinterpret_cast<std::uintptr_t>(address) & ~(page_size - 1);
+            if (advised_pages.insert(page).second) {
+                static_cast<void>(::madvise(
+                    reinterpret_cast<void*>(page), page_size, MADV_WILLNEED));
+            }
+        };
+        for (const std::int64_t row_id : row_ids) {
+            if (row_id < 0 || static_cast<std::uint64_t>(row_id) >= rows_) {
+                throw std::runtime_error("n-gram row index is out of range");
+            }
+            const std::uint64_t logical_row = static_cast<std::uint64_t>(row_id);
+            const auto shard = std::upper_bound(
+                vector_quantized_shards_.begin(), vector_quantized_shards_.end(), logical_row,
+                [](const std::uint64_t value, const VectorQuantizedShard& candidate) {
+                    return value < candidate.logical_end;
+                });
+            if (shard == vector_quantized_shards_.end() || logical_row < shard->logical_begin) {
+                throw std::runtime_error("vector-quantized PLE shard lookup failed");
+            }
+            vector_locations.push_back(&*shard);
+            const std::size_t within =
+                static_cast<std::size_t>(logical_row - shard->logical_begin);
+            advise(shard->codes.bytes.data() + within * (dimension_ / 8));
+            advise(shard->scales.bytes.data() +
+                within * (dimension_ / 32) * sizeof(std::uint16_t));
+        }
+    }
     for (std::size_t index = 0; index < row_ids.size(); ++index) {
         if (row_ids[index] < 0 || static_cast<std::uint64_t>(row_ids[index]) >= rows_) {
             throw std::runtime_error("n-gram row index is out of range");
@@ -440,16 +478,8 @@ std::vector<float> NgramTable::gather(
         }
         if (vector_quantized_store_ != nullptr) {
             const std::uint64_t logical_row = static_cast<std::uint64_t>(row_ids[index]);
-            const auto shard = std::upper_bound(
-                vector_quantized_shards_.begin(), vector_quantized_shards_.end(), logical_row,
-                [](const std::uint64_t row_id, const VectorQuantizedShard& candidate) {
-                    return row_id < candidate.logical_end;
-                });
-            if (shard == vector_quantized_shards_.end() || logical_row < shard->logical_begin) {
-                throw std::runtime_error("vector-quantized PLE shard lookup failed");
-            }
             decode_vector_quantized_row(
-                *shard, logical_row,
+                *vector_locations[index], logical_row,
                 std::span<float>(result).subspan(index * dimension_, dimension_));
             continue;
         }

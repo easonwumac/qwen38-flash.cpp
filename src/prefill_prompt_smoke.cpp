@@ -116,7 +116,10 @@ int main(int argc, char** argv) {
             static_cast<void>(model.consume_decode_capture(tokens[1], warmup));
         }
         qwen38::MlxArray::clear_cache();
-        const Result serial = serial_prefill(model, tokens);
+        const bool benchmark_only = std::getenv("QWEN38_PREFILL_BENCH_ONLY") != nullptr;
+        const Result serial = benchmark_only
+            ? Result{0, 0.0, {}}
+            : serial_prefill(model, tokens);
         qwen38::MlxArray::clear_cache();
         const Result batched = batched_prefill(model, tokens, chunk_rows, serial_tail);
 
@@ -129,29 +132,42 @@ int main(int argc, char** argv) {
         }
         const auto slowest = std::ranges::max_element(batched.layer_ms);
 
-        const std::array<std::uint32_t, 1> serial_id{serial.token_id};
         const std::array<std::uint32_t, 1> batched_id{batched.token_id};
         std::cout << "{\"prompt_tokens\":" << tokens.size()
                   << ",\"chunk_rows\":" << chunk_rows
                   << ",\"serial_tail\":" << serial_tail
                   << ",\"serial_ms\":" << serial.milliseconds
                   << ",\"batched_ms\":" << batched.milliseconds
-                  << ",\"speedup\":" << serial.milliseconds / batched.milliseconds
+                  << ",\"speedup\":" << (benchmark_only
+                      ? 0.0 : serial.milliseconds / batched.milliseconds)
                   << ",\"profile\":{\"linear_layers_ms\":" << linear_layer_ms
                   << ",\"full_layers_ms\":" << full_layer_ms
                   << ",\"slowest_layer\":"
                   << std::distance(batched.layer_ms.begin(), slowest)
                   << ",\"slowest_layer_ms\":" << *slowest << "}"
-                  << ",\"serial_token_id\":" << serial.token_id
-                  << ",\"serial_text\":\"" << tokenizer.decode(serial_id) << "\""
+                  << ",\"serial_token_id\":";
+        if (benchmark_only) {
+            std::cout << "null,\"serial_text\":null";
+        } else {
+            const std::array<std::uint32_t, 1> serial_id{serial.token_id};
+            std::cout << serial.token_id
+                      << ",\"serial_text\":\"" << tokenizer.decode(serial_id) << "\"";
+        }
+        std::cout
                   << ",\"batched_token_id\":" << batched.token_id
                   << ",\"batched_text\":\"" << tokenizer.decode(batched_id) << "\""
                   << ",\"reference_token_id\":" << expected
-                  << ",\"serial_reference_match\":"
-                  << (serial.token_id == expected ? "true" : "false")
+                  << ",\"serial_reference_match\":";
+        if (benchmark_only) {
+            std::cout << "null";
+        } else {
+            std::cout << (serial.token_id == expected ? "true" : "false");
+        }
+        std::cout
                   << ",\"batched_reference_match\":"
                   << (batched.token_id == expected ? "true" : "false") << "}\n";
-        return batched.token_id == expected ? EXIT_SUCCESS : EXIT_FAILURE;
+        return benchmark_only || batched.token_id == expected
+            ? EXIT_SUCCESS : EXIT_FAILURE;
     } catch (const std::exception& error) {
         std::cerr << "qwen38-prefill-prompt-smoke: " << error.what() << '\n';
         return EXIT_FAILURE;

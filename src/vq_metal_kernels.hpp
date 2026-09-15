@@ -96,10 +96,13 @@ inline constexpr std::string_view project_expert = R"metal(
 inline constexpr std::string_view gate_up = R"metal(
     const uint lane = thread_index_in_simdgroup;
     const uint item = threadgroup_position_in_grid.x * 8 + simdgroup_index_in_threadgroup;
-    if (item >= (uint)(SLOTS * OUT)) return;
-    const uint slot = item / OUT;
-    const uint row = item - slot * OUT;
-    const uint expert = (uint)experts[slot];
+    if (item >= (uint)(BATCH * SLOTS * OUT)) return;
+    const uint batch = item / (SLOTS * OUT);
+    const uint local_item = item - batch * SLOTS * OUT;
+    const uint slot = local_item / OUT;
+    const uint row = local_item - slot * OUT;
+    const uint expert = (uint)experts[batch * SLOTS + slot];
+    const device T* input_row = x + (size_t)batch * IN;
     const uint groups = IN / GROUP;
     const uint spg = GROUP / D;
     const uint nsub = IN / D;
@@ -140,7 +143,7 @@ inline constexpr std::string_view gate_up = R"metal(
             const uint gb = gate_code * D;
             const uint ub = up_code * D;
             for (uint element = 0; element < D; ++element) {
-                const float value = (float)x[xb + element];
+                const float value = (float)input_row[xb + element];
                 gate_group += value * (float)gate_codebook[gb + element];
                 up_group += value * (float)up_codebook[ub + element];
             }
@@ -154,21 +157,23 @@ inline constexpr std::string_view gate_up = R"metal(
     if (lane == 0) {
         const float gate_value = (float)((T)gate_acc);
         const float up_value = (float)((T)up_acc);
-        h[(size_t)slot * OUT + row] =
+        h[((size_t)batch * SLOTS + slot) * OUT + row] =
             (T)((float)((T)(gate_value / (1.0f + metal::exp(-gate_value)))) * up_value);
     }
 )metal";
 
 inline constexpr std::string_view down_reduce = R"metal(
     const uint lane = thread_index_in_simdgroup;
-    const uint row = threadgroup_position_in_grid.x * 8 + simdgroup_index_in_threadgroup;
-    if (row >= (uint)OUT) return;
+    const uint item = threadgroup_position_in_grid.x * 8 + simdgroup_index_in_threadgroup;
+    if (item >= (uint)(BATCH * OUT)) return;
+    const uint batch = item / OUT;
+    const uint row = item - batch * OUT;
     const uint groups = IN / GROUP;
     const uint spg = GROUP / D;
     const uint nsub = IN / D;
     float routed = 0.0f;
     for (uint slot = 0; slot < SLOTS; ++slot) {
-        const uint expert = (uint)experts[slot];
+        const uint expert = (uint)experts[batch * SLOTS + slot];
         float acc = 0.0f;
         for (uint group = lane; group < groups; group += 32) {
             float group_acc = 0.0f;
@@ -191,7 +196,7 @@ inline constexpr std::string_view down_reduce = R"metal(
                     }
                     code = (uint)(value & ((1ul << BITS) - 1ul));
                 }
-                const uint xb = slot * IN + sub * D;
+                const uint xb = (batch * SLOTS + slot) * IN + sub * D;
                 const uint cb = code * D;
                 for (uint element = 0; element < D; ++element) {
                     group_acc += (float)x[xb + element] * (float)codebook[cb + element];
@@ -201,9 +206,11 @@ inline constexpr std::string_view down_reduce = R"metal(
                 ((size_t)expert * OUT + row) * groups + group] * group_acc;
         }
         acc = simd_sum(acc);
-        if (lane == 0) routed += route_weights[slot] * (float)((T)acc);
+        if (lane == 0) {
+            routed += route_weights[batch * SLOTS + slot] * (float)((T)acc);
+        }
     }
-    if (lane == 0) y[row] = (T)routed;
+    if (lane == 0) y[(size_t)batch * OUT + row] = (T)routed;
 )metal";
 
 } // namespace qwen38::vq_metal
