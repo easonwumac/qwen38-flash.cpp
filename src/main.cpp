@@ -97,18 +97,14 @@ std::string environment_or(const char* name, const char* fallback) {
 int main(int argc, char** argv) {
     try {
         qwen38::ServerConfig config;
-        std::string profile = "speed";
         // The runtime selects MTP only when the target or an explicitly supplied
         // external sidecar contains compatible weights.
         std::optional<std::size_t> mtp_depth = std::nullopt;
         bool mtp_depth_explicit = false;
-        std::size_t prefill_chunk_rows = 64;
-        bool prefill_chunk_explicit = false;
+        std::size_t prefill_chunk_rows = 1024;
         bool adaptive_prefill_chunks = true;
         std::size_t prefix_cache_max_tokens = 8192;
-        bool prefix_cache_explicit = false;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
-        bool qmeta_cache_limit_explicit = false;
         std::optional<std::size_t> qmeta_cache_layers;
         std::optional<std::size_t> qsa_packed_min_tokens;
         std::optional<std::size_t> qsa_shared_rows;
@@ -142,8 +138,7 @@ int main(int argc, char** argv) {
                  argument == "--allocator-cache-mib" ||
                  argument == "--max-generation-tokens" ||
                  argument == "--kv-cache" || argument == "--kv-q8-min-tokens" ||
-                 argument == "--kv-q8-flush-tokens" ||
-                 argument == "--profile") &&
+                 argument == "--kv-q8-flush-tokens") &&
                 i + 1 >= argc) {
                 throw std::runtime_error("missing value for " + argument);
             }
@@ -157,23 +152,18 @@ int main(int argc, char** argv) {
                 ngram_table_directory = argv[++i];
             } else if (argument == "--tokenizer-dir") {
                 tokenizer_directory = argv[++i];
-            } else if (argument == "--profile") {
-                profile = argv[++i];
             } else if (argument == "--mtp-depth") {
                 mtp_depth = parse_mtp_depth(argv[++i]);
                 mtp_depth_explicit = true;
             } else if (argument == "--prefill-chunk") {
                 prefill_chunk_rows = parse_prefill_chunk(argv[++i]);
-                prefill_chunk_explicit = true;
             } else if (argument == "--prefill-chunk-fixed") {
                 adaptive_prefill_chunks = false;
             } else if (argument == "--prefix-cache-tokens") {
                 prefix_cache_max_tokens = parse_size(argv[++i], "prefix cache token limit");
-                prefix_cache_explicit = true;
             } else if (argument == "--qmeta-cache-max-prompt-tokens") {
                 qmeta_cache_max_prompt_tokens =
                     parse_size(argv[++i], "qmeta cache prompt token limit");
-                qmeta_cache_limit_explicit = true;
             } else if (argument == "--qmeta-cache-layers") {
                 qmeta_cache_layers = parse_size(argv[++i], "qmeta cache layer count");
                 if (*qmeta_cache_layers > 48) {
@@ -229,8 +219,8 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("unknown argument: " + argument);
             }
         }
-        const qwen38::RuntimeProfileConfig profile_config =
-            qwen38::runtime_profile_config(profile);
+        const qwen38::AutomaticRuntimeConfig automatic_config =
+            qwen38::automatic_runtime_config();
         if (ngram_table_directory.has_value() &&
             setenv("QWEN38_NGRAM_TABLE_DIR", ngram_table_directory->c_str(), 1) != 0) {
             throw std::runtime_error("cannot configure external n-gram table directory");
@@ -258,9 +248,16 @@ int main(int argc, char** argv) {
         }
         if (!allocator_cache_explicit) {
             allocator_cache_limit_bytes =
-                profile_config.allocator_cache_mib * 1024ULL * 1024ULL;
+                automatic_config.allocator_cache_mib * 1024ULL * 1024ULL;
         }
-        qwen38::apply_runtime_profile(profile);
+        qwen38::apply_automatic_runtime_config();
+        if (model_path.has_value() && std::getenv("QWEN38_COMPACT_QMETA") == nullptr &&
+            std::filesystem::is_regular_file(
+                std::filesystem::path(*model_path) /
+                "model-qmeta-lossless16.safetensors") &&
+            setenv("QWEN38_COMPACT_QMETA", "lossless16", 0) != 0) {
+            throw std::runtime_error("cannot select available lossless qmeta sidecar");
+        }
         if (qmeta_cache_layers.has_value()) {
             const std::string layers = std::to_string(*qmeta_cache_layers);
             const char* enabled = *qmeta_cache_layers == 0 ? "0" : "1";
@@ -290,19 +287,6 @@ int main(int argc, char** argv) {
                 kv_q8_flush_tokens_text.c_str(), 1) != 0) {
             throw std::runtime_error("cannot configure KV cache mode");
         }
-        if (profile_config.optimized && !prefill_chunk_explicit) {
-            // Normal interactive profiles have enough headroom for a wider
-            // trunk batch. Memory-bearing and MTP-heavy profiles keep the
-            // smaller working set.
-            prefill_chunk_rows =
-                profile == "speed" || profile == "latency" ? 1024 : 512;
-        }
-        if (profile_config.memory_efficient) {
-            if (!mtp_depth_explicit) mtp_depth = 0;
-            if (!prefix_cache_explicit) prefix_cache_max_tokens = 0;
-            if (!qmeta_cache_limit_explicit) qmeta_cache_max_prompt_tokens = 0;
-        }
-
         qwen38::RuntimeState runtime;
         std::unique_ptr<qwen38::InferenceEngine> engine;
         if (model_path.has_value()) {
@@ -324,7 +308,7 @@ int main(int argc, char** argv) {
                 engine_options.allocator_cache_limit_bytes = allocator_cache_limit_bytes;
                 engine = std::make_unique<qwen38::NativeEngineExecutor>(
                     *model_path, engine_options);
-                std::clog << "qwen38-server: profile=" << profile
+                std::clog << "qwen38-server: tuning=automatic"
                           << " mtp_depth=" << mtp_depth_name(mtp_depth)
                           << " prefill_chunk=" << prefill_chunk_rows
                           << " adaptive_prefill_chunks="
@@ -333,6 +317,8 @@ int main(int argc, char** argv) {
                           << qmeta_cache_max_prompt_tokens
                           << " qmeta_cache_layers="
                           << environment_or("QWEN38_QMETA_PREFILL_CACHE_LAYERS", "all")
+                          << " compact_qmeta="
+                          << environment_or("QWEN38_COMPACT_QMETA", "full")
                           << " qsa_packed_min_tokens="
                           << environment_or("QWEN38_QSA_PACKED_MIN_TOKENS", "65536")
                           << " qsa_shared_rows="

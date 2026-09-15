@@ -236,6 +236,15 @@ MlxArray QwenModel::prefill_chunk_batch(
     const std::span<const std::uint32_t> tokens,
     ModelDecodeState& state,
     std::vector<double>* layer_ms) const {
+    ModelPrefillChunk chunk = begin_prefill_chunk_batch(tokens, state);
+    while (!advance_prefill_chunk_batch(chunk, tokens, state, layer_ms)) {
+    }
+    return std::move(chunk.stream_batch);
+}
+
+ModelPrefillChunk QwenModel::begin_prefill_chunk_batch(
+    const std::span<const std::uint32_t> tokens,
+    const ModelDecodeState& state) const {
     constexpr std::size_t max_prefill_rows = 1024;
     if (tokens.empty() || tokens.size() > max_prefill_rows) {
         throw std::runtime_error("prefill chunk must contain 1 to 1024 tokens");
@@ -246,6 +255,36 @@ MlxArray QwenModel::prefill_chunk_batch(
     if (state.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
         throw std::runtime_error("prefill token count overflow");
     }
+
+    return {
+        .stream_batch = HyperConnection::initialize_stream(
+            embed_token_batch(
+                embedding_.weight,
+                embedding_.scales,
+                embedding_.biases,
+                tokens,
+                vocabulary_size_,
+                hidden_size_,
+                group_size_,
+                bits_),
+            stream_count_),
+        .next_layer = 0,
+        .row_count = tokens.size(),
+    };
+}
+
+bool QwenModel::advance_prefill_chunk_batch(
+    ModelPrefillChunk& chunk,
+    const std::span<const std::uint32_t> tokens,
+    ModelDecodeState& state,
+    std::vector<double>* layer_ms) const {
+    if (chunk.row_count == 0 || chunk.row_count != tokens.size() ||
+        chunk.next_layer >= layers_.size()) {
+        throw std::runtime_error("invalid resumable prefill chunk");
+    }
+    if (state.layers.size() != layers_.size()) {
+        throw std::runtime_error("model state layer count mismatch");
+    }
     if (layer_ms != nullptr) {
         if (layer_ms->empty()) {
             layer_ms->resize(layers_.size(), 0.0);
@@ -254,43 +293,31 @@ MlxArray QwenModel::prefill_chunk_batch(
         }
     }
 
-    MlxArray stream_batch = HyperConnection::initialize_stream(
-        embed_token_batch(
-            embedding_.weight,
-            embedding_.scales,
-            embedding_.biases,
-            tokens,
-            vocabulary_size_,
-            hidden_size_,
-            group_size_,
-            bits_),
-        stream_count_);
     const std::size_t barrier_stride = prefill_barrier_stride();
-    auto barrier_started = std::chrono::steady_clock::now();
-    std::size_t barrier_begin = 0;
-    for (std::size_t layer = 0; layer < layers_.size(); ++layer) {
-        stream_batch = layers_[layer]->forward_prefill(
-            std::move(stream_batch), tokens, state.layers[layer]);
-        const bool barrier = (layer + 1) % barrier_stride == 0 ||
-            layer + 1 == layers_.size();
-        if (barrier) {
-            eval_with_decode_state(stream_batch, state);
-            if (layer_ms != nullptr) {
-                const auto now = std::chrono::steady_clock::now();
-                const double window_ms = std::chrono::duration<double, std::milli>(
-                    now - barrier_started).count();
-                const double per_layer_ms = window_ms /
-                    static_cast<double>(layer + 1 - barrier_begin);
-                for (std::size_t profiled = barrier_begin; profiled <= layer; ++profiled) {
-                    (*layer_ms)[profiled] += per_layer_ms;
-                }
-                barrier_started = now;
-                barrier_begin = layer + 1;
-            }
+    const std::size_t barrier_begin = chunk.next_layer;
+    const std::size_t barrier_end = std::min(
+        layers_.size(),
+        ((barrier_begin / barrier_stride) + 1) * barrier_stride);
+    const auto barrier_started = std::chrono::steady_clock::now();
+    for (std::size_t layer = barrier_begin; layer < barrier_end; ++layer) {
+        chunk.stream_batch = layers_[layer]->forward_prefill(
+            std::move(chunk.stream_batch), tokens, state.layers[layer]);
+    }
+    eval_with_decode_state(chunk.stream_batch, state);
+    if (layer_ms != nullptr) {
+        const double window_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - barrier_started).count();
+        const double per_layer_ms = window_ms /
+            static_cast<double>(barrier_end - barrier_begin);
+        for (std::size_t profiled = barrier_begin; profiled < barrier_end; ++profiled) {
+            (*layer_ms)[profiled] += per_layer_ms;
         }
     }
-    state.token_count += tokens.size();
-    return stream_batch;
+    chunk.next_layer = barrier_end;
+    if (chunk.next_layer != layers_.size())
+        return false;
+    state.token_count += chunk.row_count;
+    return true;
 }
 
 std::vector<TargetVerifyStep> QwenModel::forward_verify_layer_major_reference(

@@ -41,6 +41,15 @@ struct TargetVerifyStep {
     ModelDecodeState state_after;
 };
 
+// Move-only state for pausing a full-width prefill chunk at the same layer
+// barriers used by the uninterrupted path. The row shape and arithmetic stay
+// unchanged; only independent work may run between barrier groups.
+struct ModelPrefillChunk {
+    MlxArray stream_batch;
+    std::size_t next_layer{0};
+    std::size_t row_count{0};
+};
+
 class QwenModel final {
 public:
     explicit QwenModel(MlxTensorStore& tensors);
@@ -62,6 +71,15 @@ public:
         ModelDecodeState& state,
         std::vector<double>* layer_ms = nullptr) const;
     [[nodiscard]] MlxArray prefill_chunk_batch(
+        std::span<const std::uint32_t> tokens,
+        ModelDecodeState& state,
+        std::vector<double>* layer_ms = nullptr) const;
+    [[nodiscard]] ModelPrefillChunk begin_prefill_chunk_batch(
+        std::span<const std::uint32_t> tokens,
+        const ModelDecodeState& state) const;
+    // Returns true after the final layer and commits row_count to state.
+    [[nodiscard]] bool advance_prefill_chunk_batch(
+        ModelPrefillChunk& chunk,
         std::span<const std::uint32_t> tokens,
         ModelDecodeState& state,
         std::vector<double>* layer_ms = nullptr) const;

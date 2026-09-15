@@ -5,9 +5,11 @@ Flash Next on Apple Silicon. It owns model loading, tokenization, the complete
 48-layer forward pass, hybrid attention state, speculative verification,
 caching, HTTP serving, streaming, and runtime observability.
 
-The default server configuration is intended for daily inference. It selects
-the validated Q8 KV, sparse-attention, prefill, MTP, and persistent-Metal paths
-from the supplied model assets; tuning profiles are not required.
+The server has one automatic production configuration. It selects the validated
+Q8 KV, sparse-attention, prefill, MTP, continuous-batching, and persistent-Metal
+paths from the supplied model assets; there are no tuning profiles to choose.
+When an exact lossless16 metadata sidecar is present, it is selected
+automatically to keep the target plus Q8 drafter below the memory ceiling.
 
 ## Final retained model
 
@@ -70,6 +72,9 @@ reference. Full conditions are in the
 
 - **Layer-major batched execution:** wide prompt and verifier rows pass through
   each layer together, removing token-by-token dispatch and synchronization.
+- **Decode-priority refill:** a full-width refill prefill yields at existing
+  eight-layer evaluation barriers, so it preserves prompt arithmetic while
+  active decode rows continue between layer groups.
 - **Fused decode kernels:** Q4 routed MoE, device-side routing, Hyper-Connection,
   and Gated DeltaNet work are fused around the actual decode-width hot path.
 - **Grouped prefill:** 1,024-row grouped QMM/SDPA execution raises exact 8K
@@ -77,9 +82,8 @@ reference. Full conditions are in the
 - **Bounded graph lifetime:** temporary compact metadata survives only to the
   existing eight-layer barrier, improving scheduling without retaining every
   decoded metadata bank for the whole request.
-- **Pageable long-context experts:** normal requests can keep a measured expert
-  tier resident; capacity profiles let macOS reclaim those pages as QSA/KV state
-  grows.
+- **Bounded long-context state:** QSA activation, adaptive prefill chunks, and
+  slabbed Q8 KV are selected from context growth rather than a user profile.
 - **Exact Qwen Sparse Attention:** raw and pooled indexer state, causal top-block
   selection, snapshots, verifier checkpoints, and rollback remain native to the
   engine.
@@ -123,6 +127,8 @@ Long-context distributions below use independent cold server starts.
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
 | Four-request continuous decode, 4 x 128 tokens | REAP-288 Q4 + Q8 SSD PLE; `speed`, MTP/thinking off, greedy; warm HTTP A/B on four short prompts | **45.70 aggregate decode tok/s** vs 41.5--41.7 serial; exact per-request output parity; 38.9 GiB peak footprint |
 | Rolling IFBench concurrency, first 12 prompts | same REAP/Q8 PLE; 512-token cap, MTP/thinking off; rolling four-slot vs serial A/B | **39.20 vs 38.35 aggregate decode tok/s**; end-to-end 36.10 vs 36.34 tok/s; 12/12 byte-identical responses; 39.0 GiB peak footprint |
+| Layer-yield refill, first 12 IFBench prompts | Apple M5 Pro 64 GiB; REAP-288 Q4 + Q8 SSD PLE; automatic tuning, four rolling slots, MTP/thinking off, greedy, max 512; one run without active thermal control | **39.28 aggregate decode tok/s**, 36.17 end-to-end; 3,665 tokens, 0 errors; 12/12 responses byte-identical to the uninterrupted-prefill control; 39.1 GiB peak footprint |
+| Automatic MTP, retained 128-token fixture | Apple M5 Pro 64 GiB; REAP-288 Q4 target + Q8 drafter/Q8 SSD PLE; automatically selected lossless16 qmeta and resident layers 12:29; greedy/no-thinking; 1 warmup + 2 samples; no active thermal control | **71.08 / 71.04 tok/s**, median 71.06; 92/100 drafts accepted per sample; **38.3 GiB peak footprint** |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
@@ -212,38 +218,39 @@ is not part of the serving path.
 
 ## Run
 
-Normal exact inference:
+Normal automatic inference:
 
 ```bash
 python3 devtools/memory_guard.py -- \
   ./build/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --profile speed --prefix-cache-tokens 8192 \
-  --max-generation-tokens 32768 --mtp-depth off
+  --prefix-cache-tokens 8192 \
+  --max-generation-tokens 32768
 ```
 
-For 128K+ contexts or a memory-constrained desktop, use pageable experts and no
-RAM prefix cache:
+The same automatic path handles long contexts. On a memory-constrained desktop,
+the RAM prefix-cache limit can be set to zero:
 
 ```bash
 python3 devtools/memory_guard.py --min-available-gib 8 -- \
   ./build/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --profile long-context --prefix-cache-tokens 0 \
+  --prefix-cache-tokens 0 \
   --max-generation-tokens 32768 --mtp-depth off
 ```
 
-Use `--mtp-depth auto` only when sufficient memory is reclaimable. Explicit
-depth 4 is reserved for a previously calibrated high-acceptance workload.
+The automatic policy uses a compatible drafter only while acceptance repays
+verification. `--mtp-depth off` is a resource-limit override for environments
+that cannot afford its allocation.
 
 The validated 128K recipe is:
 
 ```bash
-QWEN38_QSA_RAW_WINDOW=64 \
+QWEN38_QSA_RAW_WINDOW=64 QWEN38_RESIDENT_EXPERT_RANGE= \
 python3 devtools/memory_guard.py --min-available-gib 6 -- \
   ./build/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --profile memory --mtp-depth off --prefix-cache-tokens 0 \
+  --mtp-depth off --prefix-cache-tokens 0 \
   --qmeta-cache-max-prompt-tokens 262144 --qmeta-cache-layers 8 \
   --qsa-packed-min-tokens 32768 --qsa-shared-rows 4 \
   --kv-cache q8 --kv-q8-min-tokens 65536 --kv-q8-flush-tokens 8192 \

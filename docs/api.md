@@ -9,8 +9,10 @@ weights. It waits up to 2 ms and coalesces as many as four compatible queued
 requests into one layer-major continuous decode batch. Each request has an
 independent KV/GDN/PLE state and sampler; finished or cancelled rows leave the
 batch immediately. Their HTTP worker can then accept another queued connection;
-the executor waits up to 5 ms at the next token boundary and prefills that
-request into the free slot while the other rows remain live.
+the executor waits up to 5 ms at the next token boundary and begins filling that
+request into the free slot while the other rows remain live. Refill prefill
+keeps its original full-width matrix shape and yields only at the same layer
+evaluation barriers used by uninterrupted prefill.
 
 The automatic aggregate admission limit is 131,072 prompt-plus-reserved-output
 tokens (`QWEN38_BATCH_CONTEXT_TOKENS` can override it). Larger groups and
@@ -19,14 +21,13 @@ batch already amortizes target execution; a lone request retains the configured
 serial/MTP path. This keeps the normal path automatic while bounding unified
 memory use.
 
-Refill prefill currently pauses decode for the surviving rows. This improves
-queue utilization and can raise aggregate decode throughput, but it is not a
-universal end-to-end speedup for short-prompt, mixed-output workloads.
+Each refill layer group still shares the GPU with decode, but it no longer
+blocks surviving rows for the entire prompt. This is a latency/fairness gain;
+short-prompt mixed-output throughput remains workload-dependent.
 
-The server defaults to stable serial inference. MTP companion execution is
-enabled only when `--mtp-depth auto`, `2`, `3`, or `4` is passed explicitly;
-startup logs the effective mode. This prevents a model capsule that happens to
-contain a drafter from silently increasing the steady memory requirement.
+Compatible MTP assets are selected automatically and retained only while their
+acceptance repays verification. `--mtp-depth off` remains a resource-limit
+override when the extra allocation is undesirable.
 
 | Method | Route | Current behavior |
 |---|---|---|
@@ -95,7 +96,7 @@ Thinking responses expose the text before `</think>` as `reasoning_content` and
 the final answer as `content`. Send both fields back on assistant messages in a
 later request so the native Qwen chat template can reproduce the prior turn.
 Both configured Qwen EOS IDs terminate generation and are omitted from response
-content. The `speed` profile extends its one-entry prefix cache through generated
+content. Automatic tuning extends its one-entry prefix cache through generated
 assistant tokens; `QWEN38_EXTEND_PREFIX_CACHE=0` restores prompt-only caching.
 
 Errors use an OpenAI-style envelope:

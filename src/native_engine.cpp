@@ -534,8 +534,16 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
         std::uint32_t current{0};
         std::string pending_stream_bytes;
         std::chrono::steady_clock::time_point generation_started;
+        std::optional<ModelPrefillChunk> pending_prefill;
+        std::size_t prefill_offset{0};
+        std::size_t prefill_rows{0};
+        std::size_t prefill_chunk_rows{0};
+        std::size_t current_prefill_rows{0};
+        double prefill_ms{0.0};
         double generation_ms{0.0};
         bool active{true};
+        bool ready{false};
+        bool prefill_started{false};
         std::size_t reserved_tokens{0};
     };
 
@@ -599,7 +607,8 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
     std::vector<Session> sessions;
     sessions.reserve(4);
     const auto initialize_session = [&](BatchRequest request,
-                                        std::vector<std::uint32_t> prompt_tokens) -> bool {
+                                        std::vector<std::uint32_t> prompt_tokens,
+                                        const bool incremental_prefill) -> bool {
         Session session(std::move(request), model_.layer_count());
         try {
             session.prompt_tokens = std::move(prompt_tokens);
@@ -607,26 +616,36 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
             session.state = model_.make_state();
             session.current = session.prompt_tokens.back();
             session.result.prompt_tokens = session.prompt_tokens.size();
-            const std::size_t prefill_rows = session.prompt_tokens.size() - 1;
-            const std::size_t chunk =
+            session.prefill_rows = session.prompt_tokens.size() - 1;
+            session.prefill_chunk_rows =
                 options_.adaptive_prefill_chunks
-                    ? select_prefill_chunk_rows(options_.prefill_chunk_rows, prefill_rows)
+                    ? select_prefill_chunk_rows(options_.prefill_chunk_rows,
+                                                session.prefill_rows)
                     : options_.prefill_chunk_rows;
-            model_.clear_prefill_qmeta_cache();
-            model_.set_prefill_qmeta_cache_allowed(options_.qmeta_cache_max_prompt_tokens != 0 &&
-                                                   prefill_rows <=
-                                                       options_.qmeta_cache_max_prompt_tokens);
-            const auto started = std::chrono::steady_clock::now();
-            for (std::size_t offset = 0; offset < prefill_rows; offset += chunk) {
-                const std::size_t count = std::min(chunk, prefill_rows - offset);
-                static_cast<void>(model_.prefill_chunk_batch(
-                    std::span<const std::uint32_t>(session.prompt_tokens.data() + offset, count),
-                    session.state));
+            if (session.prefill_rows == 0) {
+                session.ready = true;
+                session.generation_started = std::chrono::steady_clock::now();
+            } else if (!incremental_prefill) {
+                model_.clear_prefill_qmeta_cache();
+                model_.set_prefill_qmeta_cache_allowed(
+                    options_.qmeta_cache_max_prompt_tokens != 0 &&
+                    session.prefill_rows <= options_.qmeta_cache_max_prompt_tokens);
+                const auto started = std::chrono::steady_clock::now();
+                for (std::size_t offset = 0; offset < session.prefill_rows;
+                     offset += session.prefill_chunk_rows) {
+                    const std::size_t count = std::min(
+                        session.prefill_chunk_rows, session.prefill_rows - offset);
+                    static_cast<void>(model_.prefill_chunk_batch(
+                        std::span<const std::uint32_t>(
+                            session.prompt_tokens.data() + offset, count),
+                        session.state));
+                }
+                session.result.prompt_ms = std::chrono::duration<double, std::milli>(
+                                               std::chrono::steady_clock::now() - started)
+                                               .count();
+                session.generation_started = std::chrono::steady_clock::now();
+                session.ready = true;
             }
-            session.result.prompt_ms = std::chrono::duration<double, std::milli>(
-                                           std::chrono::steady_clock::now() - started)
-                                           .count();
-            session.generation_started = std::chrono::steady_clock::now();
             sessions.push_back(std::move(session));
             return true;
         } catch (...) {
@@ -636,30 +655,78 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
         }
     };
     for (std::size_t slot = 0; slot < requests.size(); ++slot) {
-        initialize_session(std::move(requests[slot]), std::move(tokenized[slot]));
+        initialize_session(std::move(requests[slot]), std::move(tokenized[slot]), false);
     }
     model_.clear_prefill_qmeta_cache();
+
+    const auto advance_pending_prefill = [&](Session &session) {
+        if (session.ready)
+            return;
+        if (!session.prefill_started) {
+            model_.clear_prefill_qmeta_cache();
+            model_.set_prefill_qmeta_cache_allowed(
+                options_.qmeta_cache_max_prompt_tokens != 0 &&
+                session.prefill_rows <= options_.qmeta_cache_max_prompt_tokens);
+            session.prefill_started = true;
+        }
+        if (!session.pending_prefill.has_value()) {
+            session.current_prefill_rows = std::min(
+                session.prefill_chunk_rows,
+                session.prefill_rows - session.prefill_offset);
+            const std::span<const std::uint32_t> tokens(
+                session.prompt_tokens.data() + session.prefill_offset,
+                session.current_prefill_rows);
+            session.pending_prefill.emplace(
+                model_.begin_prefill_chunk_batch(tokens, session.state));
+        }
+        const std::span<const std::uint32_t> tokens(
+            session.prompt_tokens.data() + session.prefill_offset,
+            session.current_prefill_rows);
+        const auto started = std::chrono::steady_clock::now();
+        const bool chunk_done = model_.advance_prefill_chunk_batch(
+            *session.pending_prefill, tokens, session.state);
+        session.prefill_ms += std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count();
+        if (chunk_done) {
+            session.prefill_offset += session.current_prefill_rows;
+            session.current_prefill_rows = 0;
+            session.pending_prefill.reset();
+        }
+        if (session.prefill_offset == session.prefill_rows) {
+            session.result.prompt_ms = session.prefill_ms;
+            session.generation_started = std::chrono::steady_clock::now();
+            session.ready = true;
+            model_.clear_prefill_qmeta_cache();
+        }
+    };
 
     std::vector<BatchRequest> deferred;
     try {
         while (!sessions.empty()) {
             std::vector<std::uint32_t> tokens;
             std::vector<ModelDecodeState *> states;
+            std::vector<std::size_t> decode_rows;
             tokens.reserve(sessions.size());
             states.reserve(sessions.size());
+            decode_rows.reserve(sessions.size());
             for (std::size_t slot = 0; slot < sessions.size(); ++slot) {
+                if (!sessions[slot].ready)
+                    continue;
                 tokens.push_back(sessions[slot].current);
                 states.push_back(&sessions[slot].state);
+                decode_rows.push_back(slot);
             }
-            std::vector<TargetDecodeStep> steps =
-                model_.forward_decode_capture_multi(tokens, states);
+            std::vector<TargetDecodeStep> steps;
+            if (!tokens.empty())
+                steps = model_.forward_decode_capture_multi(tokens, states);
             std::vector<std::uint32_t> next_tokens(steps.size());
             std::vector<MlxArray> greedy_tokens;
             std::vector<std::size_t> greedy_rows;
             greedy_tokens.reserve(steps.size());
             greedy_rows.reserve(steps.size());
-            for (std::size_t row = 0; row < sessions.size(); ++row) {
-                if (sessions[row].request.sampling.temperature <= 0.0F) {
+            for (std::size_t row = 0; row < steps.size(); ++row) {
+                if (sessions[decode_rows[row]].request.sampling.temperature <= 0.0F) {
                     greedy_rows.push_back(row);
                     greedy_tokens.push_back(steps[row].logits.argmax_all());
                 }
@@ -674,8 +741,8 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
                     next_tokens[greedy_rows[index]] = greedy_tokens[index].item_uint32();
                 }
             }
-            for (std::size_t row = 0; row < sessions.size(); ++row) {
-                Session &session = sessions[row];
+            for (std::size_t row = 0; row < steps.size(); ++row) {
+                Session &session = sessions[decode_rows[row]];
                 BatchRequest &request = session.request;
                 const std::uint32_t next =
                     request.sampling.temperature <= 0.0F
@@ -769,17 +836,36 @@ void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
                             "refill prompt and max_tokens exceed model context");
                     }
                     const std::size_t capacity = prompt_tokens.size() + request->max_tokens;
-                if (request->sampling.thinking_budget_tokens != 0 ||
-                    live_capacity + capacity > aggregate_limit) {
-                    deferred.push_back(std::move(*request));
-                    break;
-                }
-                    if (initialize_session(std::move(*request), std::move(prompt_tokens))) {
+                    if (request->sampling.thinking_budget_tokens != 0 ||
+                        live_capacity + capacity > aggregate_limit) {
+                        deferred.push_back(std::move(*request));
+                        break;
+                    }
+                    if (initialize_session(
+                            std::move(*request), std::move(prompt_tokens), true)) {
                         live_capacity += capacity;
                     }
                 } catch (...) {
                     if (request->on_error)
                         request->on_error(std::current_exception());
+                }
+            }
+
+            // Preserve the full prefill matrix shape and exact layer order,
+            // but yield at its existing evaluation barriers so live decode
+            // streams cannot be blocked by the entire prompt.
+            const auto pending = std::ranges::find_if(
+                sessions, [](const Session &session) {
+                    return session.active && !session.ready;
+                });
+            if (pending != sessions.end()) {
+                try {
+                    advance_pending_prefill(*pending);
+                } catch (...) {
+                    if (pending->request.on_error)
+                        pending->request.on_error(std::current_exception());
+                    model_.clear_prefill_qmeta_cache();
+                    sessions.erase(pending);
                 }
             }
         }

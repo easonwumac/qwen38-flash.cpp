@@ -445,10 +445,19 @@ The implementation order is deliberately narrow:
   rows immediately, then waits up to 5 ms to refill each open slot. A rolling
   12-prompt IFBench A/B was byte-identical and moved aggregate decode from
   38.35 to 39.20 tok/s, but end-to-end throughput was flat/slightly lower
-  (36.34 to 36.10) because refill prefill pauses surviving rows. Keep refill for
-  queue utilization; do not claim a universal mixed-length throughput win until
-  chunked prefill overlaps or yields to decode. Thinking and over-budget
-  aggregate contexts still fall back to serial without another profile.
+  (36.34 to 36.10) because refill prefill paused surviving rows.
+- Splitting refill prompts into 64-row outer chunks reduced the same 12-prompt
+  run to 38.49 aggregate and 35.38 end-to-end tok/s. Six of twelve greedy
+  responses diverged because changing the prefill matrix width changes BF16
+  rounding. That prototype was removed; do not use smaller outer chunks as a
+  concurrency shortcut.
+- The retained refill instead pauses a full-width prompt at the pre-existing
+  eight-layer evaluation barriers. The same 3,665 generated tokens and all
+  12 byte-identical responses completed at 39.28 aggregate and 36.17
+  end-to-end tok/s, with a 39.1 GiB peak. This removes whole-prompt blocking
+  without changing arithmetic, but is a fairness/latency improvement rather
+  than a claimed throughput step. Thinking and over-budget aggregate contexts
+  still fall back to serial as an automatic resource decision.
 
 ## Promotion gates
 

@@ -27,20 +27,19 @@ Niwaki checkpoints can instead supply `niwaki_ple_pair` and
 model shards through mmap. Compact qmeta and MTP are optional sidecars; never
 edit the upstream shard payloads to install them.
 
-## Select a profile
+## Automatic tuning
 
-| Need | Profile and MTP | Expected tradeoff |
-|---|---|---|
-| Normal interactive use | `speed`, default MTP off | Exact top-10; 1024-row PP batches through 32K |
-| Lowest memory | `memory`, MTP off | Pageable experts and lossless13; slower cold/decode |
-| 128K+ context | `long-context`, MTP off, RAM cache off | Maximum state headroom |
-| Validated 128K throughput | `memory`, Q8 KV, shared-row QSA, fixed chunk 512 | 550.92 PP tok/s median; selector approximation is opt-in |
-| Known favorable speculation | `speed --mtp-depth auto` | Faster only when acceptance repays verification |
-| Explicit quality/speed experiment | `turbo` | Changes target routing/qmeta; not exact parity |
+The server exposes one production policy: exact top-10 routing, adaptive
+1,024-row prefill, Q8 KV after 8K, QSA after its context threshold, four-slot
+continuous batching, automatic lossless16 metadata when its sidecar is present,
+and adaptive MTP when compatible assets are present.
+Flags that remain in this runbook are resource limits or reproducibility
+controls, not alternate performance profiles.
 
-On a 64 GiB machine, do not make a Q8 MTP companion the unconditional default.
-The server defaults to serial even when a drafter is present. A Q4 drafter uses
-less memory, but still needs mixed-workload economics validation.
+When a compatible MTP companion is supplied, automatic tuning probes its
+economics and falls back to serial target decode after repeated unprofitable
+rounds. Use `--mtp-depth off` only as a resource limit when the companion's
+allocation does not fit.
 
 ## Launch and verify
 
@@ -48,7 +47,7 @@ less memory, but still needs mixed-workload economics validation.
 DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
 ./devtools/memory_guard.py -- ./build-release/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --profile speed --prefix-cache-tokens 8192 \
+  --prefix-cache-tokens 8192 \
   --max-generation-tokens 4096
 
 curl -fsS http://127.0.0.1:11438/healthz
@@ -60,11 +59,11 @@ curl -fsS http://127.0.0.1:11438/metrics
 For a guarded Q8 long-context run, keep MTP and the RAM prefix cache off:
 
 ```bash
-DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
+QWEN38_RESIDENT_EXPERT_RANGE= DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
 ./devtools/memory_guard.py --min-available-gib 6 -- \
   ./build-release/qwen38-server \
   --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --profile memory --mtp-depth off --prefix-cache-tokens 0 \
+  --mtp-depth off --prefix-cache-tokens 0 \
   --qmeta-cache-max-prompt-tokens 262144 --qmeta-cache-layers 8 \
   --qsa-packed-min-tokens 32768 --qsa-shared-rows 4 \
   --kv-cache q8 --kv-q8-min-tokens 65536 \
