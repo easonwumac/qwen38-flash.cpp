@@ -123,6 +123,41 @@ intervention and returned final answers. Strict and loose accuracy recovered to
 peak footprint was 39.0 GiB. This validates the lifecycle mechanism; three
 prompts remain too small for a model-quality estimate.
 
+A subsequent run covered the first 30 public prompts with the corrected bounded
+lifecycle, temperature 1.0, top-p 0.95, top-k 20, seed 0, xhigh effort, and a
+4,096-token maximum. It scored **19/30 (63.33%)** at both prompt-level strict and
+loose accuracy, and 28/44 (63.64%) at instruction level. There were no request
+errors; two responses reached the length limit. Aggregate decode was 34.88 tok/s
+and the per-request median was 35.46 tok/s. This slice contains count and word
+constraints and is not an estimate of the full 300-row distribution, but it
+demonstrates that the earlier non-thinking result materially understates the
+checkpoint's usable instruction-following path.
+
+## HumanEval runtime control
+
+The REAP model card reports 91.5% HumanEval pass@1 but identifies only the 164
+problems, one run per build, and unit-test verification; it does not publish its
+prompt template, stopping rules, or generation harness. We therefore ran the
+original OpenAI HumanEval problems as greedy raw completions with one sample,
+512 generated tokens, Q4/group-64 target weights, Q4/group-32 SSD PLE, and the
+official tests inside a network-denied macOS sandbox.
+
+After removing accidental protocol suffixes from otherwise raw completions, the
+custom engine scored **127/164 (77.44%)**. Current stock `mlx-vlm` commit
+`1ecf1ecdd28af102eded679be0daa5c76ab2a068`, using the identical local checkpoint
+and identical row-addressable PLE, scored **130/164 (79.27%)**. The paired result
+was 118 both-pass, 25 both-fail, 9 custom-only, and 12 stock-only. The 1.83-point
+gap excludes this backend as the explanation for a large checkpoint-quality
+loss, while the changed paired verdicts show that exact logits parity still
+matters for deterministic benchmark reproduction.
+
+The custom engine's median decode was 50.01 tok/s versus 31.46 tok/s for stock;
+stock reported a 43.50 GB MLX peak. A non-thinking chat prompt scored only
+110/164 (67.07%), but its union with the raw-completion successes covered
+146/164 (89.02%). That oracle union is not a valid pass@1 score; it demonstrates
+large prompt sensitivity and why the model card's unpublished harness prevents
+an exact reproduction claim.
+
 ### Niwaki 113B pilot
 
 `Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx` was tested on the same first

@@ -58,8 +58,8 @@ int main(int argc, char** argv) {
         }
         const double first_checksum = std::accumulate(first.begin(), first.end(), 0.0);
         const double second_checksum = std::accumulate(second.begin(), second.end(), 0.0);
-        const char* storage =
-            table.uses_paired_shards() ? "niwaki-paired-q2-mmap" : "aos-pread";
+        const char* storage = table.uses_paired_shards() ? "niwaki-paired-q2-mmap" :
+            table.uses_bf16_aos() ? "bf16-aos-pread" : "q4-aos-pread";
         std::cout << "{\"storage\":\"" << storage << "\",\"first_row\":" << first_rows.front()
                   << ",\"last_row\":" << first_rows.back()
                   << ",\"reference\":\"" << (has_fallback ? "safetensors" : "repeat") << '"'

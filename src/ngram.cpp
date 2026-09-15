@@ -120,6 +120,17 @@ NgramTable::NgramTable(
     const std::uint64_t rows,
     const bool prefer_aos)
     : rows_(rows) {
+    const std::filesystem::path bf16_aos_path =
+        model_directory / "ngram_table.bf16.aos";
+    const std::uint64_t bf16_row_bytes = dimension_ * sizeof(std::uint16_t);
+    if (prefer_aos && std::filesystem::is_regular_file(bf16_aos_path) &&
+        std::filesystem::file_size(bf16_aos_path) == rows_ * bf16_row_bytes) {
+        bf16_aos_fd_ = ::open(bf16_aos_path.c_str(), O_RDONLY);
+        if (bf16_aos_fd_ < 0) {
+            throw std::runtime_error("cannot open BF16 n-gram AoS table");
+        }
+        return;
+    }
     const std::size_t row_bytes = packed_word_count_ * 4 + scale_count_ * 4;
     const std::filesystem::path aos_path = model_directory / "ngram_table.bin.aos";
     if (prefer_aos && std::filesystem::is_regular_file(aos_path) &&
@@ -207,6 +218,7 @@ void NgramTable::initialize_paired(ModelManifest manifest) {
 
 NgramTable::~NgramTable() {
     if (aos_fd_ >= 0) static_cast<void>(::close(aos_fd_));
+    if (bf16_aos_fd_ >= 0) static_cast<void>(::close(bf16_aos_fd_));
 }
 
 void NgramTable::decode_row(
@@ -269,6 +281,7 @@ std::vector<float> NgramTable::gather(
     const std::size_t row_bytes = weight_bytes + 2 * scale_bytes;
     std::vector<float> result(row_ids.size() * dimension_);
     std::vector<std::byte> row(row_bytes);
+    std::vector<std::uint16_t> bf16_row(dimension_);
     for (std::size_t index = 0; index < row_ids.size(); ++index) {
         if (row_ids[index] < 0 || static_cast<std::uint64_t>(row_ids[index]) >= rows_) {
             throw std::runtime_error("n-gram row index is out of range");
@@ -286,6 +299,21 @@ std::vector<float> NgramTable::gather(
             decode_paired_row(
                 *shard, logical_row,
                 std::span<float>(result).subspan(index * dimension_, dimension_));
+            continue;
+        }
+        if (bf16_aos_fd_ >= 0) {
+            const std::size_t bf16_bytes = dimension_ * sizeof(std::uint16_t);
+            const off_t offset = static_cast<off_t>(
+                static_cast<std::uint64_t>(row_ids[index]) * bf16_bytes);
+            const ssize_t count = ::pread(
+                bf16_aos_fd_, bf16_row.data(), bf16_bytes, offset);
+            if (count != static_cast<ssize_t>(bf16_bytes)) {
+                throw std::runtime_error("short read from BF16 n-gram AoS table");
+            }
+            const std::size_t target = index * dimension_;
+            for (std::size_t column = 0; column < dimension_; ++column) {
+                result[target + column] = bf16_to_float(bf16_row[column]);
+            }
             continue;
         }
         if (aos_fd_ >= 0) {

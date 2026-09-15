@@ -110,6 +110,8 @@ Long-context distributions below use independent cold server starts.
 | Workload | Configuration | Result |
 |---|---|---:|
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
+| Public IFBench bounded-thinking, first 30 prompts | REAP-288 Q4 target/Q4 SSD PLE; temperature 1, top-p .95, top-k 20, seed 0, xhigh, max 4,096; MTP off; serial run on the validation Mac | **63.33% strict and loose** (19/30); 2 length-limited; aggregate decode **34.88 tok/s**, median 35.46 |
+| OpenAI HumanEval, 164 problems | REAP-288 Q4 target/Q4 SSD PLE; raw completion, greedy, max 512, one sample; sandboxed unit tests; automatic verified MTP; validation Mac | **77.44% pass@1** (127/164); median decode **50.01 tok/s**; stock `mlx-vlm` on the identical checkpoint/PLE scored **79.27%** (130/164) at 31.46 tok/s median |
 | REAP-288 bounded-thinking IFBench pilot, 3 prompts | corrected sampled xhigh thinking; automatic 2,730-token reasoning budget within max 4,096; MTP off | **2/3 strict and loose**; all three forced a close and returned a final answer; **35.81 aggregate decode tok/s**; 39.0 GiB peak footprint |
 | Niwaki 113B bounded-thinking IFBench pilot, 3 prompts | 113B routed/backbone weights + REAP tokenizer/Q4 SSD PLE; same protocol; MTP off | **0/3 strict and loose** despite three final answers; **40.07 aggregate decode tok/s**; 26.7 GiB peak footprint |
 | Niwaki 113B native-PLE bounded-thinking pilot, 3 prompts | native paired Q2/group-128 PLE mmap + REAP tokenizer; temperature 1, top-p .95, top-k 20, seed 0, xhigh bounded thinking, 105--188 prompt tokens, max 4,096; MTP off | **0/3 explicit keyword gates**; **37.76 aggregate decode tok/s** (36.65--38.70); 26.6 GiB peak footprint |
@@ -138,7 +140,11 @@ checkpoint and machine.
 The deterministic 30-request serial quality suite scored 22/30 with zero
 request or parse errors, matching the retained model baseline. This measures the
 checkpoint and request lifecycle; it is not a claim of universal model accuracy.
-The public IFBench result and its comparability limits are documented in the
+The non-thinking IFBench result is not representative of this checkpoint's best
+instruction-following path: bounded thinking recovered 63.33% on the first 30
+public prompts. HumanEval shows only a 1.83-point gap from stock `mlx-vlm` on the
+same checkpoint and PLE, excluding the custom backend as the source of a large
+quality collapse. The public results and comparability limits are documented in the
 [public quality evaluation](docs/public-quality-evaluation.md).
 
 Full workload definitions, hashes, distributions, guard reports, and rejected

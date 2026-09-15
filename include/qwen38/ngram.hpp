@@ -50,7 +50,10 @@ public:
 
     [[nodiscard]] std::vector<float> gather(
         std::span<const std::int64_t> row_ids) const;
-    [[nodiscard]] bool uses_aos() const noexcept { return aos_fd_ >= 0; }
+    [[nodiscard]] bool uses_aos() const noexcept {
+        return aos_fd_ >= 0 || bf16_aos_fd_ >= 0;
+    }
+    [[nodiscard]] bool uses_bf16_aos() const noexcept { return bf16_aos_fd_ >= 0; }
     [[nodiscard]] bool uses_paired_shards() const noexcept { return paired_store_ != nullptr; }
     [[nodiscard]] std::size_t row_dimension() const noexcept { return dimension_; }
 
@@ -78,6 +81,7 @@ private:
     std::size_t bits_{4};
     std::size_t pair_{1};
     int aos_fd_{-1};
+    int bf16_aos_fd_{-1};
     std::unique_ptr<SafetensorsFile> fallback_;
     TensorView fallback_weight_;
     TensorView fallback_scales_;
