@@ -126,12 +126,21 @@ prompts remain too small for a model-quality estimate.
 A subsequent run covered the first 30 public prompts with the corrected bounded
 lifecycle, temperature 1.0, top-p 0.95, top-k 20, seed 0, xhigh effort, and a
 4,096-token maximum. It scored **19/30 (63.33%)** at both prompt-level strict and
-loose accuracy, and 28/44 (63.64%) at instruction level. There were no request
+loose accuracy, and 21/33 (63.64%) at instruction level. There were no request
 errors; two responses reached the length limit. Aggregate decode was 34.88 tok/s
 and the per-request median was 35.46 tok/s. This slice contains count and word
 constraints and is not an estimate of the full 300-row distribution, but it
 demonstrates that the earlier non-thinking result materially understates the
 checkpoint's usable instruction-following path.
+
+Replacing only the row-addressable Q4/group-32 PLE with the original BF16 PLE
+raised the same slice to **21/30 (70.00%)** at both prompt-level strict and loose
+accuracy and 23/33 (69.70%) at instruction level. One response reached the
+length limit. Aggregate decode was 36.84 tok/s and the per-request median was
+37.25 tok/s across 81,843 generated tokens. The BF16 table occupies 95.37 GiB
+on SSD versus 29.8 GiB for Q4; both are read on demand instead of being made
+resident. The directional speed difference is not treated as a throughput
+claim because these were separate serial runs.
 
 ## HumanEval runtime control
 
@@ -157,6 +166,14 @@ stock reported a 43.50 GB MLX peak. A non-thinking chat prompt scored only
 146/164 (89.02%). That oracle union is not a valid pass@1 score; it demonstrates
 large prompt sensitivity and why the model card's unpublished harness prevents
 an exact reproduction claim.
+
+An otherwise identical custom-engine run replaced only the Q4 PLE with the
+original BF16 table. It scored **133/164 (81.10%)**: 118 problems passed under
+both PLE precisions, 15 passed only with BF16, 9 passed only with Q4, and 22
+failed under both. Median decode was 48.86 tok/s versus 50.01 tok/s with Q4, a
+2.3% reduction. PLE quantization therefore has a measurable but bounded effect:
+BF16 recovered 3.66 pass@1 points, not the much larger gap caused by using the
+checkpoint's non-thinking instruction-following path.
 
 ### Niwaki 113B pilot
 
