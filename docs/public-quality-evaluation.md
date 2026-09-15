@@ -103,6 +103,31 @@ does not disclose the IFBench generation contract, thinking is enabled by
 default, and its recommended sampling differs from IFBench's documented
 temperature-zero protocol.
 
+### Ten-row bounded-thinking control
+
+The first ten rows of the same stratified selection (original indices 0, 10,
+..., 90) were then tested with the Qwen-recommended thinking sampler:
+temperature 1.0, top-p 0.95, top-k 20, seed 0, xhigh reasoning, a 2,730-token
+thinking budget within a 4,096-token maximum, and only the final answer passed
+to the official verifier. MTP was off. The 27B control used serial generation
+because `mlx-vlm` 0.7.1 continuous batching ended all five initial probes before
+closing the thinking block; those invalid outputs were rejected rather than
+scored.
+
+| Bounded-thinking control | Strict | Loose | Generated tokens | Median decode | Peak memory |
+|---|---:|---:|---:|---:|---:|
+| Qwen3.8-27B affine Q4/group-64, `mlx-vlm` | **7/10 (70%)** | **7/10 (70%)** | 23,459 | 16.79 tok/s | 16.75 GB MLX |
+| REAP-288 Q4 target + Q8 SSD PLE, custom engine | **5/10 (50%)** | **5/10 (50%)** | 29,174 | 36.86 tok/s | 38.88 GiB footprint |
+
+The paired strict/loose verdicts were identical: 4 both-pass, 3 27B-only, 1
+REAP-only, and 2 both-fail. Every serial 27B response closed its thinking block;
+the custom engine also returned a final answer for every case. The result
+demonstrates both that thinking lifecycle explains the earlier 27B 1/5 result
+and that the REAP checkpoint has a real instruction-following deficit on this
+small slice. Ten deliberately stratified cases remain too few to estimate the
+300-row score, but 27B's 70% is directionally compatible with its published
+79.5 rather than the misleading no-thinking result.
+
 Niwaki 99B is not promoted as the quality default. A three-prompt pilot repeated
 or exhausted its allowance in both this engine and a stock `mlx-vlm` generation
 on the same checkpoint, consistent with the checkpoint author's documented
