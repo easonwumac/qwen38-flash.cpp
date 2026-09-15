@@ -35,6 +35,14 @@ struct MoeVerifyTimings {
     double merge_ms{0.0};
 };
 
+struct MoeDecodeTimings {
+    double routing_ms{0.0};
+    double gate_up_ms{0.0};
+    double down_reduce_ms{0.0};
+    double shared_expert_ms{0.0};
+    double merge_ms{0.0};
+};
+
 class SparseMoe final {
 public:
     SparseMoe(
@@ -48,6 +56,9 @@ public:
 
     [[nodiscard]] RouterSelection route_decode(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_decode_profiled(
+        const MlxArray& input,
+        MoeDecodeTimings& timings) const;
     [[nodiscard]] std::vector<MlxArray> forward_decode_multi(
         const std::vector<MlxArray>& inputs) const;
     [[nodiscard]] MlxArray forward_verify(const MlxArray& input) const;
@@ -124,6 +135,9 @@ private:
         const QuantizedProjection& projection,
         const MlxArray& expert);
     [[nodiscard]] MlxArray forward_experts_decode(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_experts_decode_profiled(
+        const MlxArray& input,
+        MoeDecodeTimings* timings) const;
     [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_grouped(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_packed(const MlxArray& input) const;

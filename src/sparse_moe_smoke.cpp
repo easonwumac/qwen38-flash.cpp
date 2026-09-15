@@ -61,7 +61,7 @@ qwen38::MlxArray make_input(
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 5) {
         std::cerr << "Usage: " << argv[0]
-                  << " MODEL_DIRECTORY [ROWS [components|verify-components|layer=N [LAYER]]]\n";
+                  << " MODEL_DIRECTORY [ROWS [components|verify-components|decode-components|layer=N [LAYER]]]\n";
         return EXIT_FAILURE;
     }
     try {
@@ -69,16 +69,20 @@ int main(int argc, char** argv) {
         const std::string_view mode = argc >= 4 ? std::string_view(argv[3]) : std::string_view{};
         const bool profile_components = mode == "components";
         const bool profile_verify = mode == "verify-components";
+        const bool profile_decode = mode == "decode-components";
         const bool layer_mode = mode.starts_with("layer=");
         const bool explicit_profile_layer = argc == 5;
         const std::size_t layer = explicit_profile_layer
             ? std::stoul(argv[4])
             : layer_mode ? std::stoul(std::string(mode.substr(6))) : 0;
-        if (argc >= 4 && !profile_components && !profile_verify && !layer_mode) {
+        if (argc >= 4 && !profile_components && !profile_verify && !profile_decode &&
+            !layer_mode) {
             throw std::runtime_error(
-                "mode must be 'components', 'verify-components', or 'layer=N'");
+                "mode must be 'components', 'verify-components', 'decode-components', "
+                "or 'layer=N'");
         }
-        if (explicit_profile_layer && !profile_components && !profile_verify) {
+        if (explicit_profile_layer && !profile_components && !profile_verify &&
+            !profile_decode) {
             throw std::runtime_error("explicit LAYER requires a component profiling mode");
         }
         if ((profile_components || profile_verify) && rows == 1) {
@@ -86,6 +90,9 @@ int main(int argc, char** argv) {
         }
         if (profile_verify && rows > 5) {
             throw std::runtime_error("verify component profiling requires ROWS <= 5");
+        }
+        if (profile_decode && rows != 1) {
+            throw std::runtime_error("decode component profiling requires ROWS=1");
         }
         if (rows == 0 || rows > 512) {
             throw std::runtime_error("PREFILL_ROWS must be between 1 and 512");
@@ -121,8 +128,9 @@ int main(int argc, char** argv) {
         std::vector<double> timings;
         std::vector<qwen38::MoePrefillTimings> component_timings;
         std::vector<qwen38::MoeVerifyTimings> verify_timings;
+        std::vector<qwen38::MoeDecodeTimings> decode_timings;
         std::vector<float> values;
-        int iterations = profile_components || profile_verify ? 21 : 6;
+        int iterations = profile_components || profile_verify || profile_decode ? 21 : 6;
         if (const char* raw_iterations = std::getenv("QWEN38_MOE_SMOKE_ITERATIONS")) {
             const unsigned long parsed = std::stoul(raw_iterations);
             if (parsed < 2 || parsed > 1000) {
@@ -135,7 +143,10 @@ int main(int argc, char** argv) {
             const auto started = std::chrono::steady_clock::now();
             qwen38::MoePrefillTimings components;
             qwen38::MoeVerifyTimings verify_components;
-            auto output = rows == 1
+            qwen38::MoeDecodeTimings decode_components;
+            auto output = profile_decode
+                ? moe.forward_decode_profiled(input, decode_components)
+                : rows == 1
                 ? moe.forward_decode(input)
                 : profile_verify
                     ? moe.forward_verify_profiled(input, verify_components)
@@ -147,6 +158,7 @@ int main(int argc, char** argv) {
                 std::chrono::steady_clock::now() - started).count());
             if (profile_components) component_timings.push_back(components);
             if (profile_verify) verify_timings.push_back(verify_components);
+            if (profile_decode) decode_timings.push_back(decode_components);
         }
         if (values.size() != rows * config.hidden_size ||
             !std::all_of(values.begin(), values.end(), [](const float value) {
@@ -205,6 +217,16 @@ int main(int argc, char** argv) {
             values.reserve(verify_timings.size() - 1);
             for (std::size_t index = 1; index < verify_timings.size(); ++index) {
                 values.push_back(verify_timings[index].*field);
+            }
+            std::sort(values.begin(), values.end());
+            return values[values.size() / 2];
+        };
+        const auto decode_median = [&decode_timings](
+                                       const auto qwen38::MoeDecodeTimings::* field) {
+            std::vector<double> values;
+            values.reserve(decode_timings.size() - 1);
+            for (std::size_t index = 1; index < decode_timings.size(); ++index) {
+                values.push_back(decode_timings[index].*field);
             }
             std::sort(values.begin(), values.end());
             return values[values.size() / 2];
@@ -270,6 +292,18 @@ int main(int argc, char** argv) {
                       << verify_median(&qwen38::MoeVerifyTimings::shared_expert_ms)
                       << ",\"merge\":"
                       << verify_median(&qwen38::MoeVerifyTimings::merge_ms)
+                      << '}';
+        } else if (profile_decode) {
+            std::cout << ",\"decode_components_ms\":{\"routing\":"
+                      << decode_median(&qwen38::MoeDecodeTimings::routing_ms)
+                      << ",\"gate_up\":"
+                      << decode_median(&qwen38::MoeDecodeTimings::gate_up_ms)
+                      << ",\"down_reduce\":"
+                      << decode_median(&qwen38::MoeDecodeTimings::down_reduce_ms)
+                      << ",\"shared_expert\":"
+                      << decode_median(&qwen38::MoeDecodeTimings::shared_expert_ms)
+                      << ",\"merge\":"
+                      << decode_median(&qwen38::MoeDecodeTimings::merge_ms)
                       << '}';
         }
         std::cout << "}\n";

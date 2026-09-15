@@ -814,8 +814,19 @@ RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
 }
 
 MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
+    return forward_experts_decode_profiled(input, nullptr);
+}
+
+MlxArray SparseMoe::forward_experts_decode_profiled(
+    const MlxArray& input,
+    MoeDecodeTimings* timings) const {
+    using Clock = std::chrono::steady_clock;
+    const auto elapsed_ms = [](const Clock::time_point started) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+    };
     MlxArray expert_sum;
     if (fused_vq_ || (fused_gate_up_ && fused_down_)) {
+        const auto routing_started = Clock::now();
         MlxArray experts;
         MlxArray weights;
         const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
@@ -867,7 +878,13 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             experts = MlxArray::from_int32(expert_values, selected_shape);
             weights = MlxArray::from_float32(selection.weights, selected_shape);
         }
+        if (timings != nullptr) {
+            experts.eval();
+            weights.eval();
+            timings->routing_ms = elapsed_ms(routing_started);
+        }
         if (fused_vq_) {
+            const auto gate_started = Clock::now();
             const int slots = checked_int(experts_per_token_, "VQ slots");
             const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
                 {.name = "T", .value = input.dtype()},
@@ -896,7 +913,12 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             MlxArray hidden = std::move(vq_gate_up_kernel()->apply(
                 gate_inputs, gate_outputs, gate_grid, threadgroup,
                 dtype_templates, gate_templates).front());
+            if (timings != nullptr) {
+                hidden.eval();
+                timings->gate_up_ms = elapsed_ms(gate_started);
+            }
 
+            const auto down_started = Clock::now();
             const std::array<MlxMetalIntTemplate, 7> down_templates{{
                 {.name = "OUT", .value = expert_down_.output_dimension},
                 {.name = "IN", .value = expert_down_.input_dimension},
@@ -917,6 +939,10 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
             expert_sum = std::move(vq_down_reduce_kernel()->apply(
                 down_inputs, down_outputs, down_grid, threadgroup,
                 dtype_templates, down_templates).front());
+            if (timings != nullptr) {
+                expert_sum.eval();
+                timings->down_reduce_ms = elapsed_ms(down_started);
+            }
         } else if (compact_qmeta_) {
             expert_sum = forward_compact_routed(input, experts, weights);
         } else {
@@ -1204,6 +1230,29 @@ MlxArray SparseMoe::forward_decode(const MlxArray& input) const {
         return forward_verify(input);
     }
     return MlxArray::add(forward_experts_decode(input), forward_shared(input));
+}
+
+MlxArray SparseMoe::forward_decode_profiled(
+    const MlxArray& input,
+    MoeDecodeTimings& timings) const {
+    timings = {};
+    if (!has_routed_ || paged_store_) {
+        throw std::runtime_error("profiled decode requires resident routed experts");
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto elapsed_ms = [](const Clock::time_point started) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+    };
+    MlxArray routed = forward_experts_decode_profiled(input, &timings);
+    const auto shared_started = Clock::now();
+    MlxArray shared = forward_shared(input);
+    shared.eval();
+    timings.shared_expert_ms = elapsed_ms(shared_started);
+    const auto merge_started = Clock::now();
+    MlxArray output = MlxArray::add(routed, shared);
+    output.eval();
+    timings.merge_ms = elapsed_ms(merge_started);
+    return output;
 }
 
 std::vector<MlxArray> SparseMoe::forward_decode_multi(
