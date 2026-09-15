@@ -140,7 +140,8 @@ void append_calibration_rows(
 
 bool top2_oracle_enabled() {
     const char* value = std::getenv("QWEN38_MTP_TOP2_ORACLE");
-    return value != nullptr && std::string_view(value) == "1";
+    return value != nullptr &&
+        (std::string_view(value) == "1" || std::string_view(value) == "all");
 }
 
 bool top2_oracle_all_positions() {
