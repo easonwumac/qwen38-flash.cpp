@@ -61,6 +61,8 @@ int main(int argc, char** argv) {
             }
             qwen38::ModelDecodeState baseline_state = model.make_state();
             qwen38::ModelDecodeState device_state = model.make_state();
+            const bool candidate_full_softmax =
+                std::getenv("QWEN38_ROUTE_PARITY_FULL_SOFTMAX") != nullptr;
             std::uint32_t teacher_token = 9419;
             bool all_top1_match = true;
             std::cout << "{\"route_parity\":[";
@@ -70,7 +72,8 @@ int main(int argc, char** argv) {
                 const std::vector<float> baseline = model.forward_decode(
                     teacher_token, baseline_state).astype(MLX_FLOAT32).to_float32();
                 if (setenv("QWEN38_DEVICE_ROUTER", "1", 1) != 0 ||
-                    setenv("QWEN38_SELECTED_SOFTMAX_ROUTER", "1", 1) != 0) {
+                    (!candidate_full_softmax &&
+                     setenv("QWEN38_SELECTED_SOFTMAX_ROUTER", "1", 1) != 0)) {
                     throw std::runtime_error("cannot configure route parity candidate");
                 }
                 const std::vector<float> candidate = model.forward_decode(

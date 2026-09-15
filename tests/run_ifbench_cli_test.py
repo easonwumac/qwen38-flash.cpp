@@ -58,6 +58,20 @@ class RunIfbenchCliTest(unittest.TestCase):
             "mlx",
         )
 
+    def test_selects_cases_in_requested_key_order(self) -> None:
+        cases = [{"key": "0"}, {"key": 10}, {"key": "20"}]
+        self.assertEqual(
+            [row["key"] for row in run_ifbench.select_cases_by_key(cases, "20,0")],
+            ["20", "0"],
+        )
+
+    def test_rejects_missing_or_duplicate_keys(self) -> None:
+        cases = [{"key": "0"}, {"key": "10"}]
+        with self.assertRaisesRegex(ValueError, "unknown --keys: 20"):
+            run_ifbench.select_cases_by_key(cases, "0,20")
+        with self.assertRaisesRegex(ValueError, "must not contain duplicates"):
+            run_ifbench.select_cases_by_key(cases, "0,0")
+
 
 if __name__ == "__main__":
     unittest.main()

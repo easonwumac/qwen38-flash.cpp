@@ -37,6 +37,21 @@ def extract_reasoning_content(message: dict[str, Any]) -> str:
     return message.get("reasoning_content") or message.get("reasoning") or ""
 
 
+def select_cases_by_key(
+    cases: list[dict[str, Any]], raw_keys: str
+) -> list[dict[str, Any]]:
+    keys = [value.strip() for value in raw_keys.split(",") if value.strip()]
+    if not keys:
+        raise ValueError("--keys must contain at least one key")
+    if len(set(keys)) != len(keys):
+        raise ValueError("--keys must not contain duplicates")
+    by_key = {str(case["key"]): case for case in cases}
+    missing = [key for key in keys if key not in by_key]
+    if missing:
+        raise ValueError("unknown --keys: " + ",".join(missing))
+    return [by_key[key] for key in keys]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
@@ -48,6 +63,10 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--keys",
+        help="Comma-separated dataset keys to evaluate in the specified order",
+    )
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-thinking", action="store_true")
@@ -70,6 +89,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.concurrency < 1 or args.concurrency > 4:
         parser.error("--concurrency must be between 1 and 4")
+    if args.limit is not None and args.keys is not None:
+        parser.error("--limit and --keys are mutually exclusive")
     if args.chat_template_kwargs is not None and not isinstance(
         args.chat_template_kwargs, dict
     ):
@@ -80,7 +101,12 @@ def main() -> int:
 
     raw_input = args.input.read_bytes()
     cases = load_jsonl(args.input)
-    if args.limit is not None:
+    if args.keys is not None:
+        try:
+            cases = select_cases_by_key(cases, args.keys)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.limit is not None:
         cases = cases[: args.limit]
 
     completed: dict[str, dict[str, Any]] = {}
@@ -222,6 +248,7 @@ def main() -> int:
             "dataset_sha256": hashlib.sha256(raw_input).hexdigest(),
             "dataset_rows": len(load_jsonl(args.input)),
             "evaluated_rows": len(rows),
+            "evaluated_keys": [str(case["key"]) for case in cases],
             "concurrency": args.concurrency,
             "scheduling": "rolling" if args.concurrency > 1 else "serial",
         },

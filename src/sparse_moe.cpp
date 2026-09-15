@@ -820,7 +820,10 @@ MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
         MlxArray weights;
         const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
         if (device_router != nullptr && std::string_view(device_router) == "1") {
-            MlxArray logits = project_linear(input, router_);
+            // route_decode performs selection from FP32 logits.  Keep the
+            // device path on the same precision contract before softmax/top-k;
+            // otherwise BF16 gate rounding can change both weights and experts.
+            MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
             const bool use_selected_softmax =
                 selected_softmax_router_enabled(normalize_topk_probability_);
             MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1228,7 +1231,7 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
         std::string_view(device_router) == "1";
     for (const MlxArray& input : inputs) {
         if (route_on_device) {
-            MlxArray logits = project_linear(input, router_);
+            MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
             const bool use_selected_softmax =
                 selected_softmax_router_enabled(normalize_topk_probability_);
             MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1310,7 +1313,7 @@ MlxArray SparseMoe::forward_verify_impl(
         std::string_view(device_router) == "1") {
         const int rows = shape[1];
         const auto routing_started = Clock::now();
-        MlxArray logits = project_linear(input, router_);
+        MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
         const bool use_selected_softmax =
             selected_softmax_router_enabled(normalize_topk_probability_);
         MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
