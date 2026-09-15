@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import statistics
@@ -39,6 +40,7 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--no-thinking", action="store_true")
     parser.add_argument(
@@ -53,6 +55,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--frequency-penalty", type=float, default=0.0)
     args = parser.parse_args()
+    if args.concurrency < 1 or args.concurrency > 4:
+        parser.error("--concurrency must be between 1 and 4")
     temperature = args.temperature
     if temperature is None:
         temperature = 0.0 if args.no_thinking else 1.0
@@ -74,12 +78,8 @@ def main() -> int:
             if not row.get("error") and row.get("finish_reason") != "length"
         }
 
-    rows: list[dict[str, Any]] = []
-    for index, case in enumerate(cases, 1):
+    def generate(index: int, case: dict[str, Any]) -> dict[str, Any]:
         key = str(case["key"])
-        if key in completed:
-            rows.append(completed[key])
-            continue
         body = {
             "model": args.model,
             "messages": [{"role": "user", "content": case["prompt"]}],
@@ -103,7 +103,11 @@ def main() -> int:
             headers={"Content-Type": "application/json"},
         )
         started = time.monotonic()
-        row: dict[str, Any] = {"key": key, "prompt": case["prompt"]}
+        row: dict[str, Any] = {
+            "key": key,
+            "prompt": case["prompt"],
+            "case_index": index,
+        }
         try:
             with urllib.request.urlopen(request, timeout=args.timeout) as response:
                 payload = json.load(response)
@@ -119,23 +123,46 @@ def main() -> int:
         except Exception as exc:
             row.update(response="", error=f"{type(exc).__name__}: {exc}")
         row["wall_seconds"] = time.monotonic() - started
-        rows.append(row)
-        print(
-            json.dumps(
-                {
-                    "case": index,
-                    "key": key,
-                    "error": row.get("error"),
-                    "completion_tokens": row.get("usage", {}).get("completion_tokens"),
-                    "generation_tps": row.get("performance", {}).get("generation_tps"),
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        artifact = {"cases": rows}
-        args.artifact.parent.mkdir(parents=True, exist_ok=True)
-        args.artifact.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n")
+        return row
+
+    rows_by_key = dict(completed)
+    pending = [
+        (index, case)
+        for index, case in enumerate(cases, 1)
+        if str(case["key"]) not in completed
+    ]
+    evaluation_started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+        futures = [executor.submit(generate, index, case) for index, case in pending]
+        for future in concurrent.futures.as_completed(futures):
+            row = future.result()
+            rows_by_key[row["key"]] = row
+            print(
+                json.dumps(
+                    {
+                        "case": row["case_index"],
+                        "key": row["key"],
+                        "error": row.get("error"),
+                        "completion_tokens": row.get("usage", {}).get("completion_tokens"),
+                        "request_generation_tps": row.get("performance", {}).get(
+                            "generation_tps"
+                        ),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            rows = [
+                rows_by_key[str(case["key"])]
+                for case in cases
+                if str(case["key"]) in rows_by_key
+            ]
+            artifact = {"cases": rows}
+            args.artifact.parent.mkdir(parents=True, exist_ok=True)
+            args.artifact.write_text(json.dumps(artifact, indent=2, ensure_ascii=False) + "\n")
+
+    evaluation_wall_seconds = time.monotonic() - evaluation_started
+    rows = [rows_by_key[str(case["key"])] for case in cases]
 
     response_rows = [{"prompt": row["prompt"], "response": row["response"]} for row in rows]
     write_jsonl(args.responses, response_rows)
@@ -149,6 +176,15 @@ def main() -> int:
         for row in rows
         if not row.get("error") and float(row.get("performance", {}).get("prompt_ms", 0)) > 0
     ]
+    prompt_ms = sum(float(row.get("performance", {}).get("prompt_ms", 0)) for row in rows)
+    generation_denominator_ms = (
+        sum(float(row.get("performance", {}).get("generation_ms", 0)) for row in rows)
+        if args.concurrency == 1
+        else max(0.0, evaluation_wall_seconds * 1000.0 - prompt_ms)
+    )
+    completion_tokens = sum(
+        int(row.get("usage", {}).get("completion_tokens", 0)) for row in rows
+    )
     summary = {
         "protocol": {
             "benchmark": "IFBench single-turn OOD test",
@@ -163,15 +199,19 @@ def main() -> int:
             "dataset_sha256": hashlib.sha256(raw_input).hexdigest(),
             "dataset_rows": len(load_jsonl(args.input)),
             "evaluated_rows": len(rows),
+            "concurrency": args.concurrency,
+            "scheduling": "rolling" if args.concurrency > 1 else "serial",
         },
         "errors": sum(bool(row.get("error")) for row in rows),
-        "completion_tokens": sum(int(row.get("usage", {}).get("completion_tokens", 0)) for row in rows),
+        "completion_tokens": completion_tokens,
         "aggregate_decode_tps": (
-            1000.0
-            * sum(int(row.get("usage", {}).get("completion_tokens", 0)) for row in rows)
-            / sum(float(row.get("performance", {}).get("generation_ms", 0)) for row in rows)
-            if sum(float(row.get("performance", {}).get("generation_ms", 0)) for row in rows) > 0
+            1000.0 * completion_tokens / generation_denominator_ms
+            if generation_denominator_ms > 0
             else None
+        ),
+        "evaluation_wall_seconds": evaluation_wall_seconds,
+        "end_to_end_tps": (
+            completion_tokens / evaluation_wall_seconds if evaluation_wall_seconds > 0 else None
         ),
         "decode_tps": {
             "median": statistics.median(decode_rates) if decode_rates else None,

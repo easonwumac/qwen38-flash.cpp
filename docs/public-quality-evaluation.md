@@ -79,6 +79,21 @@ published 79.5, but the gap cannot be assigned to the runtime without a
 same-checkpoint stock-runtime run. It currently gates any claim that REAP-288 is
 a high-quality general instruction-following replacement for Qwen3.8-27B.
 
+### Native concurrency control
+
+The first 30 official prompts were generated through the native four-request
+path with Q8 SSD PLE, MTP/thinking off, temperature zero, and max 4,096. The
+official scorer reported **15/30 (50.00%)** prompt-level strict and loose and
+17/33 (51.52%) instruction-level strict and loose, with zero request errors.
+The older automatic-MTP serial artifact scores 11/30 (36.67%) on the same slice,
+but differs in PLE/MTP configuration and is not a concurrency A/B.
+
+A controlled rolling-admission A/B therefore used the same first 12 prompts,
+same Q8 PLE, max 512, and MTP off. All 12 concurrent responses were byte-identical
+to serial. Aggregate decode was 39.20 versus 38.35 tok/s, while end-to-end was
+36.10 versus 36.34 tok/s; refill correctness is validated, but mixed-length
+IFBench does not yet show an end-to-end throughput win.
+
 ### Five-row Qwen3.8-27B control
 
 A small cross-check used original dataset indices 0, 10, 20, 30, and 40, which

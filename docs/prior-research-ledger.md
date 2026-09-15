@@ -441,9 +441,14 @@ The implementation order is deliberately narrow:
   after near-tied logits. That form was removed. Evaluating four unchanged
   single-row graphs at shared layer barriers is bit-exact against serial output
   and still reaches 45.86 versus 38.41 aggregate tok/s in the same probe.
-- The HTTP executor coalesces for at most 2 ms, dynamically removes completed
-  rows, and falls back to serial for thinking or aggregate contexts above the
-  admission bound. This avoids a second user-facing concurrency profile.
+- The HTTP executor initially coalesces for at most 2 ms, delivers completed
+  rows immediately, then waits up to 5 ms to refill each open slot. A rolling
+  12-prompt IFBench A/B was byte-identical and moved aggregate decode from
+  38.35 to 39.20 tok/s, but end-to-end throughput was flat/slightly lower
+  (36.34 to 36.10) because refill prefill pauses surviving rows. Keep refill for
+  queue utilization; do not claim a universal mixed-length throughput win until
+  chunked prefill overlaps or yields to decode. Thinking and over-budget
+  aggregate contexts still fall back to serial without another profile.
 
 ## Promotion gates
 

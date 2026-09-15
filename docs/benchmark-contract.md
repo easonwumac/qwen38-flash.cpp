@@ -56,3 +56,11 @@ serial requests at 41.48--41.68 tok/s, with exact output parity and a 38.9 GiB
 peak footprint. The corresponding layer-major microbenchmark measured 45.86
 versus 38.41 aggregate tok/s (1.194x) across 4 x 14 measured steps. These are
 directional concurrency results, not single-stream decode claims.
+
+A rolling-admission IFBench control used the first 12 official prompts, a
+512-token maximum, and otherwise the same MTP-off runtime. Four slots produced
+3,665 tokens at 39.20 aggregate decode tok/s versus 38.35 serial (+2.23%); all
+12 responses were byte-identical. End-to-end throughput was 36.10 versus 36.34
+tok/s (-0.64%) because new-request prefill pauses surviving decode rows. The
+four-slot peak footprint was 39.0 GiB. This validates refill correctness and a
+small decode gain, not a mixed-length end-to-end throughput claim.

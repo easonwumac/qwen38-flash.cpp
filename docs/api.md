@@ -8,7 +8,9 @@ One dedicated MLX executor thread preserves stream affinity without duplicating
 weights. It waits up to 2 ms and coalesces as many as four compatible queued
 requests into one layer-major continuous decode batch. Each request has an
 independent KV/GDN/PLE state and sampler; finished or cancelled rows leave the
-batch without delaying the remaining rows.
+batch immediately. Their HTTP worker can then accept another queued connection;
+the executor waits up to 5 ms at the next token boundary and prefills that
+request into the free slot while the other rows remain live.
 
 The automatic aggregate admission limit is 131,072 prompt-plus-reserved-output
 tokens (`QWEN38_BATCH_CONTEXT_TOKENS` can override it). Larger groups and
@@ -16,6 +18,10 @@ thinking requests run serially. Cross-request batches bypass MTP because the
 batch already amortizes target execution; a lone request retains the configured
 serial/MTP path. This keeps the normal path automatic while bounding unified
 memory use.
+
+Refill prefill currently pauses decode for the surviving rows. This improves
+queue utilization and can raise aggregate decode throughput, but it is not a
+universal end-to-end speedup for short-prompt, mixed-output workloads.
 
 The server defaults to stable serial inference. MTP companion execution is
 enabled only when `--mtp-depth auto`, `2`, `3`, or `4` is passed explicitly;

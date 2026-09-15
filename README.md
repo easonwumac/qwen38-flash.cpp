@@ -111,6 +111,7 @@ Long-context distributions below use independent cold server starts.
 | Workload | Configuration | Result |
 |---|---|---:|
 | Public IFBench, 300 prompts | official loose/strict scorer; REAP-288 Q4 + Q8 MTP; temperature 0, thinking off, max 4,096; serial 55-minute thermal soak | **39.67% loose / 34.67% strict** prompt accuracy; 0 errors; aggregate decode **37.46 tok/s**; 40.8 GiB peak footprint |
+| Native concurrent IFBench, first 30 prompts | REAP-288 Q4 + Q8 SSD PLE; MTP/thinking off, temperature 0, max 4,096; official scorer | **50.00% strict/loose**, 15/30; 17/33 instruction checks; 0 errors |
 | Public IFBench bounded-thinking, first 30 prompts | REAP-288 Q4 target; temperature 1, top-p .95, top-k 20, seed 0, xhigh, max 4,096; MTP off; serial run on the validation Mac | Q4/Q8/BF16 SSD PLE: **63.33% / 66.67% / 70.00%** strict/loose; median decode 35.46 / 36.07 / 37.25 tok/s |
 | Public IFBench bounded-thinking, 10 stratified prompts | original indices 0,10,...,90; temperature 1, top-p .95, top-k 20, seed 0, 2,730-token thinking budget within max 4,096; MTP off; final-answer-only official scoring | Qwen3.8-27B Q4: **70%** strict/loose, 16.79 tok/s, 16.75 GB MLX peak; REAP-288 Q4 target + Q8 SSD PLE: **50%**, 36.86 tok/s, 38.88 GiB peak footprint |
 | OpenAI HumanEval raw completion, 164 problems | REAP-288 Q4 target; greedy, max 512, one sample; sandboxed tests | Q4/Q8/BF16 SSD PLE with verified MTP: **77.44% / 80.49% / 81.10%**; Q8 PLE with MTP off: **81.10%**, 38.13 tok/s; Qwen3.8-27B affine Q4/group-64, MTP off: **80.49%** |
@@ -121,6 +122,7 @@ Long-context distributions below use independent cold server starts.
 | Niwaki 113B stock control, first pilot prompt | stock `mlx-vlm` 0.7.0/MLX 0.32.2 and native 2-bit PLE; sampled xhigh thinking, max 4,096 | no `</think>` or final answer; 29.13 tok/s; 43.58 GB MLX peak / 41.3 GiB guarded footprint |
 | Serial decode, retained 128-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 41.03 / 41.18 / 41.06 tok/s; median 41.06 |
 | Four-request continuous decode, 4 x 128 tokens | REAP-288 Q4 + Q8 SSD PLE; `speed`, MTP/thinking off, greedy; warm HTTP A/B on four short prompts | **45.70 aggregate decode tok/s** vs 41.5--41.7 serial; exact per-request output parity; 38.9 GiB peak footprint |
+| Rolling IFBench concurrency, first 12 prompts | same REAP/Q8 PLE; 512-token cap, MTP/thinking off; rolling four-slot vs serial A/B | **39.20 vs 38.35 aggregate decode tok/s**; end-to-end 36.10 vs 36.34 tok/s; 12/12 byte-identical responses; 39.0 GiB peak footprint |
 | Serial decode, retained 256-token fixture | `speed`, MTP off; 1 warmup + 3 samples | 40.95 / 40.50 / 40.73 tok/s; median 40.73 |
 | Exact 8K prefill, 8,216 tokens | `speed`, chunk 1024; cold + warm; fixed first-token hash | 608.50 cold, 757.18 warm PP tok/s |
 | Exact 32K prefill, 32,792 tokens | `speed`, MTP off; chunk 512 A/B and fixed 1024 | 567.29 / 571.12 / 571.65 PP tok/s |
@@ -181,9 +183,11 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 - The Q8 drafter increases admission pressure. `--mtp-depth off` is retained as
   a resource-limit override for smaller machines.
 - The executor automatically coalesces up to four ordinary requests into one
-  exact-arithmetic continuous decode batch. Thinking requests and batches above
-  the 131,072-token aggregate admission limit remain serial; MTP is bypassed
-  while a cross-request batch is active.
+  exact-arithmetic continuous decode batch and refills completed slots from the
+  queue. Thinking requests and batches above the 131,072-token aggregate
+  admission limit remain serial; MTP is bypassed while a cross-request batch is
+  active. Mixed-length IFBench gained 2.23% in decode but not end-to-end
+  throughput because refill prefill pauses active decode.
 - Multimodal input is not supported.
 - The server currently exposes Chat Completions, not the Responses API required
   by current Codex custom providers.

@@ -9,6 +9,7 @@
 #include "qwen38/tokenizer.hpp"
 
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -56,7 +57,10 @@ public:
         std::size_t max_tokens{0};
         std::optional<TextDeltaCallback> on_delta;
         SamplingOptions sampling;
+        std::function<void(GenerationResult)> on_complete;
+        std::function<void(std::exception_ptr)> on_error;
     };
+    using BatchRefillCallback = std::function<std::optional<BatchRequest>()>;
 
     explicit NativeEngine(
         const std::filesystem::path& model_directory,
@@ -74,8 +78,9 @@ public:
     // Runs independent request states through one layer-major decode graph.
     // MTP is intentionally disabled while multiple requests are active: the
     // batch itself supplies the throughput gain without speculative memory.
-    [[nodiscard]] std::vector<GenerationResult> complete_batch(
-        std::vector<BatchRequest> requests);
+    void complete_batch(
+        std::vector<BatchRequest> requests,
+        const BatchRefillCallback& refill = {});
     void clear_cache() override;
 
 private:

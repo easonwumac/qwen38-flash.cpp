@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -497,42 +498,51 @@ GenerationResult NativeEngine::complete_stream(
     return complete_impl(prompt, max_tokens, &on_delta, sampling);
 }
 
-std::vector<GenerationResult> NativeEngine::complete_batch(
-    std::vector<BatchRequest> requests) {
+void NativeEngine::complete_batch(std::vector<BatchRequest> requests,
+                                  const BatchRefillCallback &refill) {
     if (requests.empty() || requests.size() > 4) {
         throw std::runtime_error("continuous decode batch must contain 1 to 4 requests");
     }
-    if (requests.size() == 1 || std::ranges::any_of(requests, [](const BatchRequest& request) {
+    if (requests.size() == 1 || std::ranges::any_of(requests, [](const BatchRequest &request) {
             return request.sampling.thinking_budget_tokens != 0;
         })) {
-        std::vector<GenerationResult> results;
-        results.reserve(requests.size());
-        for (BatchRequest& request : requests) {
-            results.push_back(request.on_delta.has_value()
-                ? complete_stream(request.prompt, request.max_tokens,
-                      *request.on_delta, request.sampling)
-                : complete(request.prompt, request.max_tokens, request.sampling));
+        for (BatchRequest &request : requests) {
+            try {
+                GenerationResult result =
+                    request.on_delta.has_value()
+                        ? complete_stream(request.prompt, request.max_tokens, *request.on_delta,
+                                          request.sampling)
+                        : complete(request.prompt, request.max_tokens, request.sampling);
+                if (request.on_complete)
+                    request.on_complete(std::move(result));
+            } catch (...) {
+                if (request.on_error)
+                    request.on_error(std::current_exception());
+            }
         }
-        return results;
+        return;
     }
 
     struct Session {
-        explicit Session(const std::size_t layer_count, const std::uint64_t seed)
-            : state(layer_count), random(seed) {}
+        Session(BatchRequest value, const std::size_t layer_count)
+            : request(std::move(value)), state(layer_count), random(request.sampling.seed) {}
+        BatchRequest request;
         std::vector<std::uint32_t> prompt_tokens;
         ModelDecodeState state;
         GenerationResult result;
         std::mt19937_64 random;
         std::uint32_t current{0};
         std::string pending_stream_bytes;
+        std::chrono::steady_clock::time_point generation_started;
         double generation_ms{0.0};
         bool active{true};
+        std::size_t reserved_tokens{0};
     };
 
     std::vector<std::vector<std::uint32_t>> tokenized;
     tokenized.reserve(requests.size());
     std::size_t aggregate_capacity = 0;
-    for (const BatchRequest& request : requests) {
+    for (const BatchRequest &request : requests) {
         if (request.max_tokens == 0 || request.max_tokens > options_.max_generation_tokens) {
             throw std::runtime_error("batched max_tokens is outside the configured limit");
         }
@@ -540,11 +550,12 @@ std::vector<GenerationResult> NativeEngine::complete_batch(
             request.sampling.top_p > 1.0F || request.sampling.frequency_penalty < 0.0F ||
             request.sampling.frequency_penalty > 2.0F ||
             (request.sampling.temperature > 0.0F &&
-                (request.sampling.top_k == 0 || request.sampling.top_k > 256))) {
+             (request.sampling.top_k == 0 || request.sampling.top_k > 256))) {
             throw std::runtime_error("invalid sampling options in continuous decode batch");
         }
         tokenized.push_back(tokenizer_.encode(request.prompt));
-        if (tokenized.back().empty()) throw std::runtime_error("prompt produced no tokens");
+        if (tokenized.back().empty())
+            throw std::runtime_error("prompt produced no tokens");
         const std::size_t context_limit = tensors_.manifest().config().max_context_tokens;
         if (tokenized.back().size() > context_limit ||
             request.max_tokens > context_limit - tokenized.back().size()) {
@@ -553,8 +564,8 @@ std::vector<GenerationResult> NativeEngine::complete_batch(
         aggregate_capacity += tokenized.back().size() + request.max_tokens;
     }
     std::size_t aggregate_limit = 131072;
-    if (const char* configured = std::getenv("QWEN38_BATCH_CONTEXT_TOKENS")) {
-        char* end = nullptr;
+    if (const char *configured = std::getenv("QWEN38_BATCH_CONTEXT_TOKENS")) {
+        char *end = nullptr;
         const unsigned long long parsed = std::strtoull(configured, &end, 10);
         if (end == configured || *end != '\0' || parsed < 4096) {
             throw std::runtime_error("QWEN38_BATCH_CONTEXT_TOKENS must be at least 4096");
@@ -562,146 +573,245 @@ std::vector<GenerationResult> NativeEngine::complete_batch(
         aggregate_limit = static_cast<std::size_t>(parsed);
     }
     if (aggregate_capacity > aggregate_limit) {
-        std::vector<GenerationResult> results;
-        results.reserve(requests.size());
-        for (BatchRequest& request : requests) {
-            results.push_back(request.on_delta.has_value()
-                ? complete_stream(request.prompt, request.max_tokens,
-                      *request.on_delta, request.sampling)
-                : complete(request.prompt, request.max_tokens, request.sampling));
+        for (BatchRequest &request : requests) {
+            try {
+                GenerationResult result =
+                    request.on_delta.has_value()
+                        ? complete_stream(request.prompt, request.max_tokens, *request.on_delta,
+                                          request.sampling)
+                        : complete(request.prompt, request.max_tokens, request.sampling);
+                if (request.on_complete)
+                    request.on_complete(std::move(result));
+            } catch (...) {
+                if (request.on_error)
+                    request.on_error(std::current_exception());
+            }
         }
-        return results;
+        return;
     }
 
-    std::scoped_lock lock(inference_mutex_);
-    if (persistent_backend_ != nullptr) persistent_backend_->release_shared_weights();
+    std::unique_lock lock(inference_mutex_);
+    if (persistent_backend_ != nullptr)
+        persistent_backend_->release_shared_weights();
     // A single retained prefix cannot safely own several advancing states.
     // Keep SSD contents, but release the RAM snapshot while the batch is live.
     prefix_cache_.reset();
     std::vector<Session> sessions;
-    sessions.reserve(requests.size());
-    for (std::size_t slot = 0; slot < requests.size(); ++slot) {
-        sessions.emplace_back(model_.layer_count(), requests[slot].sampling.seed);
-        Session& session = sessions.back();
-        session.prompt_tokens = std::move(tokenized[slot]);
-        session.state = model_.make_state();
-        session.current = session.prompt_tokens.back();
-        session.result.prompt_tokens = session.prompt_tokens.size();
-        const std::size_t prefill_rows = session.prompt_tokens.size() - 1;
-        const std::size_t chunk = options_.adaptive_prefill_chunks
-            ? select_prefill_chunk_rows(options_.prefill_chunk_rows, prefill_rows)
-            : options_.prefill_chunk_rows;
-        model_.clear_prefill_qmeta_cache();
-        model_.set_prefill_qmeta_cache_allowed(
-            options_.qmeta_cache_max_prompt_tokens != 0 &&
-            prefill_rows <= options_.qmeta_cache_max_prompt_tokens);
-        const auto started = std::chrono::steady_clock::now();
-        for (std::size_t offset = 0; offset < prefill_rows; offset += chunk) {
-            const std::size_t count = std::min(chunk, prefill_rows - offset);
-            static_cast<void>(model_.prefill_chunk_batch(
-                std::span<const std::uint32_t>(session.prompt_tokens.data() + offset, count),
-                session.state));
+    sessions.reserve(4);
+    const auto initialize_session = [&](BatchRequest request,
+                                        std::vector<std::uint32_t> prompt_tokens) -> bool {
+        Session session(std::move(request), model_.layer_count());
+        try {
+            session.prompt_tokens = std::move(prompt_tokens);
+            session.reserved_tokens = session.prompt_tokens.size() + session.request.max_tokens;
+            session.state = model_.make_state();
+            session.current = session.prompt_tokens.back();
+            session.result.prompt_tokens = session.prompt_tokens.size();
+            const std::size_t prefill_rows = session.prompt_tokens.size() - 1;
+            const std::size_t chunk =
+                options_.adaptive_prefill_chunks
+                    ? select_prefill_chunk_rows(options_.prefill_chunk_rows, prefill_rows)
+                    : options_.prefill_chunk_rows;
+            model_.clear_prefill_qmeta_cache();
+            model_.set_prefill_qmeta_cache_allowed(options_.qmeta_cache_max_prompt_tokens != 0 &&
+                                                   prefill_rows <=
+                                                       options_.qmeta_cache_max_prompt_tokens);
+            const auto started = std::chrono::steady_clock::now();
+            for (std::size_t offset = 0; offset < prefill_rows; offset += chunk) {
+                const std::size_t count = std::min(chunk, prefill_rows - offset);
+                static_cast<void>(model_.prefill_chunk_batch(
+                    std::span<const std::uint32_t>(session.prompt_tokens.data() + offset, count),
+                    session.state));
+            }
+            session.result.prompt_ms = std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - started)
+                                           .count();
+            session.generation_started = std::chrono::steady_clock::now();
+            sessions.push_back(std::move(session));
+            return true;
+        } catch (...) {
+            if (session.request.on_error)
+                session.request.on_error(std::current_exception());
+            return false;
         }
-        session.result.prompt_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - started).count();
+    };
+    for (std::size_t slot = 0; slot < requests.size(); ++slot) {
+        initialize_session(std::move(requests[slot]), std::move(tokenized[slot]));
     }
     model_.clear_prefill_qmeta_cache();
 
-    const auto generation_started = std::chrono::steady_clock::now();
-    std::size_t active = sessions.size();
-    while (active != 0) {
-        std::vector<std::uint32_t> tokens;
-        std::vector<ModelDecodeState*> states;
-        std::vector<std::size_t> slots;
-        tokens.reserve(active);
-        states.reserve(active);
-        slots.reserve(active);
-        for (std::size_t slot = 0; slot < sessions.size(); ++slot) {
-            if (!sessions[slot].active) continue;
-            tokens.push_back(sessions[slot].current);
-            states.push_back(&sessions[slot].state);
-            slots.push_back(slot);
-        }
-        std::vector<TargetDecodeStep> steps =
-            model_.forward_decode_capture_multi(tokens, states);
-        std::vector<std::uint32_t> next_tokens(steps.size());
-        std::vector<MlxArray> greedy_tokens;
-        std::vector<std::size_t> greedy_rows;
-        greedy_tokens.reserve(steps.size());
-        greedy_rows.reserve(steps.size());
-        for (std::size_t row = 0; row < slots.size(); ++row) {
-            if (requests[slots[row]].sampling.temperature <= 0.0F) {
-                greedy_rows.push_back(row);
-                greedy_tokens.push_back(steps[row].logits.argmax_all());
+    std::vector<BatchRequest> deferred;
+    try {
+        while (!sessions.empty()) {
+            std::vector<std::uint32_t> tokens;
+            std::vector<ModelDecodeState *> states;
+            tokens.reserve(sessions.size());
+            states.reserve(sessions.size());
+            for (std::size_t slot = 0; slot < sessions.size(); ++slot) {
+                tokens.push_back(sessions[slot].current);
+                states.push_back(&sessions[slot].state);
             }
-        }
-        if (!greedy_tokens.empty()) {
-            std::vector<const MlxArray*> token_arrays;
-            token_arrays.reserve(greedy_tokens.size());
-            for (const MlxArray& token : greedy_tokens) token_arrays.push_back(&token);
-            MlxArray::eval_all(token_arrays);
-            for (std::size_t index = 0; index < greedy_tokens.size(); ++index) {
-                next_tokens[greedy_rows[index]] = greedy_tokens[index].item_uint32();
-            }
-        }
-        for (std::size_t row = 0; row < slots.size(); ++row) {
-            const std::size_t slot = slots[row];
-            Session& session = sessions[slot];
-            BatchRequest& request = requests[slot];
-            const std::uint32_t next = request.sampling.temperature <= 0.0F
-                ? next_tokens[row]
-                : sample_token(steps[row].logits, session.state, request.sampling,
-                      session.random, session.result.tokens);
-            session.current = next;
-            const bool stop = next == tensors_.manifest().config().end_of_sequence_token ||
-                next == chat_end_token_;
-            if (stop) {
-                session.result.finish_reason = "stop";
-                session.generation_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - generation_started).count();
-                session.active = false;
-                --active;
-                continue;
-            }
-            session.result.tokens.push_back(next);
-            if (request.on_delta.has_value()) {
-                session.pending_stream_bytes += tokenizer_.decode(
-                    std::span<const std::uint32_t>(&session.result.tokens.back(), 1));
-                const std::size_t complete = complete_utf8_prefix(session.pending_stream_bytes);
-                if (complete != 0 && !(*request.on_delta)(
-                        std::string_view(session.pending_stream_bytes).substr(0, complete))) {
-                    session.result.finish_reason = "cancelled";
-                    session.generation_ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - generation_started).count();
-                    session.active = false;
-                    --active;
+            std::vector<TargetDecodeStep> steps =
+                model_.forward_decode_capture_multi(tokens, states);
+            std::vector<std::uint32_t> next_tokens(steps.size());
+            std::vector<MlxArray> greedy_tokens;
+            std::vector<std::size_t> greedy_rows;
+            greedy_tokens.reserve(steps.size());
+            greedy_rows.reserve(steps.size());
+            for (std::size_t row = 0; row < sessions.size(); ++row) {
+                if (sessions[row].request.sampling.temperature <= 0.0F) {
+                    greedy_rows.push_back(row);
+                    greedy_tokens.push_back(steps[row].logits.argmax_all());
                 }
-                session.pending_stream_bytes.erase(0, complete);
             }
-            if (session.active && session.result.tokens.size() == request.max_tokens) {
-                session.generation_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - generation_started).count();
-                session.active = false;
-                --active;
+            if (!greedy_tokens.empty()) {
+                std::vector<const MlxArray *> token_arrays;
+                token_arrays.reserve(greedy_tokens.size());
+                for (const MlxArray &token : greedy_tokens)
+                    token_arrays.push_back(&token);
+                MlxArray::eval_all(token_arrays);
+                for (std::size_t index = 0; index < greedy_tokens.size(); ++index) {
+                    next_tokens[greedy_rows[index]] = greedy_tokens[index].item_uint32();
+                }
+            }
+            for (std::size_t row = 0; row < sessions.size(); ++row) {
+                Session &session = sessions[row];
+                BatchRequest &request = session.request;
+                const std::uint32_t next =
+                    request.sampling.temperature <= 0.0F
+                        ? next_tokens[row]
+                        : sample_token(steps[row].logits, session.state, request.sampling,
+                                       session.random, session.result.tokens);
+                session.current = next;
+                const bool stop = next == tensors_.manifest().config().end_of_sequence_token ||
+                                  next == chat_end_token_;
+                if (stop) {
+                    session.result.finish_reason = "stop";
+                    session.generation_ms =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                  session.generation_started)
+                            .count();
+                    session.active = false;
+                    continue;
+                }
+                session.result.tokens.push_back(next);
+                if (request.on_delta.has_value()) {
+                    session.pending_stream_bytes += tokenizer_.decode(
+                        std::span<const std::uint32_t>(&session.result.tokens.back(), 1));
+                    const std::size_t complete = complete_utf8_prefix(session.pending_stream_bytes);
+                    if (complete != 0 &&
+                        !(*request.on_delta)(
+                            std::string_view(session.pending_stream_bytes).substr(0, complete))) {
+                        session.result.finish_reason = "cancelled";
+                        session.generation_ms =
+                            std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - session.generation_started)
+                                .count();
+                        session.active = false;
+                    }
+                    session.pending_stream_bytes.erase(0, complete);
+                }
+                if (session.active && session.result.tokens.size() == request.max_tokens) {
+                    session.generation_ms =
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                  session.generation_started)
+                            .count();
+                    session.active = false;
+                }
+            }
+
+            std::size_t live_capacity = 0;
+            for (Session &session : sessions) {
+                if (session.active) {
+                    live_capacity += session.reserved_tokens;
+                    continue;
+                }
+                if (session.request.on_delta.has_value() &&
+                    session.result.finish_reason != "cancelled" &&
+                    !session.pending_stream_bytes.empty() &&
+                    !(*session.request.on_delta)(session.pending_stream_bytes)) {
+                    session.result.finish_reason = "cancelled";
+                }
+                session.result.generation_ms = session.generation_ms;
+                session.result.text = tokenizer_.decode(session.result.tokens);
+                if (session.request.on_complete) {
+                    session.request.on_complete(std::move(session.result));
+                }
+            }
+            std::erase_if(sessions, [](const Session &session) { return !session.active; });
+
+            while (!sessions.empty() && sessions.size() < 4 && refill) {
+                std::optional<BatchRequest> request = refill();
+                if (!request.has_value())
+                    break;
+                try {
+                    if (request->max_tokens == 0 ||
+                        request->max_tokens > options_.max_generation_tokens) {
+                        throw std::runtime_error(
+                            "refill max_tokens is outside the configured limit");
+                    }
+                    if (request->sampling.temperature < 0.0F || request->sampling.top_p <= 0.0F ||
+                        request->sampling.top_p > 1.0F ||
+                        request->sampling.frequency_penalty < 0.0F ||
+                        request->sampling.frequency_penalty > 2.0F ||
+                        (request->sampling.temperature > 0.0F &&
+                         (request->sampling.top_k == 0 || request->sampling.top_k > 256))) {
+                        throw std::runtime_error("invalid sampling options in batch refill");
+                    }
+                    std::vector<std::uint32_t> prompt_tokens = tokenizer_.encode(request->prompt);
+                    if (prompt_tokens.empty())
+                        throw std::runtime_error("prompt produced no tokens");
+                    const std::size_t context_limit =
+                        tensors_.manifest().config().max_context_tokens;
+                    if (prompt_tokens.size() > context_limit ||
+                        request->max_tokens > context_limit - prompt_tokens.size()) {
+                        throw std::runtime_error(
+                            "refill prompt and max_tokens exceed model context");
+                    }
+                    const std::size_t capacity = prompt_tokens.size() + request->max_tokens;
+                if (request->sampling.thinking_budget_tokens != 0 ||
+                    live_capacity + capacity > aggregate_limit) {
+                    deferred.push_back(std::move(*request));
+                    break;
+                }
+                    if (initialize_session(std::move(*request), std::move(prompt_tokens))) {
+                        live_capacity += capacity;
+                    }
+                } catch (...) {
+                    if (request->on_error)
+                        request->on_error(std::current_exception());
+                }
             }
         }
-    }
-    std::vector<GenerationResult> results;
-    results.reserve(sessions.size());
-    for (std::size_t slot = 0; slot < sessions.size(); ++slot) {
-        Session& session = sessions[slot];
-        if (requests[slot].on_delta.has_value() &&
-            session.result.finish_reason != "cancelled" &&
-            !session.pending_stream_bytes.empty() &&
-            !(*requests[slot].on_delta)(session.pending_stream_bytes)) {
-            session.result.finish_reason = "cancelled";
+    } catch (...) {
+        const std::exception_ptr error = std::current_exception();
+        for (Session &session : sessions) {
+            if (session.request.on_error)
+                session.request.on_error(error);
         }
-        session.result.generation_ms = session.generation_ms;
-        session.result.text = tokenizer_.decode(session.result.tokens);
-        results.push_back(std::move(session.result));
+        for (BatchRequest &request : deferred) {
+            if (request.on_error)
+                request.on_error(error);
+        }
+        MlxArray::clear_cache();
+        return;
     }
     MlxArray::clear_cache();
-    return results;
+    lock.unlock();
+    for (BatchRequest &request : deferred) {
+        try {
+            GenerationResult result =
+                request.on_delta.has_value()
+                    ? complete_stream(request.prompt, request.max_tokens, *request.on_delta,
+                                      request.sampling)
+                    : complete(request.prompt, request.max_tokens, request.sampling);
+            if (request.on_complete)
+                request.on_complete(std::move(result));
+        } catch (...) {
+            if (request.on_error)
+                request.on_error(std::current_exception());
+        }
+    }
 }
 
 GenerationResult NativeEngine::complete_impl(
@@ -1518,20 +1628,20 @@ struct NativeEngineExecutor::Impl final {
         NativeEngine::BatchRequest request;
         std::shared_ptr<std::promise<GenerationResult>> generation_result;
         std::shared_ptr<std::promise<void>> clear_result;
+        std::shared_ptr<std::atomic_bool> resolved;
     };
 
-    ~Impl() { stop(); }
+    ~Impl() {
+        stop();
+    }
 
-    void start(
-        const std::filesystem::path& model_directory,
-        NativeEngineOptions options) {
+    void start(const std::filesystem::path &model_directory, NativeEngineOptions options) {
         auto started = std::make_shared<std::promise<void>>();
         std::future<void> ready = started->get_future();
-        worker = std::thread([
-            this, model_directory, options = std::move(options), started]() mutable {
+        worker = std::thread([this, model_directory, options = std::move(options),
+                              started]() mutable {
             try {
-                engine = std::make_unique<NativeEngine>(
-                    model_directory, std::move(options));
+                engine = std::make_unique<NativeEngine>(model_directory, std::move(options));
                 started->set_value();
             } catch (...) {
                 started->set_exception(std::current_exception());
@@ -1542,27 +1652,26 @@ struct NativeEngineExecutor::Impl final {
                 std::vector<Task> batch;
                 {
                     std::unique_lock lock(mutex);
-                    ready_for_work.wait(lock, [this] {
-                        return stopping || !tasks.empty();
-                    });
+                    ready_for_work.wait(lock, [this] { return stopping || !tasks.empty(); });
                     if (tasks.empty()) {
-                        if (stopping) break;
+                        if (stopping)
+                            break;
                         continue;
                     }
                     batch.push_back(std::move(tasks.front()));
                     tasks.pop_front();
                     if (batch.front().kind == Task::Kind::generate &&
                         batch.front().request.sampling.thinking_budget_tokens == 0) {
-                        const auto deadline = std::chrono::steady_clock::now() +
-                            std::chrono::milliseconds(2);
+                        const auto deadline =
+                            std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
                         while (batch.size() < 4) {
                             if (tasks.empty()) {
-                                ready_for_work.wait_until(lock, deadline, [this] {
-                                    return stopping || !tasks.empty();
-                                });
+                                ready_for_work.wait_until(
+                                    lock, deadline, [this] { return stopping || !tasks.empty(); });
                             }
                             if (tasks.empty() || tasks.front().kind != Task::Kind::generate ||
-                                tasks.front().request.sampling.thinking_budget_tokens != 0) break;
+                                tasks.front().request.sampling.thinking_budget_tokens != 0)
+                                break;
                             batch.push_back(std::move(tasks.front()));
                             tasks.pop_front();
                         }
@@ -1579,25 +1688,61 @@ struct NativeEngineExecutor::Impl final {
                 }
                 try {
                     if (batch.size() == 1) {
-                        NativeEngine::BatchRequest& request = batch.front().request;
-                        GenerationResult value = request.on_delta.has_value()
-                            ? engine->complete_stream(request.prompt, request.max_tokens,
-                                  *request.on_delta, request.sampling)
-                            : engine->complete(request.prompt, request.max_tokens, request.sampling);
+                        NativeEngine::BatchRequest &request = batch.front().request;
+                        GenerationResult value =
+                            request.on_delta.has_value()
+                                ? engine->complete_stream(request.prompt, request.max_tokens,
+                                                          *request.on_delta, request.sampling)
+                                : engine->complete(request.prompt, request.max_tokens,
+                                                   request.sampling);
                         batch.front().generation_result->set_value(std::move(value));
                     } else {
+                        const auto bind_completion = [](Task &task) {
+                            NativeEngine::BatchRequest request = std::move(task.request);
+                            const auto result = task.generation_result;
+                            const auto resolved = task.resolved;
+                            request.on_complete = [result,
+                                                   resolved](GenerationResult value) mutable {
+                                if (!resolved->exchange(true))
+                                    result->set_value(std::move(value));
+                            };
+                            request.on_error = [result, resolved](const std::exception_ptr error) {
+                                if (!resolved->exchange(true))
+                                    result->set_exception(error);
+                            };
+                            return request;
+                        };
                         std::vector<NativeEngine::BatchRequest> requests;
                         requests.reserve(batch.size());
-                        for (Task& task : batch) requests.push_back(std::move(task.request));
-                        std::vector<GenerationResult> values =
-                            engine->complete_batch(std::move(requests));
-                        for (std::size_t index = 0; index < batch.size(); ++index) {
-                            batch[index].generation_result->set_value(std::move(values[index]));
+                        for (Task &task : batch) {
+                            requests.push_back(bind_completion(task));
                         }
+                        const NativeEngine::BatchRefillCallback refill = [this, &bind_completion] {
+                            std::unique_lock lock(mutex);
+                            const auto deadline =
+                                std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+                            if (tasks.empty()) {
+                                ready_for_work.wait_until(
+                                    lock, deadline, [this] { return stopping || !tasks.empty(); });
+                            }
+                            if (tasks.empty() || tasks.front().kind != Task::Kind::generate ||
+                                tasks.front().request.sampling.thinking_budget_tokens != 0) {
+                                return std::optional<NativeEngine::BatchRequest>{};
+                            }
+                            Task task = std::move(tasks.front());
+                            tasks.pop_front();
+                            return std::optional<NativeEngine::BatchRequest>(bind_completion(task));
+                        };
+                        engine->complete_batch(std::move(requests), refill);
                     }
                 } catch (...) {
                     const std::exception_ptr error = std::current_exception();
-                    for (Task& task : batch) task.generation_result->set_exception(error);
+                    for (Task &task : batch) {
+                        if (task.generation_result != nullptr && task.resolved != nullptr &&
+                            !task.resolved->exchange(true)) {
+                            task.generation_result->set_exception(error);
+                        }
+                    }
                 }
             }
             engine.reset();
@@ -1605,7 +1750,8 @@ struct NativeEngineExecutor::Impl final {
         try {
             ready.get();
         } catch (...) {
-            if (worker.joinable()) worker.join();
+            if (worker.joinable())
+                worker.join();
             throw;
         }
     }
@@ -1613,28 +1759,28 @@ struct NativeEngineExecutor::Impl final {
     void enqueue(Task task) {
         {
             std::scoped_lock lock(mutex);
-            if (stopping) throw std::runtime_error("inference executor is stopping");
+            if (stopping)
+                throw std::runtime_error("inference executor is stopping");
             tasks.push_back(std::move(task));
         }
         ready_for_work.notify_one();
     }
 
-    GenerationResult generate(
-        std::string prompt,
-        const std::size_t max_tokens,
-        std::optional<TextDeltaCallback> on_delta,
-        SamplingOptions sampling) {
+    GenerationResult generate(std::string prompt, const std::size_t max_tokens,
+                              std::optional<TextDeltaCallback> on_delta, SamplingOptions sampling) {
         auto result = std::make_shared<std::promise<GenerationResult>>();
         std::future<GenerationResult> future = result->get_future();
         enqueue(Task{
             .kind = Task::Kind::generate,
-            .request = NativeEngine::BatchRequest{
-                .prompt = std::move(prompt),
-                .max_tokens = max_tokens,
-                .on_delta = std::move(on_delta),
-                .sampling = sampling,
-            },
+            .request =
+                NativeEngine::BatchRequest{
+                    .prompt = std::move(prompt),
+                    .max_tokens = max_tokens,
+                    .on_delta = std::move(on_delta),
+                    .sampling = sampling,
+                },
             .generation_result = result,
+            .resolved = std::make_shared<std::atomic_bool>(false),
         });
         return future.get();
     }
@@ -1655,7 +1801,8 @@ struct NativeEngineExecutor::Impl final {
             stopping = true;
         }
         ready_for_work.notify_all();
-        if (worker.joinable()) worker.join();
+        if (worker.joinable())
+            worker.join();
     }
 
     std::mutex mutex;
