@@ -1683,7 +1683,7 @@ MlxArray SparseMoe::forward_prefill_impl(
                 std::vector<std::int32_t> metadata;
             };
             RouteGroupPlan primary{.tile_rows = rows >= 768 ? 24 : 16};
-            RouteGroupPlan tail{.tile_rows = 16};
+            RouteGroupPlan tail{.tile_rows = rows >= 768 ? 16 : 8};
             std::vector<std::int32_t> inverse_order(static_cast<std::size_t>(route_count));
             primary.order.reserve(static_cast<std::size_t>(route_count));
             tail.order.reserve(static_cast<std::size_t>(route_count / 2));
@@ -1719,13 +1719,19 @@ MlxArray SparseMoe::forward_prefill_impl(
                         append_routes(tail, expert, begin + primary_count, remainder);
                     }
                 } else {
-                    append_routes(primary, expert, begin, count);
+                    const int primary_count = (count / 16) * 16;
+                    const int remainder = count - primary_count;
+                    append_routes(primary, expert, begin,
+                        remainder > 8 ? count : primary_count);
+                    if (remainder > 0 && remainder <= 8) {
+                        append_routes(tail, expert, begin + primary_count, remainder);
+                    }
                 }
                 begin = end;
             }
             if (primary.order.empty()) {
                 primary = std::move(tail);
-                tail = RouteGroupPlan{.tile_rows = 16};
+                tail = RouteGroupPlan{.tile_rows = rows >= 768 ? 16 : 8};
             }
             const auto finalize_plan = [&](RouteGroupPlan& plan, const int combined_begin) {
                 plan.source_rows.resize(plan.order.size());

@@ -92,6 +92,14 @@ The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
 current milestones, not claims that the
 600 PP tok/s or 40 tok/s decode targets have been reached.
 
+The route planner additionally sends <=8-row expert tails to an exact RTILE8
+kernel instead of padding them to 16 rows. On the fixed 6,292-token repository
+README prompt with 2,048-row chunks, three adjacent candidate starts were
+14.75 / 14.63 / 14.53 s (median 430.2 PP tok/s), versus 15.19 / 15.71 /
+14.83 s (median 414.3) for the reverse control; peak remained 38.2--38.3 GiB
+and the first token was unchanged. This A/B does not replace the retained
+7,454-token row until that exact corpus is available for a paired rerun.
+
 ## Historical reference evaluation
 
 Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified

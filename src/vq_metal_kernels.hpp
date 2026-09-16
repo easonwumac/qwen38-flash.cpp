@@ -226,8 +226,10 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
                 &weight_tile[k8 * 8][(int)simdgroup * 8], OTILE);
             simdgroup_load(input_matrix, &input_tile[0][k8 * 8], 64);
             simdgroup_multiply_accumulate(gate0, input_matrix, weight_matrix, gate0);
-            simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
-            simdgroup_multiply_accumulate(gate1, input_matrix, weight_matrix, gate1);
+            if constexpr (RTILE >= 16) {
+                simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
+                simdgroup_multiply_accumulate(gate1, input_matrix, weight_matrix, gate1);
+            }
             if constexpr (RTILE >= 24) {
                 simdgroup_load(input_matrix, &input_tile[16][k8 * 8], 64);
                 simdgroup_multiply_accumulate(gate2, input_matrix, weight_matrix, gate2);
@@ -270,8 +272,10 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
                 &weight_tile[k8 * 8][(int)simdgroup * 8], OTILE);
             simdgroup_load(input_matrix, &input_tile[0][k8 * 8], 64);
             simdgroup_multiply_accumulate(up0, input_matrix, weight_matrix, up0);
-            simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
-            simdgroup_multiply_accumulate(up1, input_matrix, weight_matrix, up1);
+            if constexpr (RTILE >= 16) {
+                simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
+                simdgroup_multiply_accumulate(up1, input_matrix, weight_matrix, up1);
+            }
             if constexpr (RTILE >= 24) {
                 simdgroup_load(input_matrix, &input_tile[16][k8 * 8], 64);
                 simdgroup_multiply_accumulate(up2, input_matrix, weight_matrix, up2);
@@ -285,7 +289,8 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
     }
 
     simdgroup_store(gate0, &output_buffer[0][(int)simdgroup * 8], OTILE);
-    simdgroup_store(gate1, &output_buffer[8][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 16)
+        simdgroup_store(gate1, &output_buffer[8][(int)simdgroup * 8], OTILE);
     if constexpr (RTILE >= 24)
         simdgroup_store(gate2, &output_buffer[16][(int)simdgroup * 8], OTILE);
     if constexpr (RTILE >= 32)
@@ -299,7 +304,8 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
         gate_buffer[linear] = (half)output_buffer[linear / OTILE][linear % OTILE];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     simdgroup_store(up0, &output_buffer[0][(int)simdgroup * 8], OTILE);
-    simdgroup_store(up1, &output_buffer[8][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 16)
+        simdgroup_store(up1, &output_buffer[8][(int)simdgroup * 8], OTILE);
     if constexpr (RTILE >= 24)
         simdgroup_store(up2, &output_buffer[16][(int)simdgroup * 8], OTILE);
     if constexpr (RTILE >= 32)
