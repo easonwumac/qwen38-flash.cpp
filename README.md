@@ -213,9 +213,10 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   high-acceptance coding fixture at 38.9 GiB. The first-30 IFBench run reaches
   33.08 aggregate tok/s and 56.67% strict/loose at 39.4 GiB, so neither the
   mixed-workload 60 tok/s target nor full-benchmark quality is established.
-- The MTP verifier currently uses the checkpoint-reference FP16 VQ codebook
-  path, while ordinary d8 decode uses the faster approximate INT8/U8 codebooks.
-  It therefore does not promise byte or token parity with target-only decode.
+- The MTP verifier and ordinary d8 decode both use the approximate INT8/U8
+  codebooks, but the verifier evaluates several target rows through a different
+  batched graph. It therefore does not promise byte or token parity with
+  target-only decode.
   On the paired 30 prompts MTP had 14 both-pass, 3 MTP-only-pass, 0
   target-only-pass, and 13 both-fail cases. A serial target verifier restores
   exact target-only output on the isolated divergent case but falls to 6.1
