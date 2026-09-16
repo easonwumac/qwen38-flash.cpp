@@ -1,5 +1,6 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_verifier.hpp"
+#include "qwen38/runtime_profile.hpp"
 
 #include <cstdlib>
 #include <exception>
@@ -18,15 +19,17 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "full-model verifier smoke tests must run through devtools/memory_guard.py");
         }
+        qwen38::apply_automatic_runtime_config();
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
-        const std::vector<std::uint32_t> drafts{11, 271};
-        const qwen38::ModelDecodeState origin = model.make_state();
+        const std::vector<std::uint32_t> drafts{271, 40};
+        qwen38::ModelDecodeState origin = model.make_state();
+        model.consume_decode(9419, origin);
 
         qwen38::MtpTargetVerification serial =
-            qwen38::verify_mtp_target_serial_oracle(model, 9419, drafts, origin);
+            qwen38::verify_mtp_target_serial_oracle(model, 11, drafts, origin);
         qwen38::MtpTargetVerification layer_major =
-            qwen38::verify_mtp_target_layer_major_reference(model, 9419, drafts, origin);
+            qwen38::verify_mtp_target_layer_major_reference(model, 11, drafts, origin);
         if (serial.rows.size() != layer_major.rows.size()) {
             throw std::runtime_error("verifier row-count mismatch");
         }

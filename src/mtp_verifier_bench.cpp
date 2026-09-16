@@ -1,11 +1,13 @@
 #include "qwen38/model.hpp"
 #include "qwen38/mtp_verifier.hpp"
+#include "qwen38/runtime_profile.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -16,6 +18,17 @@ struct Sample {
     double milliseconds{0.0};
     std::vector<std::uint32_t> tokens;
 };
+
+std::string format_tokens(const std::vector<std::uint32_t>& tokens) {
+    std::ostringstream output;
+    output << '[';
+    for (std::size_t index = 0; index < tokens.size(); ++index) {
+        if (index != 0) output << ',';
+        output << tokens[index];
+    }
+    output << ']';
+    return output.str();
+}
 
 template <typename Verify>
 Sample measure(Verify&& verify) {
@@ -43,6 +56,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "full-model verifier benchmarks must run through devtools/memory_guard.py");
         }
+        qwen38::apply_automatic_runtime_config();
         static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
         qwen38::MlxTensorStore tensors(qwen38::ModelManifest::load(argv[1]));
         qwen38::QwenModel model(tensors);
@@ -85,7 +99,14 @@ int main(int argc, char** argv) {
         if (serial_a.tokens != control_a.tokens || serial_a.tokens != control_b.tokens ||
             serial_a.tokens != candidate_a.tokens || serial_a.tokens != candidate_b.tokens ||
             serial_a.tokens != serial_b.tokens) {
-            throw std::runtime_error("interleaved verifier benchmark lost token parity");
+            throw std::runtime_error(
+                "interleaved verifier benchmark lost token parity: serial_a=" +
+                format_tokens(serial_a.tokens) + " control_a=" +
+                format_tokens(control_a.tokens) + " candidate_a=" +
+                format_tokens(candidate_a.tokens) + " candidate_b=" +
+                format_tokens(candidate_b.tokens) + " control_b=" +
+                format_tokens(control_b.tokens) + " serial_b=" +
+                format_tokens(serial_b.tokens));
         }
         const double serial_ms = (serial_a.milliseconds + serial_b.milliseconds) / 2.0;
         const double control_ms = (control_a.milliseconds + control_b.milliseconds) / 2.0;
