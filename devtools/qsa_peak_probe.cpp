@@ -65,7 +65,8 @@ int main(int argc, char** argv) try {
     setenv("QWEN38_QSA_PACKED_MIN_TOKENS", "0", 1);
     setenv("QWEN38_QSA_SCORE_REDUCE", decode_probe ? "0" : argv[3], 1);
     if (decode_probe) {
-        setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
+        if (std::getenv("QWEN38_QSA_DECODE_BUDGET") == nullptr)
+            setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
         setenv("QWEN38_PROFILE_QSA_DECODE", "1", 1);
     }
     unsetenv("QWEN38_QSA_TILED_SCORES");
@@ -79,14 +80,19 @@ int main(int argc, char** argv) try {
     std::vector<std::uint32_t> tokens(decode_probe ? 1 : 512);
     for (std::size_t i = 0; i < tokens.size(); ++i)
         tokens[i] = static_cast<std::uint32_t>((9419 + 7919 * i) % c.vocabulary_size);
+    const auto embedding_quantization = tensors.manifest().quantization_for(
+        "language_model.model.embed_tokens");
+    const auto mixer_quantization = tensors.manifest().quantization_for(
+        "language_model.model.layers.3.attn_hyper_connection.input_mix_weight_down");
     auto embedding = embed_token_batch(tensors.tensor("language_model.model.embed_tokens.weight"),
         tensors.tensor("language_model.model.embed_tokens.scales"),
         tensors.tensor("language_model.model.embed_tokens.biases"), tokens,
-        c.vocabulary_size, c.hidden_size, static_cast<int>(c.quantization_group_size),
-        static_cast<int>(c.quantization_bits));
+        c.vocabulary_size, c.hidden_size,
+        static_cast<int>(embedding_quantization.group_size),
+        static_cast<int>(embedding_quantization.bits));
     HyperConnection mixer(tensors, "language_model.model.layers.3.attn_hyper_connection",
-        c.hidden_size, c.hyper_connection_count, c.quantization_bits,
-        c.quantization_group_size, static_cast<float>(c.rms_norm_epsilon), true);
+        c.hidden_size, c.hyper_connection_count, mixer_quantization.bits,
+        mixer_quantization.group_size, static_cast<float>(c.rms_norm_epsilon), true);
     auto input = mixer.read(HyperConnection::initialize_stream(embedding, c.hyper_connection_count)).mixed;
     input.eval();
     SelfAttentionState origin;

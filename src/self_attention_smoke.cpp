@@ -24,12 +24,16 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::int32_t 
     const auto scales = tensors.tensor("language_model.model.embed_tokens.scales");
     const auto biases = tensors.tensor("language_model.model.embed_tokens.biases");
     const auto& config = tensors.manifest().config();
+    const auto embedding_quantization = tensors.manifest().quantization_for(
+        "language_model.model.embed_tokens");
+    const auto mixer_quantization = tensors.manifest().quantization_for(
+        "language_model.model.layers.3.attn_hyper_connection.input_mix_weight_down");
     auto embedding = qwen38::MlxArray::dequantize(
         qwen38::MlxArray::take_axis(weight, ids, 0),
         qwen38::MlxArray::take_axis(scales, ids, 0),
         qwen38::MlxArray::take_axis(biases, ids, 0),
-        static_cast<int>(config.quantization_group_size),
-        static_cast<int>(config.quantization_bits));
+        static_cast<int>(embedding_quantization.group_size),
+        static_cast<int>(embedding_quantization.bits));
     const std::vector<int> embedding_shape{1, 1, static_cast<int>(config.hidden_size)};
     auto stream = qwen38::HyperConnection::initialize_stream(
         embedding.reshape(embedding_shape), config.hyper_connection_count);
@@ -38,8 +42,8 @@ qwen38::MlxArray make_input(qwen38::MlxTensorStore& tensors, const std::int32_t 
         "language_model.model.layers.3.attn_hyper_connection",
         config.hidden_size,
         config.hyper_connection_count,
-        config.quantization_bits,
-        config.quantization_group_size,
+        mixer_quantization.bits,
+        mixer_quantization.group_size,
         static_cast<float>(config.rms_norm_epsilon),
         true);
     return mixer.read(stream).mixed;

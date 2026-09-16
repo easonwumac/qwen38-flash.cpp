@@ -47,6 +47,7 @@ void apply_automatic_runtime_config() {
         {"QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE", "1"},
         {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
         {"QWEN38_QSA_DECODE_BUDGET", "512"},
+        {"QWEN38_QSA_RAW_WINDOW", "64"},
     };
     for (const auto& [name, value] : settings) set_environment_default(name, value);
 }

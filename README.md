@@ -64,6 +64,9 @@ fallback checkpoints, or dependencies of the VQ path.
   decoded metadata bank for the whole request.
 - **Bounded long-context state:** QSA activation, adaptive prefill chunks, and
   slabbed Q8 KV are selected from context growth rather than a user profile.
+- **Exact QSA raw-state retirement:** index keys are discarded after their
+  four-token block has been pooled, retaining only a 64-row construction window.
+  This reduces long-context selector work without changing selected tokens.
 - **Exact Qwen Sparse Attention:** raw and pooled indexer state, causal top-block
   selection, snapshots, verifier checkpoints, and rollback remain native to the
   engine.
@@ -97,6 +100,7 @@ and MTP off unless the row explicitly names the native sidecar.
 | Repository prefill, 7,091 tokens | VQ 2.1bpw; README corpus SHA-256 `633c8445...`; automatic 2,048-row chunks and 8,192-row layer-major window; same-process cold/warm server requests; MTP and prefix cache off; fixed first token | **455.45 cold / 519.91 warm PP tok/s**; **38.3 GiB** peak |
 | Repeated repository prefill, 14,173 tokens | same corpus repeated twice; automatic 2,048-row chunks, two bounded windows; same-process cold/warm server requests; MTP and prefix cache off; fixed first text `Based` | **446.3 cold / 479.1 warm PP tok/s**; **39.1 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; one automatic 48-layer evaluation barrier; three independent starts; first two compile/warmup steps excluded | 30.55 / 30.72 / 30.59 tok/s, median **30.59 tok/s**; paired stride-8/48 medians were 30.00/31.06 tok/s; **36.3 GiB** peak |
+| 32K long-context decode, 32,024 prompt tokens | VQ 2.1bpw; automatic QSA budget 512 and exact 64-row raw-state window; Q8 KV; greedy, thinking/MTP/prefix cache off; 29 generated tokens | **22.68 tok/s** versus 21.09 without raw-state retirement (**+7.58%**); byte-identical response; **39.5 GiB** observed peak |
 | Native MTP, 64 output tokens | VQ target plus native Q6 sidecar and automatic Q4-only drafter LM head; adaptive depth starts at 4; greedy/no-thinking; retained `merge_sorted_unique` coding fixture; three-sample confirmation | 57.953 / 57.938 / 57.509 tok/s, median **57.94 tok/s**; no demotion, unchanged 49/56 accepted in 14 rounds; **39.3 GiB** peak |
 | External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
 | IFBench first 30 prompts | native Q6 MTP plus Q4-only drafter LM head; automatic depth 4→3→2 when later draft positions stop paying; greedy, non-thinking, max 4,096; serial requests; official scorer | **18/30 strict and loose (60.00%)**, instruction-level 63.64%; 12,567 output tokens, 0 errors; **35.28 aggregate decode tok/s**, 71.23% draft acceptance; **39.4 GiB** peak |
