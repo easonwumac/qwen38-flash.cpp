@@ -170,11 +170,36 @@ std::shared_ptr<MlxMetalKernel> vq_down_reduce_kernel() {
 std::shared_ptr<MlxMetalKernel> vq_gemmseg_d8_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
-            "codes", "codebook", "scales", "xsrc", "srcrows", "tmeta",
-            "destination_slots", "route_weights"};
+            "codes", "codebook", "scales", "xsrc", "srcrows", "tmeta"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_vq_gemmseg_d8", inputs, "y",
             vq_metal::gemmseg_d8, vq_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> vq_route_reduce_fp16_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"down", "route_weights", "inverse_order"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_vq_route_reduce_fp16", inputs, "output", R"metal(
+            const uint i = thread_position_in_grid.x;
+            if (i >= ROWS * HIDDEN) return;
+            const uint row = i / HIDDEN;
+            const uint column = i - row * HIDDEN;
+            float partial[8];
+            for (uint j = 0; j < 8; ++j) partial[j] = 0.0f;
+            for (uint slot = 0; slot < TOPK; ++slot) {
+                const uint original = row * TOPK + slot;
+                const uint sorted = (uint)inverse_order[original];
+                partial[slot & 7u] +=
+                    (float)down[(size_t)sorted * HIDDEN + column] *
+                    route_weights[original];
+            }
+            float sum = partial[0];
+            for (uint j = 1; j < 8; ++j) sum += partial[j];
+            output[i] = T(sum);
+            )metal", vq_metal::header);
     }();
     return kernel;
 }
@@ -185,9 +210,8 @@ std::shared_ptr<MlxMetalKernel> vq_gemmseg_gate_up_d8_kernel() {
             "gate_codes", "gate_codebook", "gate_scales",
             "up_codes", "up_codebook", "up_scales",
             "xsrc", "srcrows", "tmeta"};
-        const char* outputs[]{"raw_gate", "up"};
         return std::make_shared<MlxMetalKernel>(
-            "qwen38_vq_gemmseg_gate_up_d8", inputs, outputs,
+            "qwen38_vq_gemmseg_gate_up_d8", inputs, "h",
             vq_metal::gemmseg_gate_up_d8, vq_metal::header);
     }();
     return kernel;
@@ -1653,6 +1677,7 @@ MlxArray SparseMoe::forward_prefill_impl(
             });
             std::vector<std::int32_t> source_rows(static_cast<std::size_t>(route_count));
             std::vector<std::int32_t> identity(static_cast<std::size_t>(route_count));
+            std::vector<std::int32_t> inverse_order(static_cast<std::size_t>(route_count));
             std::vector<std::int32_t> tile_metadata;
             const int route_tile_rows = rows >= 768 ? 24 : 16;
             tile_metadata.reserve(
@@ -1661,6 +1686,7 @@ MlxArray SparseMoe::forward_prefill_impl(
                 const int original = order[static_cast<std::size_t>(sorted)];
                 source_rows[static_cast<std::size_t>(sorted)] = original / slots;
                 identity[static_cast<std::size_t>(sorted)] = sorted;
+                inverse_order[static_cast<std::size_t>(original)] = sorted;
             }
             int begin = 0;
             while (begin < route_count) {
@@ -1683,8 +1709,8 @@ MlxArray SparseMoe::forward_prefill_impl(
                 source_rows, std::vector<int>{route_count});
             const MlxArray identity_array = MlxArray::from_int32(
                 identity, std::vector<int>{route_count});
-            const MlxArray destination_slots_array = MlxArray::from_int32(
-                order, std::vector<int>{route_count});
+            const MlxArray inverse_order_array = MlxArray::from_int32(
+                inverse_order, std::vector<int>{route_count});
             const MlxArray metadata_array = MlxArray::from_int32(
                 tile_metadata, std::vector<int>{tile_count * 3});
             const MlxArray input_half = input.astype(MLX_FLOAT16).reshape(
@@ -1704,7 +1730,7 @@ MlxArray SparseMoe::forward_prefill_impl(
                 }};
                 const std::array<MlxMetalOutputSpec, 1> output_specs{{
                     {.shape = {route_count, projection.output_dimension},
-                     .dtype = MLX_FLOAT32},
+                     .dtype = MLX_FLOAT16},
                 }};
                 const int output_tiles =
                     (projection.output_dimension + output_tile_rows - 1) /
@@ -1716,8 +1742,7 @@ MlxArray SparseMoe::forward_prefill_impl(
                     32, output_tile_rows / 8, 1};
                 const MlxArray* projection_inputs[]{
                     &projection.weight, &projection.codebook, &projection.scales,
-                    &source, &row_map, &metadata_array,
-                    &destination_slots_array, &weights};
+                    &source, &row_map, &metadata_array};
                 return std::move(vq_gemmseg_d8_kernel()->apply(
                     projection_inputs, output_specs, grid, threadgroup,
                     dtype_templates, int_templates).front());
@@ -1732,10 +1757,8 @@ MlxArray SparseMoe::forward_prefill_impl(
                 {.name = "RTILE", .value = route_tile_rows},
                 {.name = "OTILE", .value = output_tile_rows},
             }};
-            const std::array<MlxMetalOutputSpec, 2> gate_output_specs{{
+            const std::array<MlxMetalOutputSpec, 1> gate_output_specs{{
                 {.shape = {route_count, expert_gate_.output_dimension},
-                 .dtype = MLX_FLOAT16},
-                {.shape = {route_count, expert_up_.output_dimension},
                  .dtype = MLX_FLOAT16},
             }};
             const int gate_output_tiles =
@@ -1753,20 +1776,31 @@ MlxArray SparseMoe::forward_prefill_impl(
             auto gate_outputs = vq_gemmseg_gate_up_d8_kernel()->apply(
                 gate_inputs, gate_output_specs, gate_grid, gate_threadgroup,
                 gate_dtype_templates, gate_int_templates);
-            MlxArray raw_gate = std::move(gate_outputs[0]);
-            MlxArray up = std::move(gate_outputs[1]);
-            MlxArray hidden = MlxArray::multiply(raw_gate.silu(), up);
+            MlxArray hidden = std::move(gate_outputs[0]);
             if (timings != nullptr) {
                 hidden.eval();
                 timings->gate_up_ms = elapsed_ms(gate_started);
             }
             const auto down_started = Clock::now();
-            MlxArray weighted = project_gemmseg(
-                hidden, identity_array, expert_down_).reshape(
-                    std::vector<int>{rows, slots, expert_down_.output_dimension});
-            MlxArray routed = weighted.sum_axis(1).reshape(
-                std::vector<int>{1, rows, expert_down_.output_dimension})
-                .astype(input.dtype());
+            MlxArray projected = project_gemmseg(hidden, identity_array, expert_down_);
+            const std::array<const MlxArray*, 3> reduce_inputs{
+                &projected, &weights, &inverse_order_array};
+            const std::array<MlxMetalOutputSpec, 1> reduce_outputs{{
+                {.shape = {1, rows, expert_down_.output_dimension},
+                 .dtype = input.dtype()},
+            }};
+            const std::array<MlxMetalDtypeTemplate, 1> reduce_types{{
+                {.name = "T", .value = input.dtype()},
+            }};
+            const std::array<MlxMetalIntTemplate, 3> reduce_ints{{
+                {.name = "ROWS", .value = rows},
+                {.name = "TOPK", .value = slots},
+                {.name = "HIDDEN", .value = expert_down_.output_dimension},
+            }};
+            MlxArray routed = std::move(vq_route_reduce_fp16_kernel()->apply(
+                reduce_inputs, reduce_outputs,
+                std::array<int, 3>{rows * expert_down_.output_dimension, 1, 1},
+                std::array<int, 3>{256, 1, 1}, reduce_types, reduce_ints).front());
             if (timings != nullptr) {
                 routed.eval();
                 timings->down_reduce_ms = elapsed_ms(down_started);

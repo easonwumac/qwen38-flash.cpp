@@ -10,8 +10,8 @@ using namespace metal;
 )metal";
 
 // Segmented-tile VQ GEMM for the Flash-Next d8/K16384 packed-14 down
-// projection. Each sorted route writes its FP32 weighted result directly to
-// its original slot, fusing the inverse permutation and route multiply.
+// projection. Each sorted route writes its FP16 projected result in sorted
+// order; a compact follow-up kernel applies route weights and restores rows.
 // The design is adapted from VQLab's checkpoint-bundled VQ runtime, distributed
 // under the Qwen Community License 1.0; see NOTICE and
 // licenses/qwen-community-1.0.txt. It decodes one 32-output x 64-input weight
@@ -131,18 +131,15 @@ inline constexpr std::string_view gemmseg_d8 = R"metal(
         const int output_column = output_start + column;
         if (output_column < OUT) {
             const int sorted_route = route_start + route;
-            const int destination = destination_slots[sorted_route];
-            const float projected =
-                (float)(half)output_tile_buffer[route][column];
-            y[(size_t)destination * OUT + output_column] =
-                route_weights[destination] * projected;
+            y[(size_t)sorted_route * OUT + output_column] =
+                (half)output_tile_buffer[route][column];
         }
     }
 )metal";
 
 // Gate/up twin of gemmseg_d8. Both projections share the route plan and input
-// tile; weight decode and matrix accumulation remain ordered independently so
-// the two FP16 projection outputs match separate gemmseg dispatches.
+// tile. The final FP16 SwiGLU follows MLX's stable sigmoid and rounding order
+// inside the same dispatch, avoiding two route-sized global intermediates.
 inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
     const uint lane = thread_position_in_threadgroup.x;
     const uint simdgroup = thread_position_in_threadgroup.y;
@@ -296,15 +293,10 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const uint threadgroup_threads =
         threads_per_threadgroup.x * threads_per_threadgroup.y;
+    threadgroup half* gate_buffer = &input_tile[0][0];
     for (uint linear = tid; linear < (uint)(route_count * OTILE);
-         linear += threadgroup_threads) {
-        const int route = (int)linear / OTILE;
-        const int column = (int)linear - route * OTILE;
-        const int output_column = output_start + column;
-        if (output_column < OUT)
-            raw_gate[(size_t)(route_start + route) * OUT + output_column] =
-                (half)output_buffer[route][column];
-    }
+         linear += threadgroup_threads)
+        gate_buffer[linear] = (half)output_buffer[linear / OTILE][linear % OTILE];
     threadgroup_barrier(mem_flags::mem_threadgroup);
     simdgroup_store(up0, &output_buffer[0][(int)simdgroup * 8], OTILE);
     simdgroup_store(up1, &output_buffer[8][(int)simdgroup * 8], OTILE);
@@ -318,9 +310,15 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
         const int route = (int)linear / OTILE;
         const int column = (int)linear - route * OTILE;
         const int output_column = output_start + column;
-        if (output_column < OUT)
-            up[(size_t)(route_start + route) * OUT + output_column] =
-                (half)output_buffer[route][column];
+        if (output_column < OUT) {
+            const half gate = gate_buffer[linear];
+            const half up = (half)output_buffer[route][column];
+            const auto y = 1 / (1 + metal::exp(metal::abs(gate)));
+            const half sigmoid = half(gate < 0 ? y : 1 - y);
+            const half activated = half(float(gate) * float(sigmoid));
+            h[(size_t)(route_start + route) * OUT + output_column] =
+                half(float(activated) * float(up));
+        }
     }
 )metal";
 

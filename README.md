@@ -31,6 +31,9 @@ fallback checkpoints, or dependencies of the VQ path.
   each layer together, removing token-by-token dispatch and synchronization.
 - **Segmented packed-VQ GEMM:** the Metal kernel shares decoded VQ tiles across
   routed prompt rows instead of repeating scalar matrix-vector work.
+- **Exact fused VQ intermediates:** gate/up performs MLX-equivalent FP16 SwiGLU
+  in-kernel, while down stores compact FP16 projections and applies route
+  weights during FP32 reduction; layer outputs remain bit-identical.
 - **Automatic 2,048-row prefill:** packed-VQ checkpoints use the larger verified
   chunk through 32K; non-VQ checkpoints and explicit resource limits keep their
   prior bounds.
@@ -73,13 +76,14 @@ and MTP off.
 
 | Workload | Configuration | Result |
 |---|---|---:|
-| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; three independent starts; fixed first token | 18.5605 / 18.0735 / 18.1852 s; median **409.9 PP tok/s**; **38.3--38.4 GiB** peak |
+| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates; three independent starts; fixed first token | 17.9819 / 17.7140 / 17.8758 s; median **417.0 PP tok/s**; **38.2--38.3 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; one directional run | **27.85 tok/s**; **36.3 GiB** peak |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 
-The 2,048-row VQ prefill path raises the same 7,454-token workload from a
-375.3 PP tok/s median to 409.9 PP tok/s (**+9.2%**) while remaining below the
-40 GiB product ceiling. These are current milestones, not claims that the
+The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
+7,454-token workload from a 375.3 PP tok/s median to 417.0 PP tok/s
+(**+11.1%**) while remaining below the 40 GiB product ceiling. These are
+current milestones, not claims that the
 600 PP tok/s or 40 tok/s decode targets have been reached.
 
 ## Historical reference evaluation
@@ -151,7 +155,7 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 ## Known limits
 
-- VQ currently reaches 409.9 PP tok/s on the retained 7,454-token prompt and
+- VQ currently reaches 417.0 PP tok/s on the retained 7,454-token prompt and
   27.85 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
   open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
