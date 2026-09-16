@@ -101,6 +101,7 @@ and MTP off unless the row explicitly names the native sidecar.
 | External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
 | IFBench first 30 prompts | native Q6 MTP, depth 4; greedy, non-thinking, max 4,096; serial requests; official scorer | **17/30 strict and loose (56.67%)**, instruction-level 60.61%; 12,867 output tokens, 0 errors/truncations; **33.08 aggregate decode tok/s**, 61.73% draft acceptance; **39.4 GiB** peak |
 | IFBench first 30 target-only control | same target, prompts and decoding protocol; MTP off | **14/30 strict and loose (46.67%)**, instruction-level 51.52%; 23,089 output tokens, 3 truncations; **28.55 aggregate decode tok/s**; **36.8 GiB** peak |
+| IFBench bounded-thinking pilot, first 10 prompts | temperature 1, top-p .95, top-k 20, seed 0, xhigh with bounded close, max 4,096; sampled generation bypasses MTP although the sidecar remains resident; final-answer-only official scoring | **8/10 strict and loose (80%)** versus 5/10 for non-thinking native MTP on the same prompts; 27,939 completion tokens, 0 errors/truncations; **28.60 aggregate decode tok/s**; 1,622.7 s request wall time; **39.3 GiB** peak |
 | Native-MTP IFBench development gate, keys 20/70/100 | native Q6 sidecar; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; 0 errors; **38.9 GiB** peak; target-only control also 3/3 |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 | IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; signed gate plus affine up/down d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**; same passing keys 20/30/60/70/90 as the affine control; 0 errors; **36.9 GiB** peak |
@@ -219,6 +220,11 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   target-only-pass, and 13 both-fail cases. A serial target verifier restores
   exact target-only output on the isolated divergent case but falls to 6.1
   tok/s; it is a diagnostic oracle, not a product fallback.
+- The official model card reports 81.3% IFBench, but does not publish enough
+  generation details for a direct local reproduction. The bounded-thinking
+  first-10 pilot reaches 80%, showing that the checkpoint/runtime can approach
+  that quality under a reasoning protocol; it is not a substitute for the full
+  300-prompt run and costs about 2,794 completion tokens per prompt.
 - The executor automatically coalesces up to four ordinary requests into one
   exact-arithmetic continuous decode batch and refills completed slots from the
   queue. Thinking requests and batches above the 131,072-token aggregate
