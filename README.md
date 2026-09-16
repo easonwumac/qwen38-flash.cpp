@@ -96,7 +96,7 @@ and MTP off unless the row explicitly names the native sidecar.
 |---|---|---:|
 | Repository prefill, 7,091 tokens | VQ 2.1bpw; README corpus SHA-256 `633c8445...`; automatic 2,048-row chunks and 8,192-row layer-major window; same-process cold/warm server requests; MTP and prefix cache off; fixed first token | **455.45 cold / 519.91 warm PP tok/s**; **38.3 GiB** peak |
 | Repeated repository prefill, 14,173 tokens | same corpus repeated twice; automatic 2,048-row chunks, two bounded windows; same-process cold/warm server requests; MTP and prefix cache off; fixed first text `Based` | **446.3 cold / 479.1 warm PP tok/s**; **39.1 GiB** peak |
-| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; three paired independent starts; first two compile/warmup steps excluded | candidate 30.62 / 30.33 / 30.25 tok/s, median **30.33 tok/s**; affine controls 29.28 / 29.25 / 29.14, median 29.25 tok/s (**+3.7%**); **36.3 GiB** peak |
+| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; one automatic 48-layer evaluation barrier; three independent starts; first two compile/warmup steps excluded | 30.55 / 30.72 / 30.59 tok/s, median **30.59 tok/s**; paired stride-8/48 medians were 30.00/31.06 tok/s; **36.3 GiB** peak |
 | Native MTP, 64 output tokens | VQ target plus native Q6 sidecar and automatic Q4-only drafter LM head; adaptive depth starts at 4; greedy/no-thinking; retained `merge_sorted_unique` coding fixture; three-sample confirmation | 57.953 / 57.938 / 57.509 tok/s, median **57.94 tok/s**; no demotion, unchanged 49/56 accepted in 14 rounds; **39.3 GiB** peak |
 | External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
 | IFBench first 30 prompts | native Q6 MTP plus Q4-only drafter LM head; automatic depth 4→3→2 when later draft positions stop paying; greedy, non-thinking, max 4,096; serial requests; official scorer | **18/30 strict and loose (60.00%)**, instruction-level 63.64%; 12,567 output tokens, 0 errors; **35.28 aggregate decode tok/s**, 71.23% draft acceptance; **39.4 GiB** peak |
@@ -134,6 +134,14 @@ wide prefill keeps FP16 and its exact output hash. The 10-case stratified
 IFBench gate retained both the affine control's 5/10 aggregate and the exact
 same passing cases. This is still approximate arithmetic and a development
 gate, not evidence from the full 300-case benchmark.
+
+Target-only decode now evaluates the 48-layer lazy graph once per token instead
+of at eight-layer boundaries. A 64-token natural autoregressive paired run was
+token-identical and improved from 28.03 to 30.45 tok/s; a three-pair fixed-input
+sweep improved the median from 30.00 to 31.06 tok/s. The production confirmation
+above was 30.59 tok/s at 36.3 GiB. IFBench keys 20/70/100 remained 3/3 strict
+and loose. Native MTP target verification has its own retained stride and is
+not changed by this setting.
 
 ## Historical reference evaluation
 

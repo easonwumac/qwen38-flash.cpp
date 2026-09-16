@@ -38,6 +38,7 @@ void apply_automatic_runtime_config() {
         {"QWEN38_GDN_METAL_PREFILL", "1"},
         {"QWEN38_GROUPED_PREFILL", "1"},
         {"QWEN38_PREFILL_BARRIER_STRIDE", "8"},
+        {"QWEN38_DECODE_BARRIER_STRIDE", "48"},
         {"QWEN38_SELECTED_SOFTMAX_ROUTER", "1"},
         {"QWEN38_MTP_EARLY_DEMOTION", "1"},
         {"QWEN38_MTP_DEMOTION", "1"},
