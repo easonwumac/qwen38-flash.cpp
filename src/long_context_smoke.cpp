@@ -59,8 +59,8 @@ int main(int argc, char **argv) {
             argc >= 4 ? std::optional<std::size_t>(std::stoul(argv[3])) : std::nullopt;
         const std::string profile = argc == 6 ? argv[5] : "speed";
         if (explicit_chunk_rows.has_value() &&
-            (*explicit_chunk_rows == 0 || *explicit_chunk_rows > 1024)) {
-            throw std::runtime_error("CHUNK_ROWS must be between 1 and 1024");
+            (*explicit_chunk_rows == 0 || *explicit_chunk_rows > 2048)) {
+            throw std::runtime_error("CHUNK_ROWS must be between 1 and 2048");
         }
         qwen38::apply_runtime_profile(profile);
 
@@ -87,6 +87,21 @@ int main(int argc, char **argv) {
         const qwen38::ModelConfig &config = tensors.manifest().config();
 
         qwen38::QwenModel model(tensors);
+        if (const char* warmup = std::getenv("QWEN38_LONG_CONTEXT_WARMUP");
+            warmup != nullptr && std::string_view(warmup) == "1") {
+            {
+                qwen38::ModelDecodeState warm_state = model.make_state();
+                const std::size_t warm_rows = tokens.size() - 1;
+                for (std::size_t offset = 0; offset < warm_rows; offset += chunk_rows) {
+                    const std::size_t count = std::min(chunk_rows, warm_rows - offset);
+                    static_cast<void>(model.prefill_chunk(
+                        std::span<const std::uint32_t>(tokens.data() + offset, count),
+                        warm_state));
+                }
+            }
+            model.clear_prefill_qmeta_cache();
+            qwen38::MlxArray::clear_cache();
+        }
         qwen38::ModelDecodeState state = model.make_state();
         std::vector<double> layer_ms;
         const auto started = std::chrono::steady_clock::now();
