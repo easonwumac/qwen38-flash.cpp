@@ -48,6 +48,9 @@ fallback checkpoints, or dependencies of the VQ path.
 - **Exact down-slot parallelism:** packed d8 decode distributes three routed
   experts across 30 SIMD lanes, then restores the original group and route
   reduction order; this removes idle-lane work without changing layer bits.
+- **Decode-only affine U8 codebooks:** d8/K16384 layers derive per-dimension U8
+  lookup tables at load time. Direct decode reads half the codebook bytes;
+  d2/K256 and segmented prompt GEMM retain the original FP16 codebooks.
 - **Bounded graph lifetime:** temporary compact metadata survives only to the
   existing eight-layer barrier, improving scheduling without retaining every
   decoded metadata bank for the whole request.
@@ -84,8 +87,9 @@ and MTP off.
 |---|---|---:|
 | Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.4920 / 17.3909 / 17.4996 s; median **426.1 PP tok/s**; **38.2--38.3 GiB** peak |
 | Repository prefill, 6,469 tokens | VQ 2.1bpw; automatic 2,048-row chunks; d2/K256 and d8/K16384 segmented VQ GEMM; three candidate starts and adjacent controls; fixed first token | candidate 14.121 / 13.695 / 14.070 s, median **459.8 PP tok/s**; controls 15.773 / 15.542 s, median **413.2 PP tok/s**; **38.2--38.3 GiB** peak |
-| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; three independent starts; first two compile/warmup steps excluded | 28.48 / 28.46 / 28.60 tok/s; median **28.48 tok/s**; **36.3 GiB** peak |
+| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; d8 decode-only affine U8 codebooks; three independent starts; first two compile/warmup steps excluded | 29.46 / 29.59 / 29.64 tok/s; median **29.59 tok/s**; **36.3 GiB** peak |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
+| IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; affine U8 d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**, matching the prior self-runtime and native-VQ aggregate on these keys; **36.7 GiB** peak |
 
 The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
 7,454-token workload from a 375.3 PP tok/s median to 426.1 PP tok/s
@@ -102,6 +106,16 @@ first token remained 27775. A 128-row layer-0 comparison against the direct
 path had max absolute error 0.00293, and IFBench keys 20/70/100 remained 3/3
 strict and loose at 36.6 GiB peak. This A/B does not replace the retained
 7,454-token row until that exact corpus is available for a paired rerun.
+
+For direct d8 decode, per-dimension affine U8 codebooks have about 0.54--0.55%
+relative L2 error and roughly 0.999985 cosine against the checkpoint FP16
+tables on representative gate/up/down banks. They raised the fixed-input
+64-step median from 28.48 to 29.59 tok/s (+3.9%) without increasing the
+36.3 GiB peak. Applying the same representation to segmented prompt GEMM was
+8.5% slower, so wide prefill keeps FP16 and its exact output hash. On the
+stratified IFBench development set the U8 path retained 5/10 aggregate accuracy,
+but exchanged one passing case for another; it is a measured quality tradeoff,
+not bit-exact arithmetic or evidence from the full 300-case benchmark.
 
 ## Historical reference evaluation
 
@@ -173,7 +187,7 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 ## Known limits
 
 - VQ currently reaches 426.1 PP tok/s on the retained 7,454-token prompt and
-  28.48 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
+  29.59 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
   open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.

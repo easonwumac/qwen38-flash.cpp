@@ -93,6 +93,9 @@ private:
         MlxArray scales;
         MlxArray biases;
         MlxArray codebook;
+        MlxArray codebook_u8;
+        MlxArray codebook_u8_scales;
+        MlxArray codebook_u8_biases;
         CompactQmeta qmeta;
         mutable DecodedQmeta cached_qmeta;
         mutable bool qmeta_cached{false};
@@ -103,6 +106,7 @@ private:
         int vector_dimension{0};
         int packed_bits{0};
         bool vector_quantized{false};
+        bool codebook_u8_ready{false};
     };
 
     struct LinearProjection {
@@ -121,6 +125,7 @@ private:
         MlxTensorStore& tensors,
         std::string_view name);
     static void make_resident(QuantizedProjection& projection);
+    static void prepare_u8_codebook(QuantizedProjection& projection);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;

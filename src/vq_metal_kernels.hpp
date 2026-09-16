@@ -541,8 +541,19 @@ inline constexpr std::string_view gate_up = R"metal(
             const uint ub = up_code * D;
             for (uint element = 0; element < D; ++element) {
                 const float value = (float)input_row[xb + element];
-                gate_group += value * (float)gate_codebook[gb + element];
-                up_group += value * (float)up_codebook[ub + element];
+                float gate_weight;
+                float up_weight;
+                if constexpr (CBQ == 1) {
+                    gate_weight = (float)gate_codebook[gb + element] *
+                        (float)gate_cb_scales[element] + (float)gate_cb_biases[element];
+                    up_weight = (float)up_codebook[ub + element] *
+                        (float)up_cb_scales[element] + (float)up_cb_biases[element];
+                } else {
+                    gate_weight = (float)gate_codebook[gb + element];
+                    up_weight = (float)up_codebook[ub + element];
+                }
+                gate_group += value * gate_weight;
+                up_group += value * up_weight;
             }
         }
         const size_t scale_offset = ((size_t)expert * OUT + row) * groups + group;
@@ -607,8 +618,14 @@ inline constexpr std::string_view down_reduce = R"metal(
                         (group * spg + local) * D;
                     const uint cb = code * D;
                     for (uint element = 0; element < D; ++element) {
-                        group_acc += (float)x[xb + element] *
-                            (float)codebook[cb + element];
+                        float codebook_value;
+                        if constexpr (CBQ == 1) {
+                            codebook_value = (float)codebook[cb + element] *
+                                (float)cb_scales[element] + (float)cb_biases[element];
+                        } else {
+                            codebook_value = (float)codebook[cb + element];
+                        }
+                        group_acc += (float)x[xb + element] * codebook_value;
                     }
                 }
                 scaled_group = (float)scales[
@@ -681,7 +698,14 @@ inline constexpr std::string_view down_reduce = R"metal(
                 const uint xb = (batch * SLOTS + slot) * IN + sub * D;
                 const uint cb = code * D;
                 for (uint element = 0; element < D; ++element) {
-                    group_acc += (float)x[xb + element] * (float)codebook[cb + element];
+                    float codebook_value;
+                    if constexpr (CBQ == 1) {
+                        codebook_value = (float)codebook[cb + element] *
+                            (float)cb_scales[element] + (float)cb_biases[element];
+                    } else {
+                        codebook_value = (float)codebook[cb + element];
+                    }
+                    group_acc += (float)x[xb + element] * codebook_value;
                 }
             }
             acc += (float)scales[
