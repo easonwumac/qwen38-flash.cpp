@@ -80,11 +80,15 @@ MlxArray mixed_input(qwen38::MlxTensorStore& tensors, const bool second_cohort) 
     }
     const std::array<int, 1> ids_shape{rows};
     MlxArray ids = MlxArray::from_int32(ids_data, ids_shape);
+    constexpr std::string_view embedding_name = "language_model.model.embed_tokens";
+    const qwen38::QuantizationSpec embedding_quantization =
+        tensors.manifest().quantization_for(embedding_name);
     MlxArray embedding = MlxArray::dequantize(
-        MlxArray::take_axis(tensors.tensor("language_model.model.embed_tokens.weight"), ids, 0),
-        MlxArray::take_axis(tensors.tensor("language_model.model.embed_tokens.scales"), ids, 0),
-        MlxArray::take_axis(tensors.tensor("language_model.model.embed_tokens.biases"), ids, 0),
-        64, 4);
+        MlxArray::take_axis(tensors.tensor(std::string(embedding_name) + ".weight"), ids, 0),
+        MlxArray::take_axis(tensors.tensor(std::string(embedding_name) + ".scales"), ids, 0),
+        MlxArray::take_axis(tensors.tensor(std::string(embedding_name) + ".biases"), ids, 0),
+        static_cast<int>(embedding_quantization.group_size),
+        static_cast<int>(embedding_quantization.bits));
     const std::array<int, 3> embedding_shape{1, rows, static_cast<int>(config.hidden_size)};
     MlxArray stream = qwen38::HyperConnection::initialize_stream(
         embedding.reshape(embedding_shape), config.hyper_connection_count);
