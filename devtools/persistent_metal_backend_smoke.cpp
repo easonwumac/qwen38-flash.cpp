@@ -229,6 +229,27 @@ void check_trunk(qwen38::PersistentMetalBackend& backend,
     }
 }
 
+void benchmark_trunk(qwen38::PersistentMetalBackend& backend,
+                     const std::vector<std::uint16_t>& input_bf16) {
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        static_cast<void>(backend.decode_trunk(9419, input_bf16, true));
+    }
+    std::vector<double> gpu_samples, wall_samples;
+    for (int sample = 0; sample < 11; ++sample) {
+        double gpu_ms = 0.0;
+        const auto started = std::chrono::steady_clock::now();
+        static_cast<void>(backend.decode_trunk(9419, input_bf16, true, &gpu_ms));
+        gpu_samples.push_back(gpu_ms);
+        wall_samples.push_back(std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - started).count());
+    }
+    std::ranges::sort(gpu_samples);
+    std::ranges::sort(wall_samples);
+    std::cout << "benchmark_trunk_gpu_ms " << gpu_samples[gpu_samples.size() / 2]
+              << " benchmark_trunk_wall_ms " << wall_samples[wall_samples.size() / 2]
+              << '\n';
+}
+
 void trace_trunk_layers(qwen38::PersistentMetalBackend& backend,
                         qwen38::MlxTensorStore& tensors,
                         const std::vector<float>& input_f32,
@@ -472,6 +493,11 @@ int main(int argc, char** argv) {
         for (std::size_t index = 0; index < input_f32.size(); ++index) {
             input_bf16[index] = bf16(input_f32[index]);
         }
+        if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_TRUNK");
+            bench != nullptr && std::string_view(bench) == "1") {
+            benchmark_trunk(*backend, input_bf16);
+            return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
+        }
         qwen38::MlxTensorStore tensors(manifest);
         std::size_t first_layer = 0;
         if (const char* requested = std::getenv("QWEN38_PERSISTENT_SMOKE_LAYER");
@@ -484,7 +510,7 @@ int main(int argc, char** argv) {
             check_ple(*backend, tensors, input_f32, input_bf16);
             check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
             check_head(*backend, tensors, input_f32, input_bf16);
-            return inventory.pipeline_count == 48 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
         }
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
@@ -498,7 +524,7 @@ int main(int argc, char** argv) {
             q8_import != nullptr && std::string_view(q8_import) == "1") {
             check_q8_state_import(*backend, tensors, input_f32, input_bf16);
         }
-        return inventory.pipeline_count == 48 && inventory.shard_count != 0 ? 0 : 1;
+        return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

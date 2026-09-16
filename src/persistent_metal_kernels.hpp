@@ -317,6 +317,218 @@ kernel void vq_d2_down_reduce(
     if (lane == 0) output[row] = total;
 }
 
+kernel void vq_d8_all_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* rgc [[buffer(1)]], const device uchar* rgcb [[buffer(2)]],
+    const device uchar* rgs [[buffer(3)]], const device uchar* ruc [[buffer(4)]],
+    const device uchar* rucb [[buffer(5)]], const device uchar* rus [[buffer(6)]],
+    const device uint* experts [[buffer(7)]], device bfloat* routed [[buffer(8)]],
+    const device uchar* sgw [[buffer(9)]], const device uchar* sgs [[buffer(10)]],
+    const device uchar* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
+    const device uchar* sus [[buffer(13)]], const device uchar* sub [[buffer(14)]],
+    device bfloat* shared [[buffer(15)]], const device uchar* srw [[buffer(16)]],
+    const device uchar* srs [[buffer(17)]], const device uchar* srb [[buffer(18)]],
+    device bfloat* router [[buffer(19)]], uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint routed_rows = 640, hidden = 2560, hidden_groups = 40;
+    const uint linear = group_id * 4u + simd;
+    if (linear < 10u * routed_rows) {
+        constexpr uint words = 140;
+        const uint slot = linear / routed_rows, row = linear % routed_rows;
+        const ulong matrix_row = ulong(experts[slot]) * routed_rows + row;
+        const device uchar* gate_row = rgc + matrix_row * words * 4u;
+        const device uchar* up_row = ruc + matrix_row * words * 4u;
+        float gate = 0.0f, up = 0.0f;
+        for (uint quant_group = lane; quant_group < hidden_groups; quant_group += 32u) {
+            gate += float(load_f16_unaligned(rgs, matrix_row * hidden_groups + quant_group)) *
+                vq_d8_group_dot(gate_row, rgcb, x, quant_group);
+            up += float(load_f16_unaligned(rus, matrix_row * hidden_groups + quant_group)) *
+                vq_d8_group_dot(up_row, rucb, x, quant_group);
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            routed[linear] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear < 10u * routed_rows + routed_rows) {
+        const uint row = linear - 10u * routed_rows;
+        float gate = 0.0f, up = 0.0f;
+        for (uint base = lane * 8u; base < hidden; base += 256u) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8u; ++i) sum += float(x[base + i]);
+            const uint affine = base / 64u;
+            gate += float(load_bf16_unaligned(sgs, row * hidden_groups + affine)) *
+                    q8_dot8(sgw + row * hidden + base, x + base) +
+                float(load_bf16_unaligned(sgb, row * hidden_groups + affine)) * sum;
+            up += float(load_bf16_unaligned(sus, row * hidden_groups + affine)) *
+                    q8_dot8(suw + row * hidden + base, x + base) +
+                float(load_bf16_unaligned(sub, row * hidden_groups + affine)) * sum;
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            shared[row] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear == 10u * routed_rows + routed_rows) {
+        float dot_value = 0.0f;
+        for (uint base = lane * 4u; base < hidden; base += 128u) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 4u; ++i) sum += float(x[base + i]);
+            dot_value += float(load_bf16_unaligned(srs, base / 64u)) *
+                    q8_dot4(srw + base, x + base) +
+                float(load_bf16_unaligned(srb, base / 64u)) * sum;
+        }
+        dot_value = simd_sum(dot_value);
+        if (lane == 0) router[0] = bfloat(1.0f / (1.0f + metal::exp(-float(bfloat(dot_value)))));
+    }
+}
+
+kernel void vq_d2_all_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* rgc [[buffer(1)]], const device uchar* rgcb [[buffer(2)]],
+    const device uchar* rgs [[buffer(3)]], const device uchar* ruc [[buffer(4)]],
+    const device uchar* rucb [[buffer(5)]], const device uchar* rus [[buffer(6)]],
+    const device uint* experts [[buffer(7)]], device bfloat* routed [[buffer(8)]],
+    const device uchar* sgw [[buffer(9)]], const device uchar* sgs [[buffer(10)]],
+    const device uchar* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
+    const device uchar* sus [[buffer(13)]], const device uchar* sub [[buffer(14)]],
+    device bfloat* shared [[buffer(15)]], const device uchar* srw [[buffer(16)]],
+    const device uchar* srs [[buffer(17)]], const device uchar* srb [[buffer(18)]],
+    device bfloat* router [[buffer(19)]], uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint routed_rows = 640, hidden = 2560, hidden_groups = 40;
+    const uint linear = group_id * 4u + simd;
+    if (linear < 10u * routed_rows) {
+        constexpr uint codes_per_row = 1280;
+        const uint slot = linear / routed_rows, row = linear % routed_rows;
+        const ulong matrix_row = ulong(experts[slot]) * routed_rows + row;
+        const device uchar* gate_row = rgc + matrix_row * codes_per_row;
+        const device uchar* up_row = ruc + matrix_row * codes_per_row;
+        float gate = 0.0f, up = 0.0f;
+        for (uint quant_group = lane; quant_group < hidden_groups; quant_group += 32u) {
+            gate += float(load_f16_unaligned(rgs, matrix_row * hidden_groups + quant_group)) *
+                vq_d2_group_dot(gate_row, rgcb, x, quant_group);
+            up += float(load_f16_unaligned(rus, matrix_row * hidden_groups + quant_group)) *
+                vq_d2_group_dot(up_row, rucb, x, quant_group);
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            routed[linear] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear < 10u * routed_rows + routed_rows) {
+        const uint row = linear - 10u * routed_rows;
+        float gate = 0.0f, up = 0.0f;
+        for (uint base = lane * 8u; base < hidden; base += 256u) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8u; ++i) sum += float(x[base + i]);
+            const uint affine = base / 64u;
+            gate += float(load_bf16_unaligned(sgs, row * hidden_groups + affine)) *
+                    q8_dot8(sgw + row * hidden + base, x + base) +
+                float(load_bf16_unaligned(sgb, row * hidden_groups + affine)) * sum;
+            up += float(load_bf16_unaligned(sus, row * hidden_groups + affine)) *
+                    q8_dot8(suw + row * hidden + base, x + base) +
+                float(load_bf16_unaligned(sub, row * hidden_groups + affine)) * sum;
+        }
+        gate = simd_sum(gate); up = simd_sum(up);
+        if (lane == 0) {
+            const float g = float(bfloat(gate)), u = float(bfloat(up));
+            shared[row] = bfloat(float(bfloat(g / (1.0f + metal::exp(-g)))) * u);
+        }
+    } else if (linear == 10u * routed_rows + routed_rows) {
+        float dot_value = 0.0f;
+        for (uint base = lane * 4u; base < hidden; base += 128u) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 4u; ++i) sum += float(x[base + i]);
+            dot_value += float(load_bf16_unaligned(srs, base / 64u)) *
+                    q8_dot4(srw + base, x + base) +
+                float(load_bf16_unaligned(srb, base / 64u)) * sum;
+        }
+        dot_value = simd_sum(dot_value);
+        if (lane == 0) router[0] = bfloat(1.0f / (1.0f + metal::exp(-float(bfloat(dot_value)))));
+    }
+}
+
+kernel void vq_d8_all_down(
+    const device bfloat* routed_hidden [[buffer(0)]],
+    const device uchar* codes [[buffer(1)]], const device uchar* codebook [[buffer(2)]],
+    const device uchar* scales [[buffer(3)]], const device uint* experts [[buffer(4)]],
+    const device bfloat* route_weights [[buffer(5)]],
+    const device bfloat* shared_hidden [[buffer(6)]],
+    const device uchar* sw [[buffer(7)]], const device uchar* ss [[buffer(8)]],
+    const device uchar* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
+    device bfloat* output [[buffer(11)]], uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, groups = 10, words = 42;
+    const uint row = group_id * 4u + simd;
+    if (row >= rows) return;
+    bfloat routed_total = bfloat(0.0f);
+    for (uint slot = 0; slot < 10u; ++slot) {
+        const ulong matrix_row = ulong(experts[slot]) * rows + row;
+        const device uchar* code_row = codes + matrix_row * words * 4u;
+        const device bfloat* x = routed_hidden + slot * k;
+        float value = 0.0f;
+        if (lane < groups) {
+            value = float(load_f16_unaligned(scales, matrix_row * groups + lane)) *
+                vq_d8_group_dot(code_row, codebook, x, lane);
+        }
+        value = simd_sum(value);
+        if (lane == 0) routed_total = bfloat(float(routed_total) +
+            float(bfloat(float(route_weights[slot]) * float(bfloat(value)))));
+    }
+    float shared_dot = 0.0f;
+    for (uint base = lane * 8u; base < k; base += 256u) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8u; ++i) sum += float(shared_hidden[base + i]);
+        shared_dot += float(load_bf16_unaligned(ss, row * groups + base / 64u)) *
+                q8_dot8(sw + row * k + base, shared_hidden + base) +
+            float(load_bf16_unaligned(sb, row * groups + base / 64u)) * sum;
+    }
+    shared_dot = simd_sum(shared_dot);
+    if (lane == 0) output[row] = bfloat(float(routed_total) +
+        float(bfloat(float(bfloat(shared_dot)) * float(router[0]))));
+}
+
+kernel void vq_d2_all_down(
+    const device bfloat* routed_hidden [[buffer(0)]],
+    const device uchar* codes [[buffer(1)]], const device uchar* codebook [[buffer(2)]],
+    const device uchar* scales [[buffer(3)]], const device uint* experts [[buffer(4)]],
+    const device bfloat* route_weights [[buffer(5)]],
+    const device bfloat* shared_hidden [[buffer(6)]],
+    const device uchar* sw [[buffer(7)]], const device uchar* ss [[buffer(8)]],
+    const device uchar* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
+    device bfloat* output [[buffer(11)]], uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, groups = 10, codes_per_row = 320;
+    const uint row = group_id * 4u + simd;
+    if (row >= rows) return;
+    bfloat routed_total = bfloat(0.0f);
+    for (uint slot = 0; slot < 10u; ++slot) {
+        const ulong matrix_row = ulong(experts[slot]) * rows + row;
+        const device uchar* code_row = codes + matrix_row * codes_per_row;
+        const device bfloat* x = routed_hidden + slot * k;
+        float value = 0.0f;
+        if (lane < groups) {
+            value = float(load_f16_unaligned(scales, matrix_row * groups + lane)) *
+                vq_d2_group_dot(code_row, codebook, x, lane);
+        }
+        value = simd_sum(value);
+        if (lane == 0) routed_total = bfloat(float(routed_total) +
+            float(bfloat(float(route_weights[slot]) * float(bfloat(value)))));
+    }
+    float shared_dot = 0.0f;
+    for (uint base = lane * 8u; base < k; base += 256u) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8u; ++i) sum += float(shared_hidden[base + i]);
+        shared_dot += float(load_bf16_unaligned(ss, row * groups + base / 64u)) *
+                q8_dot8(sw + row * k + base, shared_hidden + base) +
+            float(load_bf16_unaligned(sb, row * groups + base / 64u)) * sum;
+    }
+    shared_dot = simd_sum(shared_dot);
+    if (lane == 0) output[row] = bfloat(float(routed_total) +
+        float(bfloat(float(bfloat(shared_dot)) * float(router[0]))));
+}
+
 kernel void q4_shared_gate_up(
     const device bfloat* x [[buffer(0)]],
     const device uchar* gate_weight [[buffer(1)]],
@@ -894,6 +1106,9 @@ kernel void qsa_attention_q8_blocks(
     }
 }
 
+)metal";
+
+inline constexpr std::string_view metal_source_suffix = R"metal(
 kernel void attention_qkv_index(
     const device bfloat* input [[buffer(0)]],
     const device uchar* iw [[buffer(1)]], const device uchar* is [[buffer(2)]],
@@ -1244,9 +1459,6 @@ kernel void gdn_output_projection(
     if (lane == 0) output[row] = bfloat(dot);
 }
 
-)metal";
-
-inline constexpr std::string_view metal_source_suffix = R"metal(
 kernel void hc_write(
     const device bfloat* stream [[buffer(0)]], const device bfloat* block [[buffer(1)]],
     const device bfloat* injection [[buffer(2)]], device bfloat* output [[buffer(3)]],

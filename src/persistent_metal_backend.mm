@@ -26,11 +26,12 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 48> pipeline_names{
+constexpr std::array<const char*, 52> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "q8_shared_gate_up", "q8_shared_down_merge",
     "fused_all_gate_up", "fused_all_down",
     "vq_d8_gate_up", "vq_d2_gate_up", "vq_d8_down_reduce", "vq_d2_down_reduce",
+    "vq_d8_all_gate_up", "vq_d2_all_gate_up", "vq_d8_all_down", "vq_d2_all_down",
     "q8_router_logits", "bf16_router_logits", "select_top10", "qsa_score_blocks",
     "qsa_append_decode_state", "qsa_top128_first", "qsa_top128_merge",
     "qsa_attention_q8_blocks", "attention_qkv_index", "attention_qkv_index_q8",
@@ -576,55 +577,34 @@ public:
             if (vq_routed_) {
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:pipeline(
-                    vq_d2_layers_[layer_index] ? "vq_d2_gate_up" : "vq_d8_gate_up")];
+                    vq_d2_layers_[layer_index] ?
+                        "vq_d2_all_gate_up" : "vq_d8_all_gate_up")];
                 [encoder setBuffer:mixed_ offset:0 atIndex:0];
                 bind_vq_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
                 bind_vq_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
                 [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
                 [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
-                [encoder dispatchThreadgroups:MTLSizeMake(1600, 1, 1)
+                bind_projection(encoder, mlp + ".shared_expert.gate_proj", 9);
+                bind_projection(encoder, mlp + ".shared_expert.up_proj", 12);
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:15];
+                bind_projection(encoder, mlp + ".shared_expert_gate", 16);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:19];
+                [encoder dispatchThreadgroups:MTLSizeMake(1761, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [encoder endEncoding];
-
-                encoder = [command computeCommandEncoder];
-                [encoder setComputePipelineState:pipeline("q8_shared_gate_up")];
-                [encoder setBuffer:mixed_ offset:0 atIndex:0];
-                bind_projection(encoder, mlp + ".shared_expert.gate_proj", 1);
-                bind_projection(encoder, mlp + ".shared_expert.up_proj", 4);
-                [encoder setBuffer:shared_hidden_ offset:0 atIndex:7];
-                [encoder dispatchThreadgroups:MTLSizeMake(160, 1, 1)
-                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [encoder endEncoding];
-
-                encoder = [command computeCommandEncoder];
-                [encoder setComputePipelineState:pipeline("q8_shared_router")];
-                [encoder setBuffer:mixed_ offset:0 atIndex:0];
-                bind_projection(encoder, mlp + ".shared_expert_gate", 1);
-                [encoder setBuffer:shared_scale_ offset:0 atIndex:4];
-                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
-                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
                 [encoder endEncoding];
 
                 encoder = [command computeCommandEncoder];
                 [encoder setComputePipelineState:pipeline(
                     vq_d2_layers_[layer_index] ?
-                        "vq_d2_down_reduce" : "vq_d8_down_reduce")];
+                        "vq_d2_all_down" : "vq_d8_all_down")];
                 [encoder setBuffer:routed_hidden_ offset:0 atIndex:0];
                 bind_vq_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
                 [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
                 [encoder setBuffer:route_weights_ offset:0 atIndex:5];
-                [encoder setBuffer:zero_output_ offset:0 atIndex:6];
-                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
-                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-                [encoder endEncoding];
-
-                encoder = [command computeCommandEncoder];
-                [encoder setComputePipelineState:pipeline("q8_shared_down_merge")];
-                [encoder setBuffer:shared_hidden_ offset:0 atIndex:0];
-                bind_projection(encoder, mlp + ".shared_expert.down_proj", 1);
-                [encoder setBuffer:shared_scale_ offset:0 atIndex:4];
-                [encoder setBuffer:zero_output_ offset:0 atIndex:5];
-                [encoder setBuffer:moe_output_ offset:0 atIndex:6];
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:6];
+                bind_projection(encoder, mlp + ".shared_expert.down_proj", 7);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:10];
+                [encoder setBuffer:moe_output_ offset:0 atIndex:11];
                 [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [encoder endEncoding];
