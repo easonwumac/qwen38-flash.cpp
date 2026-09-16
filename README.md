@@ -87,9 +87,9 @@ and MTP off.
 |---|---|---:|
 | Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.4920 / 17.3909 / 17.4996 s; median **426.1 PP tok/s**; **38.2--38.3 GiB** peak |
 | Repository prefill, 6,469 tokens | VQ 2.1bpw; automatic 2,048-row chunks; d2/K256 and d8/K16384 segmented VQ GEMM; three candidate starts and adjacent controls; fixed first token | candidate 14.121 / 13.695 / 14.070 s, median **459.8 PP tok/s**; controls 15.773 / 15.542 s, median **413.2 PP tok/s**; **38.2--38.3 GiB** peak |
-| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; d8 decode-only affine U8 codebooks; three independent starts; first two compile/warmup steps excluded | 29.46 / 29.59 / 29.64 tok/s; median **29.59 tok/s**; **36.3 GiB** peak |
+| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; three paired independent starts; first two compile/warmup steps excluded | candidate 30.62 / 30.33 / 30.25 tok/s, median **30.33 tok/s**; affine controls 29.28 / 29.25 / 29.14, median 29.25 tok/s (**+3.7%**); **36.3 GiB** peak |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
-| IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; affine U8 d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**, matching the prior self-runtime and native-VQ aggregate on these keys; **36.7 GiB** peak |
+| IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; signed gate plus affine up/down d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**; same passing keys 20/30/60/70/90 as the affine control; 0 errors; **36.9 GiB** peak |
 
 The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
 7,454-token workload from a 375.3 PP tok/s median to 426.1 PP tok/s
@@ -109,13 +109,15 @@ strict and loose at 36.6 GiB peak. This A/B does not replace the retained
 
 For direct d8 decode, per-dimension affine U8 codebooks have about 0.54--0.55%
 relative L2 error and roughly 0.999985 cosine against the checkpoint FP16
-tables on representative gate/up/down banks. They raised the fixed-input
-64-step median from 28.48 to 29.59 tok/s (+3.9%) without increasing the
-36.3 GiB peak. Applying the same representation to segmented prompt GEMM was
-8.5% slower, so wide prefill keeps FP16 and its exact output hash. On the
-stratified IFBench development set the U8 path retained 5/10 aggregate accuracy,
-but exchanged one passing case for another; it is a measured quality tradeoff,
-not bit-exact arithmetic or evidence from the full 300-case benchmark.
+tables on representative gate/up/down banks. Gate vectors now use the same
+per-dimension affine scale with signed, zero-centred INT8 codes; this removes
+the bias add from the hottest gate loop. Three paired starts raised the affine
+median from 29.25 to 30.33 tok/s (+3.7%) without increasing the 36.3 GiB peak.
+Applying compressed codebooks to segmented prompt GEMM was 8.5% slower, so
+wide prefill keeps FP16 and its exact output hash. The 10-case stratified
+IFBench gate retained both the affine control's 5/10 aggregate and the exact
+same passing cases. This is still approximate arithmetic and a development
+gate, not evidence from the full 300-case benchmark.
 
 ## Historical reference evaluation
 

@@ -105,6 +105,7 @@ private:
         int output_dimension{0};
         int vector_dimension{0};
         int packed_bits{0};
+        int codebook_quantization{0};
         bool vector_quantized{false};
         bool codebook_u8_ready{false};
     };
@@ -125,7 +126,8 @@ private:
         MlxTensorStore& tensors,
         std::string_view name);
     static void make_resident(QuantizedProjection& projection);
-    static void prepare_u8_codebook(QuantizedProjection& projection);
+    static void prepare_u8_codebook(
+        QuantizedProjection& projection, bool centered);
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;

@@ -543,13 +543,20 @@ inline constexpr std::string_view gate_up = R"metal(
                 const float value = (float)input_row[xb + element];
                 float gate_weight;
                 float up_weight;
-                if constexpr (CBQ == 1) {
+                if constexpr (GATE_CBQ != 0) {
                     gate_weight = (float)gate_codebook[gb + element] *
-                        (float)gate_cb_scales[element] + (float)gate_cb_biases[element];
-                    up_weight = (float)up_codebook[ub + element] *
-                        (float)up_cb_scales[element] + (float)up_cb_biases[element];
+                        (float)gate_cb_scales[element];
+                    if constexpr (GATE_CBQ == 1)
+                        gate_weight += (float)gate_cb_biases[element];
                 } else {
                     gate_weight = (float)gate_codebook[gb + element];
+                }
+                if constexpr (UP_CBQ != 0) {
+                    up_weight = (float)up_codebook[ub + element] *
+                        (float)up_cb_scales[element];
+                    if constexpr (UP_CBQ == 1)
+                        up_weight += (float)up_cb_biases[element];
+                } else {
                     up_weight = (float)up_codebook[ub + element];
                 }
                 gate_group += value * gate_weight;
@@ -619,9 +626,11 @@ inline constexpr std::string_view down_reduce = R"metal(
                     const uint cb = code * D;
                     for (uint element = 0; element < D; ++element) {
                         float codebook_value;
-                        if constexpr (CBQ == 1) {
+                        if constexpr (CBQ != 0) {
                             codebook_value = (float)codebook[cb + element] *
-                                (float)cb_scales[element] + (float)cb_biases[element];
+                                (float)cb_scales[element];
+                            if constexpr (CBQ == 1)
+                                codebook_value += (float)cb_biases[element];
                         } else {
                             codebook_value = (float)codebook[cb + element];
                         }
@@ -699,9 +708,11 @@ inline constexpr std::string_view down_reduce = R"metal(
                 const uint cb = code * D;
                 for (uint element = 0; element < D; ++element) {
                     float codebook_value;
-                    if constexpr (CBQ == 1) {
+                    if constexpr (CBQ != 0) {
                         codebook_value = (float)codebook[cb + element] *
-                            (float)cb_scales[element] + (float)cb_biases[element];
+                            (float)cb_scales[element];
+                        if constexpr (CBQ == 1)
+                            codebook_value += (float)cb_biases[element];
                     } else {
                         codebook_value = (float)codebook[cb + element];
                     }

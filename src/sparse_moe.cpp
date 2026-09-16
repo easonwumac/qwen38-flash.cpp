@@ -442,9 +442,13 @@ SparseMoe::SparseMoe(
         expert_up_.vector_dimension == 8 && expert_up_.packed_bits == 14 &&
         expert_down_.vector_dimension == 8 && expert_down_.packed_bits == 14;
     if (d8_packed14) {
-        prepare_u8_codebook(expert_gate_);
-        prepare_u8_codebook(expert_up_);
-        prepare_u8_codebook(expert_down_);
+        // Gate vectors are nearly zero-centred.  Keeping the affine scale but
+        // using signed codes removes one add from their hottest decode loop.
+        // Up/down retain affine U8 because the same approximation did not pass
+        // the paired quality gate when applied more broadly.
+        prepare_u8_codebook(expert_gate_, true);
+        prepare_u8_codebook(expert_up_, false);
+        prepare_u8_codebook(expert_down_, false);
     }
     if (experts_per_token_ != experts_per_token && !compact_qmeta_) {
         throw std::runtime_error("QWEN38_TARGET_TOPK currently requires compact qmeta");
@@ -614,7 +618,8 @@ void SparseMoe::make_resident(QuantizedProjection& projection) {
     }
 }
 
-void SparseMoe::prepare_u8_codebook(QuantizedProjection& projection) {
+void SparseMoe::prepare_u8_codebook(
+    QuantizedProjection& projection, const bool centered) {
     if (!projection.vector_quantized) {
         throw std::runtime_error("U8 codebook conversion requires VQ projection");
     }
@@ -643,12 +648,18 @@ void SparseMoe::prepare_u8_codebook(QuantizedProjection& projection) {
     }
     for (std::size_t index = 0; index < source.size(); ++index) {
         const std::size_t dimension = index % dimensions;
-        quantized[index] = std::clamp<std::int32_t>(
-            static_cast<std::int32_t>(std::lround(
-                (source[index] - minimum[dimension]) / scales[dimension])),
-            0, 255);
+        quantized[index] = centered
+            ? std::clamp<std::int32_t>(
+                  static_cast<std::int32_t>(std::lround(
+                      source[index] / scales[dimension])),
+                  -128, 127)
+            : std::clamp<std::int32_t>(
+                  static_cast<std::int32_t>(std::lround(
+                      (source[index] - minimum[dimension]) / scales[dimension])),
+                  0, 255);
     }
-    projection.codebook_u8 = MlxArray::from_int32(quantized, shape).astype(MLX_UINT8);
+    projection.codebook_u8 = MlxArray::from_int32(quantized, shape).astype(
+        centered ? MLX_INT8 : MLX_UINT8);
     const std::vector<int> parameter_shape{shape[1]};
     projection.codebook_u8_scales =
         MlxArray::from_float32(scales, parameter_shape).astype(MLX_FLOAT16);
@@ -659,6 +670,7 @@ void SparseMoe::prepare_u8_codebook(QuantizedProjection& projection) {
         &projection.codebook_u8_scales,
         &projection.codebook_u8_biases};
     MlxArray::eval_all(arrays);
+    projection.codebook_quantization = centered ? 2 : 1;
     projection.codebook_u8_ready = true;
 }
 
@@ -1019,7 +1031,7 @@ MlxArray SparseMoe::forward_experts_decode_profiled(
             const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
                 {.name = "T", .value = input.dtype()},
             }};
-            const std::array<MlxMetalIntTemplate, 8> gate_templates{{
+            const std::array<MlxMetalIntTemplate, 9> gate_templates{{
                 {.name = "OUT", .value = expert_gate_.output_dimension},
                 {.name = "IN", .value = expert_gate_.input_dimension},
                 {.name = "D", .value = expert_gate_.vector_dimension},
@@ -1027,7 +1039,10 @@ MlxArray SparseMoe::forward_experts_decode_profiled(
                 {.name = "BITS", .value = expert_gate_.packed_bits},
                 {.name = "SLOTS", .value = slots},
                 {.name = "BATCH", .value = 1},
-                {.name = "CBQ", .value = gate_up_u8 ? 1 : 0},
+                {.name = "GATE_CBQ", .value = gate_up_u8
+                    ? expert_gate_.codebook_quantization : 0},
+                {.name = "UP_CBQ", .value = gate_up_u8
+                    ? expert_up_.codebook_quantization : 0},
             }};
             const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
                 {.shape = {slots, expert_gate_.output_dimension}, .dtype = input.dtype()},
@@ -1060,7 +1075,8 @@ MlxArray SparseMoe::forward_experts_decode_profiled(
                 {.name = "BITS", .value = expert_down_.packed_bits},
                 {.name = "SLOTS", .value = slots},
                 {.name = "BATCH", .value = 1},
-                {.name = "CBQ", .value = down_u8 ? 1 : 0},
+                {.name = "CBQ", .value = down_u8
+                    ? expert_down_.codebook_quantization : 0},
             }};
             const std::array<MlxMetalOutputSpec, 1> down_outputs{{
                 {.shape = {1, 1, expert_down_.output_dimension}, .dtype = input.dtype()},
@@ -2026,7 +2042,7 @@ MlxArray SparseMoe::forward_prefill_impl(
         const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
             {.name = "T", .value = input.dtype()},
         }};
-        const std::array<MlxMetalIntTemplate, 8> gate_templates{{
+        const std::array<MlxMetalIntTemplate, 9> gate_templates{{
             {.name = "OUT", .value = expert_gate_.output_dimension},
             {.name = "IN", .value = expert_gate_.input_dimension},
             {.name = "D", .value = expert_gate_.vector_dimension},
@@ -2034,7 +2050,10 @@ MlxArray SparseMoe::forward_prefill_impl(
             {.name = "BITS", .value = expert_gate_.packed_bits},
             {.name = "SLOTS", .value = slots},
             {.name = "BATCH", .value = rows},
-            {.name = "CBQ", .value = gate_up_u8 ? 1 : 0},
+            {.name = "GATE_CBQ", .value = gate_up_u8
+                ? expert_gate_.codebook_quantization : 0},
+            {.name = "UP_CBQ", .value = gate_up_u8
+                ? expert_up_.codebook_quantization : 0},
         }};
         const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
             {.shape = {rows * slots, expert_gate_.output_dimension},
@@ -2068,7 +2087,8 @@ MlxArray SparseMoe::forward_prefill_impl(
             {.name = "BITS", .value = expert_down_.packed_bits},
             {.name = "SLOTS", .value = slots},
             {.name = "BATCH", .value = rows},
-            {.name = "CBQ", .value = down_u8 ? 1 : 0},
+            {.name = "CBQ", .value = down_u8
+                ? expert_down_.codebook_quantization : 0},
         }};
         const std::array<MlxMetalOutputSpec, 1> down_outputs{{
             {.shape = {1, rows, expert_down_.output_dimension}, .dtype = input.dtype()},
