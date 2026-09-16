@@ -66,6 +66,14 @@ bool has_native_vqlab_head(const MlxTensorStore& tensors) {
         manifest.has_tensor("mixer.hc_norm.weight");
 }
 
+const char* language_head_prefix(
+    const MlxTensorStore& tensors,
+    const bool native_vqlab) {
+    return native_vqlab && tensors.manifest().has_tensor("mtp_lm_head.weight")
+        ? "mtp_lm_head"
+        : "language_model.lm_head";
+}
+
 ModelConfig mtp_layer_config(
     const ModelConfig& target,
     const int bits,
@@ -120,7 +128,8 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
               "language_model.mtp.fc_embedding").group_size)),
       epsilon_(static_cast<float>(tensors.manifest().config().rms_norm_epsilon)),
       embedding_(load_projection(tensors, "language_model.model.embed_tokens")),
-      language_head_(load_projection(tensors, "language_model.lm_head")),
+      language_head_(load_projection(
+          tensors, language_head_prefix(tensors, native_vqlab_))),
       fc_embedding_(native_vqlab_ ? QuantizedProjection{} :
           load_projection(tensors, "language_model.mtp.fc_embedding")),
       fc_hidden_(native_vqlab_ ? QuantizedProjection{} :
@@ -151,6 +160,9 @@ QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
           native_vqlab_ ? 32 : tensors.manifest().config().quantization_group_size,
           epsilon_,
           false) {
+    if (native_vqlab_ && tensors.manifest().has_tensor("mtp_lm_head.weight")) {
+        std::clog << "qwen38: native MTP Q4 language head enabled\n";
+    }
     if (tensors.manifest().config().mtp_layer_count != 1) {
         throw std::runtime_error("Qwen3.8 MTP head must contain exactly one layer");
     }

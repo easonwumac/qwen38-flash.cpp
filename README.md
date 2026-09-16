@@ -97,9 +97,9 @@ and MTP off unless the row explicitly names the native sidecar.
 | Repository prefill, 7,091 tokens | VQ 2.1bpw; README corpus SHA-256 `633c8445...`; automatic 2,048-row chunks and 8,192-row layer-major window; same-process cold/warm server requests; MTP and prefix cache off; fixed first token | **455.45 cold / 519.91 warm PP tok/s**; **38.3 GiB** peak |
 | Repeated repository prefill, 14,173 tokens | same corpus repeated twice; automatic 2,048-row chunks, two bounded windows; same-process cold/warm server requests; MTP and prefix cache off; fixed first text `Based` | **446.3 cold / 479.1 warm PP tok/s**; **39.1 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; three paired independent starts; first two compile/warmup steps excluded | candidate 30.62 / 30.33 / 30.25 tok/s, median **30.33 tok/s**; affine controls 29.28 / 29.25 / 29.14, median 29.25 tok/s (**+3.7%**); **36.3 GiB** peak |
-| Native MTP, 64 output tokens | VQ target plus native Q6 sidecar; depth 4; greedy/no-thinking; retained `merge_sorted_unique` coding fixture; clean-build three-sample confirmation | 53.328 / 53.384 / 53.587 tok/s, median **53.38 tok/s**; 49/56 accepted in 14 rounds; **38.9 GiB** peak |
+| Native MTP, 64 output tokens | VQ target plus native Q6 sidecar and automatic Q4-only drafter LM head; depth 4; greedy/no-thinking; retained `merge_sorted_unique` coding fixture; three-sample confirmation | 56.570 / 56.722 / 56.866 tok/s, median **56.72 tok/s**; unchanged 49/56 accepted in 14 rounds; **39.3 GiB** peak |
 | External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
-| IFBench first 30 prompts | native Q6 MTP, depth 4; greedy, non-thinking, max 4,096; serial requests; official scorer | **17/30 strict and loose (56.67%)**, instruction-level 60.61%; 12,867 output tokens, 0 errors/truncations; **33.08 aggregate decode tok/s**, 61.73% draft acceptance; **39.4 GiB** peak |
+| IFBench first 30 prompts | native Q6 MTP plus Q4-only drafter LM head, depth 4; greedy, non-thinking, max 4,096; serial requests; official scorer | **17/30 strict and loose (56.67%)**, instruction-level 60.61%; identical per-case outcomes to the Q8-head control; 13,687 output tokens, 0 errors, 1 truncation; **34.57 aggregate decode tok/s**, 64.11% draft acceptance; **39.65 GiB** peak |
 | IFBench first 30 target-only control | same target, prompts and decoding protocol; MTP off | **14/30 strict and loose (46.67%)**, instruction-level 51.52%; 23,089 output tokens, 3 truncations; **28.55 aggregate decode tok/s**; **36.8 GiB** peak |
 | IFBench bounded-thinking pilot, first 10 prompts | temperature 1, top-p .95, top-k 20, seed 0, xhigh with bounded close, max 4,096; sampled generation bypasses MTP although the sidecar remains resident; final-answer-only official scoring | **8/10 strict and loose (80%)** versus 5/10 for non-thinking native MTP on the same prompts; 27,939 completion tokens, 0 errors/truncations; **28.60 aggregate decode tok/s**; 1,622.7 s request wall time; **39.3 GiB** peak |
 | Native-MTP IFBench development gate, keys 20/70/100 | native Q6 sidecar; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; 0 errors; **38.9 GiB** peak; target-only control also 3/3 |
@@ -209,9 +209,11 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   remain open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.
-- With the optional native Q6 sidecar, VQ reaches 53.38 tok/s on one retained
-  high-acceptance coding fixture at 38.9 GiB. The first-30 IFBench run reaches
-  33.08 aggregate tok/s and 56.67% strict/loose at 39.4 GiB, so neither the
+- With the optional native Q6 sidecar and Q4-only drafter head, VQ reaches
+  56.72 tok/s on one retained high-acceptance coding fixture at 39.3 GiB. The
+  first-30 IFBench run reaches 34.57 aggregate tok/s and 56.67% strict/loose at
+  39.65 GiB. One response reached the 4,096-token limit versus none with the
+  shared Q8 head, although all 30 pass/fail outcomes were unchanged. Neither the
   mixed-workload 60 tok/s target nor full-benchmark quality is established.
 - The MTP verifier and ordinary d8 decode both use the approximate INT8/U8
   codebooks, but the verifier evaluates several target rows through a different
@@ -278,8 +280,11 @@ python3 devtools/memory_guard.py --min-available-gib 8 -- \
 ```
 
 If `mtp-head-q6.safetensors` is present beside the model shards, the automatic
-path loads it at depth 4. Without that file the server runs target-only;
-`--mtp-depth off` remains an explicit resource-limit override.
+path loads it at depth 4. An optional `mtp-lm-head-q4.safetensors` is used only
+for draft proposals; the authoritative target keeps its Q8 language head. The
+offline converter `devtools/build_mtp_lm_head_q4.py` derives this sidecar from
+the checkpoint's Q8 head. Without the native MTP file the server runs
+target-only; `--mtp-depth off` remains an explicit resource-limit override.
 
 The following 128K recipe is retained for historical REAP comparison only; it
 has not been qualified for VQ:

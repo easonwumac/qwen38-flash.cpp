@@ -353,6 +353,59 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         }
         result.declared_weight_bytes_ += static_cast<std::uint64_t>(sidecar_bytes);
     }
+
+    // The native drafter normally shares the target's Q8 language head.  An
+    // optional Q4 copy cuts proposal bandwidth without changing target-model
+    // arithmetic.  Keep it under a distinct prefix so target logits remain Q8.
+    constexpr std::string_view mtp_lm_head_sidecar = "mtp-lm-head-q4.safetensors";
+    const std::filesystem::path mtp_lm_head_path =
+        result.directory_ / mtp_lm_head_sidecar;
+    if (std::filesystem::is_regular_file(mtp_lm_head_path)) {
+        if (!std::filesystem::is_regular_file(mtp_path)) {
+            throw std::runtime_error(
+                "Q4 MTP language-head sidecar requires the native MTP sidecar");
+        }
+        if (result.config_.hidden_size % 64 != 0) {
+            throw std::runtime_error("Q4 MTP language-head width must be divisible by 64");
+        }
+        const SafetensorsFile sidecar(mtp_lm_head_path);
+        const std::vector<std::size_t> weight_shape{
+            result.config_.vocabulary_size, result.config_.hidden_size / 8};
+        const std::vector<std::size_t> metadata_shape{
+            result.config_.vocabulary_size, result.config_.hidden_size / 64};
+        const auto validate = [&](const std::string_view name,
+                                  const std::string_view dtype,
+                                  const std::vector<std::size_t>& shape) {
+            const auto found = sidecar.tensors().find(std::string(name));
+            if (found == sidecar.tensors().end() || found->second.dtype != dtype ||
+                found->second.shape != shape) {
+                throw std::runtime_error(
+                    "invalid Q4 MTP language-head tensor: " + std::string(name));
+            }
+        };
+        validate("mtp_lm_head.weight", "U32", weight_shape);
+        validate("mtp_lm_head.scales", "BF16", metadata_shape);
+        validate("mtp_lm_head.biases", "BF16", metadata_shape);
+        for (const auto& [tensor_name, metadata] : sidecar.tensors()) {
+            static_cast<void>(metadata);
+            if (tensor_name == "__metadata__") continue;
+            if (!result.weight_map_.emplace(
+                    tensor_name, std::string(mtp_lm_head_sidecar)).second) {
+                throw std::runtime_error(
+                    "Q4 MTP language-head sidecar duplicates a model tensor: " +
+                    tensor_name);
+            }
+        }
+        result.quantization_overrides_.insert_or_assign(
+            "mtp_lm_head", QuantizationSpec{.bits = 4, .group_size = 64});
+        const std::uintmax_t sidecar_bytes =
+            std::filesystem::file_size(mtp_lm_head_path);
+        if (sidecar_bytes > std::numeric_limits<std::uint64_t>::max() -
+                result.declared_weight_bytes_) {
+            throw std::runtime_error("Q4 MTP language-head sidecar size overflows model size");
+        }
+        result.declared_weight_bytes_ += static_cast<std::uint64_t>(sidecar_bytes);
+    }
     return result;
 }
 
