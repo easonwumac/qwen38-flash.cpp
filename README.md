@@ -45,6 +45,9 @@ fallback checkpoints, or dependencies of the VQ path.
   active decode rows continue between layer groups.
 - **Fused decode kernels:** routed MoE, device-side routing, Hyper-Connection,
   and Gated DeltaNet work are fused around the actual decode-width hot path.
+- **Exact down-slot parallelism:** packed d8 decode distributes three routed
+  experts across 30 SIMD lanes, then restores the original group and route
+  reduction order; this removes idle-lane work without changing layer bits.
 - **Bounded graph lifetime:** temporary compact metadata survives only to the
   existing eight-layer barrier, improving scheduling without retaining every
   decoded metadata bank for the whole request.
@@ -80,7 +83,7 @@ and MTP off.
 | Workload | Configuration | Result |
 |---|---|---:|
 | Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.4920 / 17.3909 / 17.4996 s; median **426.1 PP tok/s**; **38.2--38.3 GiB** peak |
-| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; one directional run | **27.85 tok/s**; **36.3 GiB** peak |
+| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; three independent starts; first two compile/warmup steps excluded | 28.48 / 28.46 / 28.60 tok/s; median **28.48 tok/s**; **36.3 GiB** peak |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 
 The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
@@ -159,7 +162,7 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 ## Known limits
 
 - VQ currently reaches 426.1 PP tok/s on the retained 7,454-token prompt and
-  27.85 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
+  28.48 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
   open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.

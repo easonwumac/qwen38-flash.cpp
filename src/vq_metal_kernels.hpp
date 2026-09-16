@@ -517,6 +517,67 @@ inline constexpr std::string_view down_reduce = R"metal(
     const uint groups = IN / GROUP;
     const uint spg = GROUP / D;
     const uint nsub = IN / D;
+    // The packed d8 down projection has ten independent routed experts but
+    // only ten quant groups per expert. Spread three slots across the SIMD
+    // group so 30 lanes perform useful codebook work, then shuffle each
+    // slot's groups back to lanes 0..9 before the original simd_sum. This
+    // preserves the reduction and route-weight order exactly.
+    if constexpr (BITS == 14 && D == 8 && GROUP == 64 && SLOTS == 10) {
+        float routed = 0.0f;
+        constexpr uint slots_per_wave = 3;
+        for (uint slot_base = 0; slot_base < SLOTS; slot_base += slots_per_wave) {
+            const uint local_slot = lane / groups;
+            const uint group = lane - local_slot * groups;
+            const uint slot = slot_base + local_slot;
+            float scaled_group = 0.0f;
+            if (local_slot < slots_per_wave && slot < SLOTS) {
+                const uint expert = (uint)experts[batch * SLOTS + slot];
+                const uint wpr = ((nsub + 31) / 32) * BITS;
+                const uint first_sub = group * spg;
+                const uint block_bit = (first_sub & 31) * BITS;
+                const uint first_word =
+                    (first_sub >> 5) * BITS + (block_bit >> 5);
+                const uint cached_shift = block_bit & 31;
+                const device uint* code_row = (const device uint*)codes +
+                    ((size_t)expert * OUT + row) * wpr + first_word;
+                uint packed_words[4];
+                for (uint word = 0; word < 4; ++word)
+                    packed_words[word] = code_row[word];
+                float group_acc = 0.0f;
+                for (uint local = 0; local < spg; ++local) {
+                    const uint bit = cached_shift + local * BITS;
+                    const uint word = bit >> 5;
+                    const uint shift = bit & 31;
+                    ulong value = (ulong)(packed_words[word] >> shift);
+                    if (shift + BITS > 32)
+                        value |= (ulong)packed_words[word + 1] << (32 - shift);
+                    const uint code = (uint)(value & 0x3ffful);
+                    const uint xb = (batch * SLOTS + slot) * IN +
+                        (group * spg + local) * D;
+                    const uint cb = code * D;
+                    for (uint element = 0; element < D; ++element) {
+                        group_acc += (float)x[xb + element] *
+                            (float)codebook[cb + element];
+                    }
+                }
+                scaled_group = (float)scales[
+                    ((size_t)expert * OUT + row) * groups + group] * group_acc;
+            }
+            for (uint wave_slot = 0; wave_slot < slots_per_wave; ++wave_slot) {
+                const float ordered = lane < groups
+                    ? simd_shuffle(scaled_group, (ushort)(wave_slot * groups + lane))
+                    : 0.0f;
+                const float slot_acc = simd_sum(ordered);
+                const uint reduced_slot = slot_base + wave_slot;
+                if (lane == 0 && reduced_slot < SLOTS) {
+                    routed += route_weights[batch * SLOTS + reduced_slot] *
+                        (float)((T)slot_acc);
+                }
+            }
+        }
+        if (lane == 0) y[(size_t)batch * OUT + row] = (T)routed;
+        return;
+    }
     float routed = 0.0f;
     for (uint slot = 0; slot < SLOTS; ++slot) {
         const uint expert = (uint)experts[batch * SLOTS + slot];
