@@ -307,6 +307,52 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
             }
         }
     }
+
+    // VQLab publishes the model-native Qwen4-Exp MTP head as a single optional
+    // file beside the target shards.  It is intentionally absent from the
+    // upstream index, so discover it from its safetensors header.  All affine
+    // tensors in this sidecar use Q6/group-32; recording exact module
+    // overrides keeps the target checkpoint's selective Q8 metadata intact.
+    constexpr std::string_view mtp_sidecar = "mtp-head-q6.safetensors";
+    const std::filesystem::path mtp_path = result.directory_ / mtp_sidecar;
+    if (std::filesystem::is_regular_file(mtp_path)) {
+        const SafetensorsFile mtp(mtp_path);
+        constexpr std::array<std::string_view, 7> required{
+            "norm_e.weight",
+            "norm_h.weight",
+            "fc.weight",
+            "block.self_attn.q_proj.weight",
+            "block.mlp.switch_mlp.gate_proj.weight",
+            "block.attn_hyper_connection.hc_norm.weight",
+            "mixer.hc_norm.weight",
+        };
+        for (const std::string_view name : required) {
+            if (!mtp.contains(name)) {
+                throw std::runtime_error(
+                    "native MTP sidecar is missing tensor: " + std::string(name));
+            }
+        }
+        for (const auto& [tensor_name, metadata] : mtp.tensors()) {
+            static_cast<void>(metadata);
+            if (tensor_name.empty() || !result.weight_map_.emplace(
+                    tensor_name, std::string(mtp_sidecar)).second) {
+                throw std::runtime_error(
+                    "native MTP sidecar duplicates a model tensor: " + tensor_name);
+            }
+            constexpr std::string_view scales_suffix = ".scales";
+            if (tensor_name.ends_with(scales_suffix)) {
+                result.quantization_overrides_.insert_or_assign(
+                    tensor_name.substr(0, tensor_name.size() - scales_suffix.size()),
+                    QuantizationSpec{.bits = 6, .group_size = 32});
+            }
+        }
+        const std::uintmax_t sidecar_bytes = std::filesystem::file_size(mtp_path);
+        if (sidecar_bytes > std::numeric_limits<std::uint64_t>::max() -
+                result.declared_weight_bytes_) {
+            throw std::runtime_error("native MTP sidecar size overflows model size");
+        }
+        result.declared_weight_bytes_ += static_cast<std::uint64_t>(sidecar_bytes);
+    }
     return result;
 }
 

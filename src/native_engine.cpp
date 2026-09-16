@@ -29,8 +29,16 @@
 namespace qwen38 {
 namespace {
 
+bool has_native_vqlab_mtp_weights(const ModelManifest& manifest) {
+    return manifest.has_tensor("fc.weight") && manifest.has_tensor("norm_e.weight") &&
+        manifest.has_tensor("norm_h.weight") &&
+        manifest.has_tensor("block.self_attn.q_proj.weight") &&
+        manifest.has_tensor("mixer.hc_norm.weight");
+}
+
 bool has_mtp_weights(const ModelManifest& manifest) {
-    return manifest.weight_map().contains("language_model.mtp.fc_embedding.weight");
+    return manifest.weight_map().contains("language_model.mtp.fc_embedding.weight") ||
+        has_native_vqlab_mtp_weights(manifest);
 }
 
 const char* external_mtp_model_directory() {
@@ -44,7 +52,8 @@ std::size_t resolved_mtp_depth(
     const bool available = has_mtp_weights(manifest) ||
         external_mtp_model_directory() != nullptr;
     const std::size_t depth = options.mtp_depth.value_or(
-        external_mtp_model_directory() != nullptr ? 4 : available ? 3 : 0);
+        external_mtp_model_directory() != nullptr || has_native_vqlab_mtp_weights(manifest)
+            ? 4 : available ? 3 : 0);
     if (depth != 0 && (depth < 2 || depth > 4)) {
         throw std::runtime_error("MTP depth must be 0 or between 2 and 4");
     }

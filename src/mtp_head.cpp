@@ -58,15 +58,28 @@ int infer_projection_bits(
         weight_shape, scale_shape, group_size, "MTP");
 }
 
-ModelConfig mtp_layer_config(const ModelConfig& target, const int bits) {
+bool has_native_vqlab_head(const MlxTensorStore& tensors) {
+    const ModelManifest& manifest = tensors.manifest();
+    return manifest.has_tensor("fc.weight") && manifest.has_tensor("norm_e.weight") &&
+        manifest.has_tensor("norm_h.weight") &&
+        manifest.has_tensor("block.self_attn.q_proj.weight") &&
+        manifest.has_tensor("mixer.hc_norm.weight");
+}
+
+ModelConfig mtp_layer_config(
+    const ModelConfig& target,
+    const int bits,
+    const std::size_t group_size,
+    const bool native_vqlab) {
     ModelConfig result = target;
     result.layer_count = 1;
     result.layer_types = {"full_attention"};
     result.ple_layer_ids.clear();
     result.quantization_bits = static_cast<std::size_t>(bits);
+    result.quantization_group_size = group_size;
     // The retained ReleaseFast sidecar stores pre-FC/HC norms as deltas, but
     // its attention q/k norms are already effective weights (P192 fixture).
-    result.attention_norm_has_offset = false;
+    result.attention_norm_has_offset = native_vqlab;
     return result;
 }
 
@@ -82,63 +95,60 @@ MtpDecodeState snapshot_mtp_decode_state(const MtpDecodeState& state) {
 
 QwenMtpHead::QuantizedProjection QwenMtpHead::load_projection(
     MlxTensorStore& tensors,
-    const char* prefix,
-    const int bits) {
+    const char* prefix) {
     const std::string base(prefix);
+    const QuantizationSpec quantization = tensors.manifest().quantization_for(base);
+    const int group_size = dimension(quantization.group_size, "projection group size");
+    const int bits = infer_projection_bits(tensors, prefix, quantization.group_size);
     return {
         .weight = tensors.tensor(base + ".weight"),
         .scales = tensors.tensor(base + ".scales"),
         .biases = tensors.tensor(base + ".biases"),
         .bits = bits,
+        .group_size = group_size,
     };
 }
 
 QwenMtpHead::QwenMtpHead(MlxTensorStore& tensors)
-    : hidden_size_(tensors.manifest().config().hidden_size),
+    : native_vqlab_(has_native_vqlab_head(tensors)),
+      hidden_size_(tensors.manifest().config().hidden_size),
       stream_count_(tensors.manifest().config().hyper_connection_count),
       vocabulary_size_(tensors.manifest().config().vocabulary_size),
-      group_size_(dimension(
-          tensors.manifest().config().quantization_group_size,
-          "quantization group size")),
-      mtp_bits_(infer_projection_bits(
-          tensors,
-          "language_model.mtp.fc_embedding",
-          tensors.manifest().config().quantization_group_size)),
+      mtp_bits_(native_vqlab_ ? 6 : infer_projection_bits(
+          tensors, "language_model.mtp.fc_embedding",
+          tensors.manifest().quantization_for(
+              "language_model.mtp.fc_embedding").group_size)),
       epsilon_(static_cast<float>(tensors.manifest().config().rms_norm_epsilon)),
-      embedding_(load_projection(
-          tensors,
-          "language_model.model.embed_tokens",
-          dimension(tensors.manifest().config().quantization_bits, "target bits"))),
-      language_head_(load_projection(
-          tensors,
-          "language_model.lm_head",
-          dimension(tensors.manifest().config().quantization_bits, "target bits"))),
-      fc_embedding_(load_projection(
-          tensors, "language_model.mtp.fc_embedding", mtp_bits_)),
-      fc_hidden_(load_projection(
-          tensors,
-          "language_model.mtp.fc_hidden",
-          infer_projection_bits(
-              tensors,
-              "language_model.mtp.fc_hidden",
-              tensors.manifest().config().quantization_group_size))),
+      embedding_(load_projection(tensors, "language_model.model.embed_tokens")),
+      language_head_(load_projection(tensors, "language_model.lm_head")),
+      fc_embedding_(native_vqlab_ ? QuantizedProjection{} :
+          load_projection(tensors, "language_model.mtp.fc_embedding")),
+      fc_hidden_(native_vqlab_ ? QuantizedProjection{} :
+          load_projection(tensors, "language_model.mtp.fc_hidden")),
+      fused_fc_(native_vqlab_ ? tensors.tensor("fc.weight") : MlxArray{}),
       embedding_norm_(offset_norm(
-          tensors.tensor("language_model.mtp.pre_fc_norm_embedding.weight"), hidden_size_)),
+          tensors.tensor(native_vqlab_ ? "norm_e.weight" :
+              "language_model.mtp.pre_fc_norm_embedding.weight"), hidden_size_)),
       hidden_norm_(offset_norm(
-          tensors.tensor("language_model.mtp.pre_fc_norm_hidden.weight"),
+          tensors.tensor(native_vqlab_ ? "norm_h.weight" :
+              "language_model.mtp.pre_fc_norm_hidden.weight"),
           hidden_size_ * stream_count_)),
       layer_(
           tensors,
-          "language_model.mtp.layers.0",
+          native_vqlab_ ? "block" : "language_model.mtp.layers.0",
           0,
-          mtp_layer_config(tensors.manifest().config(), mtp_bits_)),
+          mtp_layer_config(
+              tensors.manifest().config(), mtp_bits_,
+              native_vqlab_ ? 32 :
+                  tensors.manifest().config().quantization_group_size,
+              native_vqlab_)),
       final_mixer_(
           tensors,
-          "language_model.mtp.hyper_connection_mixer",
+          native_vqlab_ ? "mixer" : "language_model.mtp.hyper_connection_mixer",
           hidden_size_,
           stream_count_,
           static_cast<std::size_t>(mtp_bits_),
-          tensors.manifest().config().quantization_group_size,
+          native_vqlab_ ? 32 : tensors.manifest().config().quantization_group_size,
           epsilon_,
           false) {
     if (tensors.manifest().config().mtp_layer_count != 1) {
@@ -194,8 +204,54 @@ MlxArray QwenMtpHead::project(
         projection.weight,
         projection.scales,
         projection.biases,
-        group_size_,
+        projection.group_size,
         projection.bits);
+}
+
+MlxArray QwenMtpHead::combine_inputs(
+    const MlxArray& target_pre_mixer_streams,
+    const MlxArray& next_tokens) const {
+    const std::vector<int> target_shape = target_pre_mixer_streams.shape();
+    const std::vector<int> token_shape = next_tokens.shape();
+    if (target_shape.size() != 3 || target_shape[0] != 1 || target_shape[1] < 1 ||
+        target_shape[2] != dimension(hidden_size_ * stream_count_, "stream width") ||
+        token_shape != std::vector<int>{target_shape[1]}) {
+        throw std::runtime_error("MTP target streams and tokens have incompatible shapes");
+    }
+    const int rows = target_shape[1];
+    MlxArray normalized_embedding = embed(next_tokens).rms_norm(embedding_norm_, epsilon_);
+    const std::vector<int> grouped{
+        1, rows, dimension(stream_count_, "stream count"),
+        dimension(hidden_size_, "hidden size")};
+    if (native_vqlab_) {
+        MlxArray grouped_hidden = target_pre_mixer_streams.reshape(grouped);
+        MlxArray mean_square = MlxArray::multiply(
+            grouped_hidden, grouped_hidden).mean_axis(-1, true);
+        const std::vector<float> epsilon_data{epsilon_};
+        const std::vector<int> scalar_shape{};
+        MlxArray denominator = MlxArray::add(
+            mean_square, MlxArray::from_float32(epsilon_data, scalar_shape))
+            .square_root();
+        MlxArray normalized_hidden = MlxArray::multiply(
+            MlxArray::divide(grouped_hidden, denominator),
+            hidden_norm_.reshape(std::vector<int>{
+                1, 1, dimension(stream_count_, "stream count"),
+                dimension(hidden_size_, "hidden size")}));
+        MlxArray repeated_embedding = normalized_embedding.reshape(
+            std::vector<int>{1, rows, 1, dimension(hidden_size_, "hidden size")})
+            .broadcast_to(grouped);
+        MlxArray joined = MlxArray::concatenate(
+            repeated_embedding, normalized_hidden, -1);
+        return MlxArray::matmul(joined, fused_fc_.transpose()).reshape(target_shape);
+    }
+    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
+    MlxArray normalized_hidden = target_pre_mixer_streams.rms_norm(hidden_norm_, epsilon_);
+    MlxArray hidden_projection = project(normalized_hidden.reshape(grouped), fc_hidden_);
+    return MlxArray::add(
+        hidden_projection,
+        embedding_projection.reshape(
+            std::vector<int>{1, rows, 1, dimension(hidden_size_, "hidden size")}))
+        .reshape(target_shape);
 }
 
 MlxArray QwenMtpHead::embed(const std::uint32_t token) const {
@@ -215,7 +271,7 @@ MlxArray QwenMtpHead::embed(const MlxArray& ids) const {
         MlxArray::take_axis(embedding_.weight, ids, 0),
         MlxArray::take_axis(embedding_.scales, ids, 0),
         MlxArray::take_axis(embedding_.biases, ids, 0),
-        group_size_,
+        embedding_.group_size,
         embedding_.bits);
     const std::vector<int> shape{
         1, id_shape[0], dimension(hidden_size_, "hidden size")};
@@ -257,17 +313,7 @@ MlxArray QwenMtpHead::forward_stream_lazy_token(
         state.layer.full_attention.position_base = query_position;
     }
 
-    MlxArray normalized_embedding = embed(next_token).rms_norm(embedding_norm_, epsilon_);
-    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
-    MlxArray normalized_hidden =
-        target_pre_mixer_stream.rms_norm(hidden_norm_, epsilon_);
-    const std::vector<int> grouped{
-        1, 1, dimension(stream_count_, "stream count"), dimension(hidden_size_, "hidden size")};
-    MlxArray hidden_projection = project(normalized_hidden.reshape(grouped), fc_hidden_);
-    const std::vector<int> embedding_grouped{1, 1, 1, dimension(hidden_size_, "hidden size")};
-    MlxArray combined = MlxArray::add(
-        hidden_projection, embedding_projection.reshape(embedding_grouped));
-    MlxArray stream = combined.reshape(expected);
+    MlxArray stream = combine_inputs(target_pre_mixer_stream, next_token);
     if (trace != nullptr) {
         const std::vector<int> zero_shape{1};
         trace->combined_stream = MlxArray::add(
@@ -313,31 +359,18 @@ void QwenMtpHead::consume_committed_batch(
         state.layer.full_attention.position_base = query_position;
     }
 
-    std::vector<MlxArray> embeddings;
-    embeddings.reserve(tokens.size());
-    std::vector<const MlxArray*> embedding_rows;
-    embedding_rows.reserve(tokens.size());
+    std::vector<std::int32_t> token_values;
+    token_values.reserve(tokens.size());
     for (const std::uint32_t token : tokens) {
-        embeddings.push_back(embed(token));
-        embedding_rows.push_back(&embeddings.back());
+        if (token >= vocabulary_size_) {
+            throw std::runtime_error("MTP token id is out of range");
+        }
+        token_values.push_back(static_cast<std::int32_t>(token));
     }
-    MlxArray embedding_batch = concatenate_sequence(embedding_rows);
-    MlxArray normalized_embedding = embedding_batch.rms_norm(embedding_norm_, epsilon_);
-    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
-
+    MlxArray ids = MlxArray::from_int32(
+        token_values, std::vector<int>{dimension(tokens.size(), "committed rows")});
     MlxArray hidden_batch = concatenate_sequence(target_pre_mixer_streams);
-    MlxArray normalized_hidden = hidden_batch.rms_norm(hidden_norm_, epsilon_);
-    const int rows = static_cast<int>(tokens.size());
-    const std::vector<int> grouped{
-        1, rows, dimension(stream_count_, "stream count"),
-        dimension(hidden_size_, "hidden size")};
-    MlxArray hidden_projection = project(normalized_hidden.reshape(grouped), fc_hidden_);
-    MlxArray combined = MlxArray::add(
-        hidden_projection,
-        embedding_projection.reshape(
-            std::vector<int>{1, rows, 1, dimension(hidden_size_, "hidden size")}));
-    MlxArray stream_batch = combined.reshape(
-        std::vector<int>{1, rows, dimension(hidden_size_ * stream_count_, "stream width")});
+    MlxArray stream_batch = combine_inputs(hidden_batch, ids);
 
     std::vector<MlxArray> streams;
     streams.reserve(tokens.size());
@@ -391,22 +424,9 @@ void QwenMtpHead::consume_prefill_batch(
     }
     MlxArray ids = MlxArray::from_int32(
         token_values, std::vector<int>{dimension(tokens.size(), "prefill rows")});
-    MlxArray normalized_embedding = embed(ids).rms_norm(embedding_norm_, epsilon_);
-    MlxArray embedding_projection = project(normalized_embedding, fc_embedding_);
-    MlxArray normalized_hidden =
-        target_pre_mixer_streams.rms_norm(hidden_norm_, epsilon_);
-    const int rows = dimension(tokens.size(), "prefill rows");
-    MlxArray hidden_projection = project(
-        normalized_hidden.reshape(std::vector<int>{
-            1, rows, dimension(stream_count_, "stream count"),
-            dimension(hidden_size_, "hidden size")}),
-        fc_hidden_);
-    MlxArray combined = MlxArray::add(
-        hidden_projection,
-        embedding_projection.reshape(std::vector<int>{
-            1, rows, 1, dimension(hidden_size_, "hidden size")}));
+    MlxArray combined = combine_inputs(target_pre_mixer_streams, ids);
     MlxArray output = layer_.forward_prefill(
-        combined.reshape(expected), tokens, state.layer);
+        std::move(combined), tokens, state.layer);
     state.row_count += tokens.size();
 
     std::vector<const MlxArray*> outputs{&output};

@@ -8,7 +8,8 @@ caching, HTTP serving, streaming, and runtime observability.
 The server has one automatic production configuration. For the VQ target it
 selects the validated sparse-attention, prefill, continuous-batching, and
 Metal paths from the supplied assets; there are no tuning profiles to choose.
-MTP stays off because this checkpoint does not contain drafter tensors.
+When the checkpoint's optional native Q6 MTP sidecar is present, the same
+automatic configuration enables it; otherwise the target runs without MTP.
 
 ## Current target model
 
@@ -17,7 +18,7 @@ MTP stays off because this checkpoint does not contain drafter tensors.
   geometry, exact top-10 routing
 - PLE: the checkpoint's bundled VQ n-gram shards, memory mapped on demand
 - Context declared by the model: 262,144 tokens
-- MTP: disabled; the package declares one layer but contains no MTP tensors
+- MTP: optional native `mtp-head-q6.safetensors` sidecar; automatically detected
 - Automatic prefill: 2,048-row chunks through 32K, then smaller bounded chunks
 - Runtime: C++20/Metal with MLX 0.32.2 through a pinned MLX-C ABI
 
@@ -48,6 +49,9 @@ fallback checkpoints, or dependencies of the VQ path.
   active decode rows continue between layer groups.
 - **Fused decode kernels:** routed MoE, device-side routing, Hyper-Connection,
   and Gated DeltaNet work are fused around the actual decode-width hot path.
+- **Native Q6 MTP:** the optional Qwen4-Exp sidecar is discovered without model
+  repacking; fused Q6/group-32 gate/up/down kernels remove ten independent
+  gather-QMM launches per routed head layer.
 - **Exact down-slot parallelism:** packed d8 decode distributes three routed
   experts across 30 SIMD lanes, then restores the original group and route
   reduction order; this removes idle-lane work without changing layer bits.
@@ -86,14 +90,18 @@ fallback checkpoints, or dependencies of the VQ path.
 Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified
 memory, macOS 26.5 (25F71), AC power, no recorded thermal or performance
 warning, temperature 0, thinking off, one guarded server process, exact top-10,
-and MTP off.
+and MTP off unless the row explicitly names the native sidecar.
 
 | Workload | Configuration | Result |
 |---|---|---:|
 | Repository prefill, 7,091 tokens | VQ 2.1bpw; README corpus SHA-256 `633c8445...`; automatic 2,048-row chunks and 8,192-row layer-major window; same-process cold/warm server requests; MTP and prefix cache off; fixed first token | **455.45 cold / 519.91 warm PP tok/s**; **38.3 GiB** peak |
 | Repeated repository prefill, 14,173 tokens | same corpus repeated twice; automatic 2,048-row chunks, two bounded windows; same-process cold/warm server requests; MTP and prefix cache off; fixed first text `Based` | **446.3 cold / 479.1 warm PP tok/s**; **39.1 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; three paired independent starts; first two compile/warmup steps excluded | candidate 30.62 / 30.33 / 30.25 tok/s, median **30.33 tok/s**; affine controls 29.28 / 29.25 / 29.14, median 29.25 tok/s (**+3.7%**); **36.3 GiB** peak |
+| Native MTP, 64 output tokens | VQ target plus native Q6 sidecar; depth 4; greedy/no-thinking; retained `merge_sorted_unique` coding fixture; clean-build three-sample confirmation | 53.328 / 53.384 / 53.587 tok/s, median **53.38 tok/s**; 49/56 accepted in 14 rounds; **38.9 GiB** peak |
 | External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
+| IFBench first 30 prompts | native Q6 MTP, depth 4; greedy, non-thinking, max 4,096; serial requests; official scorer | **17/30 strict and loose (56.67%)**, instruction-level 60.61%; 12,867 output tokens, 0 errors/truncations; **33.08 aggregate decode tok/s**, 61.73% draft acceptance; **39.4 GiB** peak |
+| IFBench first 30 target-only control | same target, prompts and decoding protocol; MTP off | **14/30 strict and loose (46.67%)**, instruction-level 51.52%; 23,089 output tokens, 3 truncations; **28.55 aggregate decode tok/s**; **36.8 GiB** peak |
+| Native-MTP IFBench development gate, keys 20/70/100 | native Q6 sidecar; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; 0 errors; **38.9 GiB** peak; target-only control also 3/3 |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 | IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; signed gate plus affine up/down d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**; same passing keys 20/30/60/70/90 as the affine control; 0 errors; **36.9 GiB** peak |
 
@@ -200,12 +208,17 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
   remain open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.
-- The VQ package has no usable MTP tensors. A compatible external Q8 drafter
-  reached 44.8 tok/s on one high-acceptance fixture, but low-acceptance IFBench
-  probes fell to roughly 23--24 tok/s. It is not a production dependency or a
-  demonstrated 60 tok/s solution.
-- The three-case IFBench gate is a fast regression signal, not a full quality
-  estimate. Larger official scoring remains required before a release claim.
+- With the optional native Q6 sidecar, VQ reaches 53.38 tok/s on one retained
+  high-acceptance coding fixture at 38.9 GiB. The first-30 IFBench run reaches
+  33.08 aggregate tok/s and 56.67% strict/loose at 39.4 GiB, so neither the
+  mixed-workload 60 tok/s target nor full-benchmark quality is established.
+- The MTP verifier currently uses the checkpoint-reference FP16 VQ codebook
+  path, while ordinary d8 decode uses the faster approximate INT8/U8 codebooks.
+  It therefore does not promise byte or token parity with target-only decode.
+  On the paired 30 prompts MTP had 14 both-pass, 3 MTP-only-pass, 0
+  target-only-pass, and 13 both-fail cases. A serial target verifier restores
+  exact target-only output on the isolated divergent case but falls to 6.1
+  tok/s; it is a diagnostic oracle, not a product fallback.
 - The executor automatically coalesces up to four ordinary requests into one
   exact-arithmetic continuous decode batch and refills completed slots from the
   queue. Thinking requests and batches above the 131,072-token aggregate
@@ -257,7 +270,8 @@ python3 devtools/memory_guard.py --min-available-gib 8 -- \
   --max-generation-tokens 32768 --mtp-depth off
 ```
 
-The VQ package has no MTP tensors, so the automatic path runs without a drafter.
+If `mtp-head-q6.safetensors` is present beside the model shards, the automatic
+path loads it at depth 4. Without that file the server runs target-only;
 `--mtp-depth off` remains an explicit resource-limit override.
 
 The following 128K recipe is retained for historical REAP comparison only; it

@@ -6,6 +6,10 @@ runtime bundled with TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw
 (quantization by TheDrainFlorist, 2026), distributed under the Qwen Community
 License 1.0. The license is retained in licenses/qwen-community-1.0.txt.
 
+The native Qwen4-Exp MTP sidecar tensor contract and fused embedding/hidden
+preprocessing follow VQLab (Copyright 2026 Noah Zelezny), licensed under the
+Apache License, Version 2.0. The implementation here is independent C++/MLX.
+
 Portions of the fused selected-MoE Metal kernel design are adapted from MTPLX
 (Copyright 2026 MTPLX), licensed under the Apache License, Version 2.0.
 

@@ -180,6 +180,7 @@ private:
     std::shared_ptr<MlxMetalKernel> fused_gate_up_;
     std::shared_ptr<MlxMetalKernel> fused_down_;
     bool fused_q8_exact_{false};
+    bool fused_q6_exact_{false};
     bool fused_vq_{false};
     bool compact_qmeta_{false};
     mutable bool prefill_qmeta_cache_allowed_{true};

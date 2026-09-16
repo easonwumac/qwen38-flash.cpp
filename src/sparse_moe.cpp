@@ -303,6 +303,46 @@ std::shared_ptr<MlxMetalKernel> fused_q8_verify_down_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> fused_q6_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts", "sigtab"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_gate_up_q6_exact", inputs, "h",
+            moe_metal::gate_up_q6_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q6_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_down_q6_exact", inputs, "y",
+            moe_metal::down_q6_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q6_verify_gate_up_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts", "sigtab"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_gate_up_q6_exact", inputs, "h",
+            moe_metal::gate_up_verify_q6_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> fused_q6_verify_down_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{"h", "dw", "ds", "db", "experts", "rw"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_moe_verify_down_q6_exact", inputs, "y",
+            moe_metal::down_verify_q6_exact, moe_metal::header);
+    }();
+    return kernel;
+}
+
 const MlxArray& bf16_sigmoid_table() {
     static const MlxArray table = [] {
         constexpr std::size_t count = 1U << 16;
@@ -320,6 +360,10 @@ const MlxArray& bf16_sigmoid_table() {
 }
 
 std::size_t layer_index(const std::string_view prefix) {
+    // The optional VQLab model-native MTP head stores its single decoder layer
+    // under the flat `block` prefix.  Keep it outside the target's 0..47
+    // residency/profile range while reusing the same MoE implementation.
+    if (prefix == "block.mlp") return 48;
     constexpr std::string_view marker = ".layers.";
     const std::size_t begin = prefix.find(marker);
     if (begin == std::string_view::npos) throw std::runtime_error("MoE layer prefix is invalid");
@@ -466,6 +510,16 @@ SparseMoe::SparseMoe(
     }
     const char* fused = std::getenv("QWEN38_FUSED_MOE");
     const char* q8_exact = std::getenv("QWEN38_Q8_EXACT_MOE");
+    const char* q6_exact = std::getenv("QWEN38_Q6_EXACT_MOE");
+    if (q6_exact != nullptr && std::string_view(q6_exact) == "1" &&
+        expert_count_ == 512 && experts_per_token_ == 10 &&
+        expert_gate_.bits == 6 && expert_up_.bits == 6 && expert_down_.bits == 6 &&
+        expert_gate_.group_size == 32 && expert_up_.group_size == 32 &&
+        expert_down_.group_size == 32) {
+        fused_q6_exact_ = true;
+        fused_gate_up_ = fused_q6_gate_up_kernel();
+        fused_down_ = fused_q6_down_kernel();
+    }
     if (fused != nullptr && std::string_view(fused) == "1" &&
         expert_count_ >= experts_per_token_ &&
         ((compact_qmeta_ && experts_per_token_ >= 6 && experts_per_token_ <= 10) ||
@@ -1109,21 +1163,21 @@ MlxArray SparseMoe::forward_experts_decode_profiled(
             const std::array<int, 3> gate_grid{200 * 1024, 1, 1};
             const std::array<int, 3> threadgroup{1024, 1, 1};
             MlxArray hidden = fused_gate_up_->apply(
-                fused_q8_exact_
+                (fused_q8_exact_ || fused_q6_exact_)
                     ? std::span<const MlxArray* const>(q8_gate_inputs)
                     : std::span<const MlxArray* const>(q4_gate_inputs),
                 hidden_shape, input.dtype(), gate_grid, threadgroup);
-            MlxArray down_weights =
-                fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
+            MlxArray down_weights = (fused_q8_exact_ || fused_q6_exact_)
+                ? weights.astype(input.dtype()) : weights.share();
             const MlxArray* down_inputs[]{
                 &hidden,
                 &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
                 &experts, &down_weights};
             const std::vector<int> output_shape{1, 1, 2560};
             const std::array<int, 3> down_grid{
-                fused_q8_exact_ ? 640 * 320 : 320 * 64, 1, 1};
+                (fused_q8_exact_ || fused_q6_exact_) ? 640 * 320 : 320 * 64, 1, 1};
             const std::array<int, 3> down_threadgroup{
-                fused_q8_exact_ ? 320 : 64, 1, 1};
+                (fused_q8_exact_ || fused_q6_exact_) ? 320 : 64, 1, 1};
             expert_sum = fused_down_->apply(
                 down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
         }
@@ -1501,6 +1555,19 @@ MlxArray SparseMoe::forward_verify_impl(
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
         throw std::runtime_error("MoE batch requires shape [1,S,hidden], S=1..1024");
     }
+    if (fused_vq_) {
+        MoePrefillTimings prefill_timings;
+        MlxArray output = forward_prefill_impl(
+            input, timings == nullptr ? nullptr : &prefill_timings);
+        if (timings != nullptr) {
+            timings->routing_ms = prefill_timings.routing_ms;
+            timings->gate_up_ms = prefill_timings.gate_up_ms;
+            timings->down_ms = prefill_timings.down_reduce_ms;
+            timings->shared_expert_ms = prefill_timings.shared_expert_ms;
+            timings->merge_ms = prefill_timings.merge_ms;
+        }
+        return output;
+    }
     const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
     const char* verify_grouped = std::getenv("QWEN38_GROUPED_PREFILL");
     if (timings == nullptr && !compact_qmeta_ &&
@@ -1620,8 +1687,9 @@ MlxArray SparseMoe::forward_verify_impl(
         const auto gate_up_started = Clock::now();
         MlxArray hidden = (fused_q8_exact_
             ? fused_q8_verify_gate_up_kernel()
+            : fused_q6_exact_ ? fused_q6_verify_gate_up_kernel()
             : fused_verify_gate_up_kernel())->apply(
-                fused_q8_exact_
+                (fused_q8_exact_ || fused_q6_exact_)
                     ? std::span<const MlxArray* const>(q8_gate_inputs)
                     : std::span<const MlxArray* const>(q4_gate_inputs),
                 hidden_shape, input.dtype(), gate_grid, gate_threadgroup);
@@ -1629,20 +1697,23 @@ MlxArray SparseMoe::forward_verify_impl(
             hidden.eval();
             timings->gate_up_ms = elapsed_ms(gate_up_started);
         }
-        MlxArray down_weights = fused_q8_exact_ ? weights.astype(input.dtype()) : weights.share();
+        MlxArray down_weights = (fused_q8_exact_ || fused_q6_exact_)
+            ? weights.astype(input.dtype()) : weights.share();
         const MlxArray* down_inputs[]{
             &hidden,
             &expert_down_.weight, &expert_down_.scales, &expert_down_.biases,
             &experts, &down_weights};
         const std::vector<int> output_shape{1, rows, 2560};
         const std::array<int, 3> down_grid{
-            static_cast<int>(rows * (fused_q8_exact_ ? 640 * 320 : 320 * 64)),
+            static_cast<int>(rows * ((fused_q8_exact_ || fused_q6_exact_)
+                ? 640 * 320 : 320 * 64)),
             1, 1};
         const std::array<int, 3> down_threadgroup{
-            fused_q8_exact_ ? 320 : 64, 1, 1};
+            (fused_q8_exact_ || fused_q6_exact_) ? 320 : 64, 1, 1};
         const auto down_started = Clock::now();
         MlxArray routed = (fused_q8_exact_
             ? fused_q8_verify_down_kernel()
+            : fused_q6_exact_ ? fused_q6_verify_down_kernel()
             : fused_verify_down_kernel())->apply(
             down_inputs, output_shape, input.dtype(), down_grid, down_threadgroup);
         if (timings != nullptr) {

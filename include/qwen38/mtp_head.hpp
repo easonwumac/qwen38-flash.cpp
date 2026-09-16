@@ -72,17 +72,20 @@ private:
         MlxArray scales;
         MlxArray biases;
         int bits{0};
+        int group_size{0};
     };
 
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
-        const char* prefix,
-        int bits);
+        const char* prefix);
     [[nodiscard]] MlxArray embed(std::uint32_t token) const;
     [[nodiscard]] MlxArray embed(const MlxArray& token) const;
     [[nodiscard]] MlxArray project(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
+    [[nodiscard]] MlxArray combine_inputs(
+        const MlxArray& target_pre_mixer_streams,
+        const MlxArray& next_tokens) const;
     [[nodiscard]] MlxArray forward_stream(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,
@@ -96,16 +99,17 @@ private:
         MtpDecodeState& state,
         MtpTrace* trace) const;
 
+    bool native_vqlab_;
     std::size_t hidden_size_;
     std::size_t stream_count_;
     std::size_t vocabulary_size_;
-    int group_size_;
     int mtp_bits_;
     float epsilon_;
     QuantizedProjection embedding_;
     QuantizedProjection language_head_;
     QuantizedProjection fc_embedding_;
     QuantizedProjection fc_hidden_;
+    MlxArray fused_fc_;
     MlxArray embedding_norm_;
     MlxArray hidden_norm_;
     DecoderLayer layer_;

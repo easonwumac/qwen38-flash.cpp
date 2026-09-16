@@ -42,6 +42,7 @@ void apply_automatic_runtime_config() {
         {"QWEN38_MTP_EARLY_DEMOTION", "1"},
         {"QWEN38_MTP_DEMOTION", "1"},
         {"QWEN38_Q8_EXACT_MOE", "1"},
+        {"QWEN38_Q6_EXACT_MOE", "1"},
         {"QWEN38_MTP_CUMULATIVE_PROFITABILITY_CACHE", "1"},
         {"QWEN38_EXTEND_PREFIX_CACHE", "1"},
         {"QWEN38_QSA_DECODE_BUDGET", "512"},

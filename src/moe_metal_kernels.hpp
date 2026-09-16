@@ -429,6 +429,219 @@ inline constexpr std::string_view qmeta_decode = R"metal(
     biases[index] = as_type<T>(ushort(pair >> 16));
 )metal";
 
+// Q6/group-32 kernels for the optional VQLab native MTP head. MLX packs each
+// 32-value affine group into six contiguous uint32 words. One SIMD group owns
+// one selected expert row so unpacking, dot products, and BF16 SwiGLU stay in a
+// single dispatch instead of launching ten gather-QMM operations.
+inline constexpr std::string_view gate_up_q6_exact = R"metal(
+    constexpr int K = 2560;
+    constexpr int N = 640;
+    constexpr int GS = 32;
+    constexpr int WORDS_PER_GROUP = 6;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int K_PACKED = K_GROUPS * WORDS_PER_GROUP;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = tid / 32;
+    const uint lane = tid % 32;
+    const uint gsid = threadgroup_position_in_grid.x * 32 + sg;
+    if (gsid >= 10 * N) return;
+    const uint slot = gsid / N;
+    const uint row = gsid % N;
+    const uint expert = experts[slot];
+    const size_t wbase = ((size_t)expert * N + row) * K_PACKED;
+    const size_t gbase = ((size_t)expert * N + row) * K_GROUPS;
+    float gate_acc = 0.0f, up_acc = 0.0f;
+    for (int group = int(lane); group < K_GROUPS; group += 32) {
+        const device uint32_t* gwr = gw + wbase + (size_t)group * WORDS_PER_GROUP;
+        const device uint32_t* uwr = uw + wbase + (size_t)group * WORDS_PER_GROUP;
+        const float sgate = float(gs[gbase + (size_t)group]);
+        const float bgate = float(gb[gbase + (size_t)group]);
+        const float sup = float(us[gbase + (size_t)group]);
+        const float bup = float(ub[gbase + (size_t)group]);
+        const int kbase = group * GS;
+        for (uint i = 0; i < GS; ++i) {
+            const uint bit = i * 6;
+            const uint word = bit >> 5;
+            const uint shift = bit & 31;
+            ulong gate_bits = ulong(gwr[word]);
+            ulong up_bits = ulong(uwr[word]);
+            if (shift > 26) {
+                gate_bits |= ulong(gwr[word + 1]) << 32;
+                up_bits |= ulong(uwr[word + 1]) << 32;
+            }
+            const float xv = float(x[kbase + int(i)]);
+            gate_acc += xv * (float((gate_bits >> shift) & 63ul) * sgate + bgate);
+            up_acc += xv * (float((up_bits >> shift) & 63ul) * sup + bup);
+        }
+    }
+    gate_acc = simd_sum(gate_acc);
+    up_acc = simd_sum(up_acc);
+    if (lane == 0) {
+        const T gt = T(gate_acc);
+        const T ut = T(up_acc);
+        const T sig = T(1.0f / (1.0f + metal::exp(-float(gt))));
+        h[(size_t)slot * N + row] = (gt * sig) * ut;
+    }
+)metal";
+
+inline constexpr std::string_view gate_up_verify_q6_exact = R"metal(
+    constexpr int K = 2560;
+    constexpr int N = 640;
+    constexpr int GS = 32;
+    constexpr int WORDS_PER_GROUP = 6;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int K_PACKED = K_GROUPS * WORDS_PER_GROUP;
+    constexpr int SLOTS = 10;
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint sg = tid / 32;
+    const uint lane = tid % 32;
+    const uint gsid = threadgroup_position_in_grid.x * 32 + sg;
+    const uint batch = gsid / (SLOTS * N);
+    const uint local = gsid % (SLOTS * N);
+    const uint slot = local / N;
+    const uint row = local % N;
+    const uint expert = experts[batch * SLOTS + slot];
+    const device T* xb = x + (size_t)batch * K;
+    const size_t wbase = ((size_t)expert * N + row) * K_PACKED;
+    const size_t gbase = ((size_t)expert * N + row) * K_GROUPS;
+    float gate_acc = 0.0f, up_acc = 0.0f;
+    for (int group = int(lane); group < K_GROUPS; group += 32) {
+        const device uint32_t* gwr = gw + wbase + (size_t)group * WORDS_PER_GROUP;
+        const device uint32_t* uwr = uw + wbase + (size_t)group * WORDS_PER_GROUP;
+        const float sgate = float(gs[gbase + (size_t)group]);
+        const float bgate = float(gb[gbase + (size_t)group]);
+        const float sup = float(us[gbase + (size_t)group]);
+        const float bup = float(ub[gbase + (size_t)group]);
+        const int kbase = group * GS;
+        for (uint i = 0; i < GS; ++i) {
+            const uint bit = i * 6;
+            const uint word = bit >> 5;
+            const uint shift = bit & 31;
+            ulong gate_bits = ulong(gwr[word]);
+            ulong up_bits = ulong(uwr[word]);
+            if (shift > 26) {
+                gate_bits |= ulong(gwr[word + 1]) << 32;
+                up_bits |= ulong(uwr[word + 1]) << 32;
+            }
+            const float xv = float(xb[kbase + int(i)]);
+            gate_acc += xv * (float((gate_bits >> shift) & 63ul) * sgate + bgate);
+            up_acc += xv * (float((up_bits >> shift) & 63ul) * sup + bup);
+        }
+    }
+    gate_acc = simd_sum(gate_acc);
+    up_acc = simd_sum(up_acc);
+    if (lane == 0) {
+        const T gt = T(gate_acc);
+        const T ut = T(up_acc);
+        const T sig = T(1.0f / (1.0f + metal::exp(-float(gt))));
+        h[((size_t)batch * SLOTS + slot) * N + row] = (gt * sig) * ut;
+    }
+)metal";
+
+inline constexpr std::string_view down_q6_exact = R"metal(
+    constexpr int K = 640;
+    constexpr int N = 2560;
+    constexpr int GS = 32;
+    constexpr int WORDS_PER_GROUP = 6;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int K_PACKED = K_GROUPS * WORDS_PER_GROUP;
+    constexpr int TOPK = 10;
+    constexpr int ROWS = 4;
+    const uint lane = thread_index_in_simdgroup;
+    const uint slot = simdgroup_index_in_threadgroup;
+    const uint tile = threadgroup_position_in_grid.x;
+    const uint expert = experts[slot];
+    threadgroup T slot_values[TOPK * ROWS];
+    for (uint r = 0; r < ROWS; ++r) {
+        const uint n = tile * ROWS + r;
+        const size_t wbase = ((size_t)expert * N + n) * K_PACKED;
+        const size_t gbase = ((size_t)expert * N + n) * K_GROUPS;
+        const size_t xbase = (size_t)slot * K;
+        float acc = 0.0f;
+        if (lane < K_GROUPS) {
+            const device uint32_t* wr = dw + wbase + (size_t)lane * WORDS_PER_GROUP;
+            const float scale = float(ds[gbase + lane]);
+            const float bias = float(db[gbase + lane]);
+            const int kbase = int(lane) * GS;
+            for (uint i = 0; i < GS; ++i) {
+                const uint bit = i * 6;
+                const uint word = bit >> 5;
+                const uint shift = bit & 31;
+                ulong bits = ulong(wr[word]);
+                if (shift > 26) bits |= ulong(wr[word + 1]) << 32;
+                acc += float(h[xbase + kbase + int(i)]) *
+                    (float((bits >> shift) & 63ul) * scale + bias);
+            }
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) slot_values[slot * ROWS + r] = T(acc);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0 && lane < ROWS) {
+        const T p0 = slot_values[0 * ROWS + lane] * rw[0];
+        const T p8 = slot_values[8 * ROWS + lane] * rw[8];
+        const T p1 = slot_values[1 * ROWS + lane] * rw[1];
+        const T p9 = slot_values[9 * ROWS + lane] * rw[9];
+        T total = (p8 + p0) + (p9 + p1);
+        for (uint s = 2; s < 8; ++s) total = slot_values[s * ROWS + lane] * rw[s] + total;
+        y[(size_t)tile * ROWS + lane] = total;
+    }
+)metal";
+
+inline constexpr std::string_view down_verify_q6_exact = R"metal(
+    constexpr int K = 640;
+    constexpr int N = 2560;
+    constexpr int GS = 32;
+    constexpr int WORDS_PER_GROUP = 6;
+    constexpr int K_GROUPS = K / GS;
+    constexpr int K_PACKED = K_GROUPS * WORDS_PER_GROUP;
+    constexpr int TOPK = 10;
+    constexpr int ROWS = 4;
+    constexpr int TILES = N / ROWS;
+    const uint lane = thread_index_in_simdgroup;
+    const uint slot = simdgroup_index_in_threadgroup;
+    const uint group = threadgroup_position_in_grid.x;
+    const uint batch = group / TILES;
+    const uint tile = group % TILES;
+    const uint expert = experts[batch * TOPK + slot];
+    threadgroup T slot_values[TOPK * ROWS];
+    for (uint r = 0; r < ROWS; ++r) {
+        const uint n = tile * ROWS + r;
+        const size_t wbase = ((size_t)expert * N + n) * K_PACKED;
+        const size_t gbase = ((size_t)expert * N + n) * K_GROUPS;
+        const size_t xbase = ((size_t)batch * TOPK + slot) * K;
+        float acc = 0.0f;
+        if (lane < K_GROUPS) {
+            const device uint32_t* wr = dw + wbase + (size_t)lane * WORDS_PER_GROUP;
+            const float scale = float(ds[gbase + lane]);
+            const float bias = float(db[gbase + lane]);
+            const int kbase = int(lane) * GS;
+            for (uint i = 0; i < GS; ++i) {
+                const uint bit = i * 6;
+                const uint word = bit >> 5;
+                const uint shift = bit & 31;
+                ulong bits = ulong(wr[word]);
+                if (shift > 26) bits |= ulong(wr[word + 1]) << 32;
+                acc += float(h[xbase + kbase + int(i)]) *
+                    (float((bits >> shift) & 63ul) * scale + bias);
+            }
+        }
+        acc = simd_sum(acc);
+        if (lane == 0) slot_values[slot * ROWS + r] = T(acc);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (slot == 0 && lane < ROWS) {
+        const device T* scores = rw + (size_t)batch * TOPK;
+        const T p0 = slot_values[0 * ROWS + lane] * scores[0];
+        const T p8 = slot_values[8 * ROWS + lane] * scores[8];
+        const T p1 = slot_values[1 * ROWS + lane] * scores[1];
+        const T p9 = slot_values[9 * ROWS + lane] * scores[9];
+        T total = (p8 + p0) + (p9 + p1);
+        for (uint s = 2; s < 8; ++s) total = slot_values[s * ROWS + lane] * scores[s] + total;
+        y[(size_t)batch * N + (size_t)tile * ROWS + lane] = total;
+    }
+)metal";
+
 // Portions of the Q8 kernels below are derived from mlx-serve,
 // Copyright (c) 2026 David Dalcu, under the MIT license. They reproduce its gather-QMV
 // accumulation and BF16 SwiGLU rounding order for the fixed Qwen3.8 MTP
