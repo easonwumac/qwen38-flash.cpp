@@ -613,8 +613,8 @@ MlxArray GatedDeltaNet::forward_prefill(
     materialize_rollback(state);
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 2 ||
-        input_shape[1] > 1024) {
-        throw std::runtime_error("GatedDeltaNet prefill requires shape [1,S,hidden], S=2..1024");
+        input_shape[1] > 2048) {
+        throw std::runtime_error("GatedDeltaNet prefill requires shape [1,S,hidden], S=2..2048");
     }
     const char* enabled = std::getenv("QWEN38_GDN_METAL_PREFILL");
     if (enabled == nullptr || std::string_view(enabled) != "1") {

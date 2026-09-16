@@ -254,9 +254,9 @@ MlxArray QwenModel::prefill_chunk_batch(
 ModelPrefillChunk QwenModel::begin_prefill_chunk_batch(
     const std::span<const std::uint32_t> tokens,
     const ModelDecodeState& state) const {
-    constexpr std::size_t max_prefill_rows = 1024;
+    constexpr std::size_t max_prefill_rows = 2048;
     if (tokens.empty() || tokens.size() > max_prefill_rows) {
-        throw std::runtime_error("prefill chunk must contain 1 to 1024 tokens");
+        throw std::runtime_error("prefill chunk must contain 1 to 2048 tokens");
     }
     if (state.layers.size() != layers_.size()) {
         throw std::runtime_error("model state layer count mismatch");

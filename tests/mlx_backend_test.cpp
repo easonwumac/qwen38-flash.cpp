@@ -208,7 +208,7 @@ int main() {
                 return 1;
             }
         }
-        for (const std::size_t invalid_width : {std::size_t{0}, std::size_t{1025}}) {
+        for (const std::size_t invalid_width : {std::size_t{0}, std::size_t{2049}}) {
             bool rejected = false;
             try {
                 const std::vector<std::uint32_t> token_ids(invalid_width, 0);

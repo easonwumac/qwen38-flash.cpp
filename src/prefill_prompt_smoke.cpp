@@ -91,8 +91,8 @@ int main(int argc, char** argv) {
         static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
         const std::filesystem::path model_path = argv[1];
         const std::size_t chunk_rows = std::stoul(argv[3]);
-        if (chunk_rows == 0 || chunk_rows > 1024) {
-            throw std::runtime_error("CHUNK_ROWS must be between 1 and 1024");
+        if (chunk_rows == 0 || chunk_rows > 2048) {
+            throw std::runtime_error("CHUNK_ROWS must be between 1 and 2048");
         }
         const std::size_t serial_tail = argc >= 5 ? std::stoul(argv[4]) : 0;
         const std::uint32_t expected = argc == 6

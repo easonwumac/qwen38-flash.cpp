@@ -412,8 +412,8 @@ NativeEngine::NativeEngine(
     if (options_.max_generation_tokens == 0) {
         throw std::runtime_error("generation token limit must be positive");
     }
-    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 1024) {
-        throw std::runtime_error("prefill chunk rows must be between 1 and 1024");
+    if (options_.prefill_chunk_rows == 0 || options_.prefill_chunk_rows > 2048) {
+        throw std::runtime_error("prefill chunk rows must be between 1 and 2048");
     }
     const char* metal_prefill = std::getenv("QWEN38_GDN_METAL_PREFILL");
     if (options_.prefill_chunk_rows > 64 &&

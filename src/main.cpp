@@ -72,7 +72,7 @@ std::size_t parse_prefill_chunk(const std::string& value) {
     std::size_t parsed = 0;
     const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
-        parsed == 0 || parsed > 1024) {
+        parsed == 0 || parsed > 2048) {
         throw std::runtime_error("invalid prefill chunk: " + value);
     }
     return parsed;
@@ -102,6 +102,7 @@ int main(int argc, char** argv) {
         std::optional<std::size_t> mtp_depth = std::nullopt;
         bool mtp_depth_explicit = false;
         std::size_t prefill_chunk_rows = 1024;
+        bool prefill_chunk_explicit = false;
         bool adaptive_prefill_chunks = true;
         std::size_t prefix_cache_max_tokens = 8192;
         std::size_t qmeta_cache_max_prompt_tokens = 32768;
@@ -157,6 +158,7 @@ int main(int argc, char** argv) {
                 mtp_depth_explicit = true;
             } else if (argument == "--prefill-chunk") {
                 prefill_chunk_rows = parse_prefill_chunk(argv[++i]);
+                prefill_chunk_explicit = true;
             } else if (argument == "--prefill-chunk-fixed") {
                 adaptive_prefill_chunks = false;
             } else if (argument == "--prefix-cache-tokens") {
@@ -293,6 +295,17 @@ int main(int argc, char** argv) {
             runtime.begin_loading(*model_path);
             try {
 #ifdef QWEN38_HAS_INFERENCE
+                const qwen38::ModelManifest manifest =
+                    qwen38::ModelManifest::load(*model_path);
+                const bool packed_vq = manifest.vector_quantization_for(
+                    "language_model.model.layers.2.mlp.switch_mlp.gate_proj") != nullptr;
+                if (!prefill_chunk_explicit && packed_vq) {
+                    prefill_chunk_rows = 2048;
+                } else if (prefill_chunk_explicit && prefill_chunk_rows > 1024 &&
+                    !packed_vq) {
+                    throw std::runtime_error(
+                        "prefill chunks above 1024 require a packed-VQ checkpoint");
+                }
                 qwen38::NativeEngineOptions engine_options;
                 engine_options.max_generation_tokens = max_generation_tokens;
                 engine_options.mtp_depth = mtp_depth;

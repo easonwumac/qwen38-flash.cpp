@@ -24,8 +24,8 @@ MlxArray embed_token_batch(
     const std::size_t hidden_size,
     const int group_size,
     const int bits) {
-    if (tokens.empty() || tokens.size() > 1024) {
-        throw std::runtime_error("token embedding batch must contain 1 to 1024 ids");
+    if (tokens.empty() || tokens.size() > 2048) {
+        throw std::runtime_error("token embedding batch must contain 1 to 2048 ids");
     }
     std::vector<std::int32_t> values;
     values.reserve(tokens.size());

@@ -1591,8 +1591,8 @@ MlxArray SparseMoe::forward_prefill_impl(
         return std::chrono::duration<double, std::milli>(Clock::now() - started).count();
     };
     const std::vector<int> shape = input.shape();
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
-        throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..1024");
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 2048) {
+        throw std::runtime_error("MoE prefill requires shape [1,S,hidden], S=1..2048");
     }
     if (fused_vq_) {
         const int rows = shape[1];

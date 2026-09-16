@@ -94,8 +94,8 @@ int main(int argc, char** argv) {
         if (profile_decode && rows != 1) {
             throw std::runtime_error("decode component profiling requires ROWS=1");
         }
-        if (rows == 0 || rows > 1024) {
-            throw std::runtime_error("PREFILL_ROWS must be between 1 and 1024");
+        if (rows == 0 || rows > 2048) {
+            throw std::runtime_error("PREFILL_ROWS must be between 1 and 2048");
         }
         if (rows > 1 && std::getenv("QWEN38_MEMORY_GUARD") == nullptr) {
             throw std::runtime_error(

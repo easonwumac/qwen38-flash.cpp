@@ -5,80 +5,40 @@ Flash Next on Apple Silicon. It owns model loading, tokenization, the complete
 48-layer forward pass, hybrid attention state, speculative verification,
 caching, HTTP serving, streaming, and runtime observability.
 
-The server has one automatic production configuration. It selects the validated
-Q8 KV, sparse-attention, prefill, MTP, continuous-batching, and persistent-Metal
-paths from the supplied model assets; there are no tuning profiles to choose.
-When an exact lossless16 metadata sidecar is present, it is selected
-automatically to keep the target plus Q8 drafter below the memory ceiling.
+The server has one automatic production configuration. For the VQ target it
+selects the validated sparse-attention, prefill, continuous-batching, and
+Metal paths from the supplied assets; there are no tuning profiles to choose.
+MTP stays off because this checkpoint does not contain drafter tensors.
 
-## Final retained model
+## Current target model
 
-- Package: `Qwen3.8-Flash-Next-REAP-288-MTP-Q8`
-- Target: REAP-288 affine Q4/group-64, exact top-10 routing
-- Optional drafter: Q8/group-64 layer-47 MTP sidecar
+- Package: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`
+- Target: native packed-14 VQ routed weights, original d2/K256 and d8/K16384
+  geometry, exact top-10 routing
+- PLE: the checkpoint's bundled VQ n-gram shards, memory mapped on demand
 - Context declared by the model: 262,144 tokens
-- Largest safe retrieval run proven on the 64 GB test Mac: 196,675 tokens
-- N-gram storage: Q4 29.8 GiB, affine Q8 53.64 GiB, or BF16 95.37 GiB
-  row-major AoS file read from SSD on demand
-- Quantization metadata: lossless16 normally; lossless13 capacity sidecar
-- Compute runtime: MLX 0.32.2 through a pinned MLX-C ABI
+- MTP: disabled; the package declares one layer but contains no MTP tensors
+- Automatic prefill: 2,048-row chunks through 32K, then smaller bounded chunks
+- Runtime: C++20/Metal with MLX 0.32.2 through a pinned MLX-C ABI
 
-The production package does not need the original safetensors n-gram table.
-`ngram_table.bin.aos`, `ngram_table.q8.aos`, and `ngram_table.bf16.aos` store
-each requested row contiguously, so one bounded `pread` retrieves it without
-loading the table into RAM.
+REAP-288, Niwaki, and Qwen3.8-27B results below are retained only as historical
+quality, capacity, and performance references. They are not production targets,
+fallback checkpoints, or dependencies of the VQ path.
 
-### Niwaki fast path
-
-The engine also loads the 99B and 113B Niwaki MLX checkpoints natively:
-mixed Q3/Q4/Q8 quantization, checkpoint-declared shared-only layers, BF16 output-healing maps,
-MLX/PyTorch PLE convolution layouts, and Niwaki's paired Q2 PLE shards are
-detected from the checkpoint. The paired table is dequantized directly from the
-original memory-mapped model shards, without conversion or a second weight copy.
-The retained tokenizer is still required because the Niwaki packages omit
-`merges.txt`:
-
-```bash
-./build/qwen38-server --model "$NIWAKI_MODEL_DIR" \
-  --tokenizer-dir "$REAP_MODEL_DIR" \
-  --max-generation-tokens 4096
-```
-
-`--ngram-table-dir "$REAP_MODEL_DIR"` remains an explicit higher-precision Q4
-PLE override for controlled comparisons.
-
-Niwaki contains no MTP tensors. When the supplied n-gram/tokenizer package also
-contains the compatible retained REAP Q8 drafter, the server detects it and
-uses depth 4 automatically. Profitable requests stay on batched MTP; after two
-zero-accept rounds an unprofitable request imports its committed state into the
-persistent Metal backend and continues there. `--mtp-depth off` remains an
-explicit resource-limit override when the drafter allocation is undesirable.
-
-Niwaki's dense BF16 healing matrices are executed as deterministic rank-64
-deltas. The persistent Metal path directly reuses MLX's tensor allocations, so
-prefill and decode no longer maintain or page between duplicate weight
-resources. Direct buffers are released during prefill, rebuilt from the already
-materialized allocations at handoff, and warmed before streaming begins.
-
-On the M5 Pro 64 GiB validation Mac, the 131,140-token needle recovered
-`V1-NEBULA-128` at **610.74 PP tok/s and 41.60 decode tok/s** without MTP. The
-observed peak was 42,204,886,920 bytes (**39.30 GiB**). This is the retained fast
-configuration for Niwaki; the REAP-288 checkpoint remains the higher-quality
-reference. Full conditions are in the
-[bring-up](docs/niwaki-99b-bringup.md) and
-[low-rank map report](docs/niwaki-lowrank-maps.md).
-
-## What improved
+## What improved for VQ
 
 - **Layer-major batched execution:** wide prompt and verifier rows pass through
   each layer together, removing token-by-token dispatch and synchronization.
+- **Segmented packed-VQ GEMM:** the Metal kernel shares decoded VQ tiles across
+  routed prompt rows instead of repeating scalar matrix-vector work.
+- **Automatic 2,048-row prefill:** packed-VQ checkpoints use the larger verified
+  chunk through 32K; non-VQ checkpoints and explicit resource limits keep their
+  prior bounds.
 - **Decode-priority refill:** a full-width refill prefill yields at existing
   eight-layer evaluation barriers, so it preserves prompt arithmetic while
   active decode rows continue between layer groups.
-- **Fused decode kernels:** Q4 routed MoE, device-side routing, Hyper-Connection,
+- **Fused decode kernels:** routed MoE, device-side routing, Hyper-Connection,
   and Gated DeltaNet work are fused around the actual decode-width hot path.
-- **Grouped prefill:** 1,024-row grouped QMM/SDPA execution raises exact 8K
-  prefill above 750 tokens/s while adaptive chunks bound long-context memory.
 - **Bounded graph lifetime:** temporary compact metadata survives only to the
   existing eight-layer barrier, improving scheduling without retaining every
   decoded metadata bank for the whole request.
@@ -104,12 +64,31 @@ reference. Full conditions are in the
   reasoning budget or a premature EOS is reached before `</think>`, the engine
   inserts Qwen's early-stop instruction and continues from the same KV state.
 
-## Final evaluation
+## Current VQ evaluation
+
+Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified
+memory, macOS 26.5 (25F71), AC power, no recorded thermal or performance
+warning, temperature 0, thinking off, one guarded server process, exact top-10,
+and MTP off.
+
+| Workload | Configuration | Result |
+|---|---|---:|
+| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; three independent starts; fixed first token | 18.5605 / 18.0735 / 18.1852 s; median **409.9 PP tok/s**; **38.3--38.4 GiB** peak |
+| Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; one directional run | **27.85 tok/s**; **36.3 GiB** peak |
+| IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
+
+The 2,048-row VQ prefill path raises the same 7,454-token workload from a
+375.3 PP tok/s median to 409.9 PP tok/s (**+9.2%**) while remaining below the
+40 GiB product ceiling. These are current milestones, not claims that the
+600 PP tok/s or 40 tok/s decode targets have been reached.
+
+## Historical reference evaluation
 
 Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified
 memory, macOS 26.5 (25F71), AC power, no recorded thermal or performance
 warning, temperature 0, thinking off, one server process, and guarded memory
-measurement. The checkpoint is the exact REAP-288 Q4/group-64 target above.
+measurement. Unless a row says otherwise, the checkpoint is the historical
+REAP-288 Q4/group-64 reference.
 Long-context distributions below use independent cold server starts.
 
 | Workload | Configuration | Result |
@@ -172,23 +151,15 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 ## Known limits
 
-- The Niwaki persistent path reaches the 40 tok/s no-MTP long-context gate, but
-  still needs a mixed-corpus quality comparison and repeated cold-run distribution.
-- Exact 8K prefill exceeds 600 PP tok/s, but 32K remains around 572 PP tok/s.
-- The validated 128K Q8 recipe exceeds 500 PP tok/s, but its four-row QSA
-  selection is an explicit long-context approximation and remains opt-in.
-- The 192K capacity result predates the shared-row QSA recipe; it has not yet
-  been requalified with this faster policy.
-- Automatic MTP can still lose on an individual prompt, so the runtime probes
-  acceptance and switches losing requests to persistent Metal.
-- Persistent Metal handles serial continuation after MTP fallback. Moving the
-  profitable batched verifier itself onto that backend is still required for a
-  stable 60 tok/s result at 128K.
-- The external Q8 drafter now works with Niwaki and exceeds 60 tok/s at 16K,
-  but the retained 128K directional result is 55.34 tok/s. A 60 tok/s 128K
-  product claim is therefore not made.
-- The Q8 drafter increases admission pressure. `--mtp-depth off` is retained as
-  a resource-limit override for smaller machines.
+- VQ currently reaches 409.9 PP tok/s on the retained 7,454-token prompt and
+  27.85 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
+  open.
+- VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
+  results must not be presented as VQ performance.
+- The VQ package has no usable MTP tensors. An external REAP drafter was slower
+  in the VQ verifier and is not a production dependency or 60 tok/s solution.
+- The three-case IFBench gate is a fast regression signal, not a full quality
+  estimate. Larger official scoring remains required before a release claim.
 - The executor automatically coalesces up to four ordinary requests into one
   exact-arithmetic continuous decode batch and refills completed slots from the
   queue. Thinking requests and batches above the 131,072-token aggregate
@@ -240,11 +211,11 @@ python3 devtools/memory_guard.py --min-available-gib 8 -- \
   --max-generation-tokens 32768 --mtp-depth off
 ```
 
-The automatic policy uses a compatible drafter only while acceptance repays
-verification. `--mtp-depth off` is a resource-limit override for environments
-that cannot afford its allocation.
+The VQ package has no MTP tensors, so the automatic path runs without a drafter.
+`--mtp-depth off` remains an explicit resource-limit override.
 
-The validated 128K recipe is:
+The following 128K recipe is retained for historical REAP comparison only; it
+has not been qualified for VQ:
 
 ```bash
 QWEN38_QSA_RAW_WINDOW=64 QWEN38_RESIDENT_EXPERT_RANGE= \

@@ -76,8 +76,8 @@ void apply_runtime_profile(const std::string_view profile) {
 std::size_t select_prefill_chunk_rows(
     const std::size_t configured_rows,
     const std::size_t prompt_rows) {
-    if (configured_rows == 0 || configured_rows > 1024) {
-        throw std::runtime_error("prefill chunk rows must be between 1 and 1024");
+    if (configured_rows == 0 || configured_rows > 2048) {
+        throw std::runtime_error("prefill chunk rows must be between 1 and 2048");
     }
     if (configured_rows <= 256 || prompt_rows <= 32768) return configured_rows;
     if (configured_rows <= 512 && prompt_rows <= 66048) return configured_rows;
