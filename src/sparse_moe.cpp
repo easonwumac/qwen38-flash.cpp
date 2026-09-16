@@ -1664,9 +1664,10 @@ MlxArray SparseMoe::forward_prefill_impl(
             expert_gate_.input_dimension == expert_up_.input_dimension &&
             expert_gate_.output_dimension == expert_up_.output_dimension;
         if (use_gemmseg) {
-            // Build one stable expert-sorted route plan and reuse it for
-            // gate/up/down. The measured crossover is between 96 and 128
-            // token rows, so dispatch selection remains automatic.
+            // Build a stable expert-sorted route plan. Wide batches put complete
+            // 24-row tiles and <=16-row tails in separately specialized gate/up
+            // dispatches, then restore one combined order for exact down reduction.
+            // The measured segmented crossover remains between 96 and 128 rows.
             const auto expert_values = experts.astype(MLX_FLOAT32).to_float32();
             const int route_count = checked_int(expert_values.size(), "VQ routes");
             std::vector<std::int32_t> order(static_cast<std::size_t>(route_count));
@@ -1675,19 +1676,30 @@ MlxArray SparseMoe::forward_prefill_impl(
                 return expert_values[static_cast<std::size_t>(left)] <
                     expert_values[static_cast<std::size_t>(right)];
             });
-            std::vector<std::int32_t> source_rows(static_cast<std::size_t>(route_count));
-            std::vector<std::int32_t> identity(static_cast<std::size_t>(route_count));
+            struct RouteGroupPlan {
+                int tile_rows{};
+                std::vector<std::int32_t> order;
+                std::vector<std::int32_t> source_rows;
+                std::vector<std::int32_t> metadata;
+            };
+            RouteGroupPlan primary{.tile_rows = rows >= 768 ? 24 : 16};
+            RouteGroupPlan tail{.tile_rows = 16};
             std::vector<std::int32_t> inverse_order(static_cast<std::size_t>(route_count));
-            std::vector<std::int32_t> tile_metadata;
-            const int route_tile_rows = rows >= 768 ? 24 : 16;
-            tile_metadata.reserve(
-                static_cast<std::size_t>(route_count / route_tile_rows + 3) * 3);
-            for (int sorted = 0; sorted < route_count; ++sorted) {
-                const int original = order[static_cast<std::size_t>(sorted)];
-                source_rows[static_cast<std::size_t>(sorted)] = original / slots;
-                identity[static_cast<std::size_t>(sorted)] = sorted;
-                inverse_order[static_cast<std::size_t>(original)] = sorted;
-            }
+            primary.order.reserve(static_cast<std::size_t>(route_count));
+            tail.order.reserve(static_cast<std::size_t>(route_count / 2));
+            const auto append_routes = [&](RouteGroupPlan& plan, const std::int32_t expert,
+                                           const int sorted_begin, const int count) {
+                if (count == 0) return;
+                const int local_begin = static_cast<int>(plan.order.size());
+                for (int offset = 0; offset < count; ++offset) {
+                    plan.order.push_back(order[static_cast<std::size_t>(sorted_begin + offset)]);
+                }
+                for (int tile = 0; tile < count; tile += plan.tile_rows) {
+                    plan.metadata.push_back(expert);
+                    plan.metadata.push_back(local_begin + tile);
+                    plan.metadata.push_back(std::min(plan.tile_rows, count - tile));
+                }
+            };
             int begin = 0;
             while (begin < route_count) {
                 const auto expert = static_cast<std::int32_t>(
@@ -1697,39 +1709,81 @@ MlxArray SparseMoe::forward_prefill_impl(
                     expert_values[static_cast<std::size_t>(order[static_cast<std::size_t>(end)])]) == expert) {
                     ++end;
                 }
-                for (int tile = begin; tile < end; tile += route_tile_rows) {
-                    tile_metadata.push_back(expert);
-                    tile_metadata.push_back(tile);
-                    tile_metadata.push_back(std::min(route_tile_rows, end - tile));
+                const int count = end - begin;
+                if (rows >= 768) {
+                    const int primary_count = (count / 24) * 24;
+                    const int remainder = count - primary_count;
+                    append_routes(primary, expert, begin,
+                        remainder > 16 ? count : primary_count);
+                    if (remainder > 0 && remainder <= 16) {
+                        append_routes(tail, expert, begin + primary_count, remainder);
+                    }
+                } else {
+                    append_routes(primary, expert, begin, count);
                 }
                 begin = end;
             }
-            const int tile_count = checked_int(tile_metadata.size() / 3, "VQ route tiles");
-            const MlxArray source_rows_array = MlxArray::from_int32(
-                source_rows, std::vector<int>{route_count});
-            const MlxArray identity_array = MlxArray::from_int32(
-                identity, std::vector<int>{route_count});
+            if (primary.order.empty()) {
+                primary = std::move(tail);
+                tail = RouteGroupPlan{.tile_rows = 16};
+            }
+            const auto finalize_plan = [&](RouteGroupPlan& plan, const int combined_begin) {
+                plan.source_rows.resize(plan.order.size());
+                for (std::size_t local = 0; local < plan.order.size(); ++local) {
+                    const int original = plan.order[local];
+                    plan.source_rows[local] = original / slots;
+                    inverse_order[static_cast<std::size_t>(original)] =
+                        combined_begin + static_cast<std::int32_t>(local);
+                }
+            };
+            finalize_plan(primary, 0);
+            finalize_plan(tail, checked_int(primary.order.size(), "VQ primary routes"));
+            const int primary_count = checked_int(primary.order.size(), "VQ primary routes");
+            const int primary_tiles = checked_int(primary.metadata.size() / 3,
+                "VQ primary tiles");
+            const int tail_count = static_cast<int>(tail.order.size());
+            const int tail_tiles = static_cast<int>(tail.metadata.size() / 3);
+            const MlxArray primary_source_rows = MlxArray::from_int32(
+                primary.source_rows, std::vector<int>{primary_count});
+            const MlxArray primary_metadata = MlxArray::from_int32(
+                primary.metadata, std::vector<int>{primary_tiles * 3});
+            std::vector<std::int32_t> combined_identity(static_cast<std::size_t>(route_count));
+            std::iota(combined_identity.begin(), combined_identity.end(), 0);
+            std::vector<std::int32_t> combined_metadata = primary.metadata;
+            combined_metadata.reserve(primary.metadata.size() + tail.metadata.size());
+            for (std::size_t index = 0; index < tail.metadata.size(); index += 3) {
+                combined_metadata.push_back(tail.metadata[index]);
+                combined_metadata.push_back(tail.metadata[index + 1] + primary_count);
+                combined_metadata.push_back(tail.metadata[index + 2]);
+            }
+            const int combined_tiles = primary_tiles + tail_tiles;
+            const MlxArray combined_identity_array = MlxArray::from_int32(
+                combined_identity, std::vector<int>{route_count});
+            const MlxArray combined_metadata_array = MlxArray::from_int32(
+                combined_metadata, std::vector<int>{combined_tiles * 3});
             const MlxArray inverse_order_array = MlxArray::from_int32(
                 inverse_order, std::vector<int>{route_count});
-            const MlxArray metadata_array = MlxArray::from_int32(
-                tile_metadata, std::vector<int>{tile_count * 3});
             const MlxArray input_half = input.astype(MLX_FLOAT16).reshape(
                 std::vector<int>{rows, shape[2]});
             constexpr int output_tile_rows = 32;
             const auto project_gemmseg = [&](
                                                  const MlxArray& source,
                                                  const MlxArray& row_map,
+                                                 const MlxArray& metadata,
+                                                 const int group_route_count,
+                                                 const int group_tile_count,
+                                                 const int group_tile_rows,
                                                  const QuantizedProjection& projection) {
                 const std::array<MlxMetalDtypeTemplate, 0> dtype_templates{};
                 const std::array<MlxMetalIntTemplate, 5> int_templates{{
                     {.name = "OUT", .value = projection.output_dimension},
                     {.name = "IN", .value = projection.input_dimension},
                     {.name = "NGRP", .value = projection.input_dimension / 64},
-                    {.name = "RTILE", .value = route_tile_rows},
+                    {.name = "RTILE", .value = group_tile_rows},
                     {.name = "OTILE", .value = output_tile_rows},
                 }};
                 const std::array<MlxMetalOutputSpec, 1> output_specs{{
-                    {.shape = {route_count, projection.output_dimension},
+                    {.shape = {group_route_count, projection.output_dimension},
                      .dtype = MLX_FLOAT16},
                 }};
                 const int output_tiles =
@@ -1737,52 +1791,80 @@ MlxArray SparseMoe::forward_prefill_impl(
                     output_tile_rows;
                 const std::array<int, 3> grid{
                     output_tiles * 32,
-                    tile_count * (output_tile_rows / 8), 1};
+                    group_tile_count * (output_tile_rows / 8), 1};
                 const std::array<int, 3> threadgroup{
                     32, output_tile_rows / 8, 1};
                 const MlxArray* projection_inputs[]{
                     &projection.weight, &projection.codebook, &projection.scales,
-                    &source, &row_map, &metadata_array};
+                    &source, &row_map, &metadata};
                 return std::move(vq_gemmseg_d8_kernel()->apply(
                     projection_inputs, output_specs, grid, threadgroup,
                     dtype_templates, int_templates).front());
             };
 
             const auto gate_started = Clock::now();
-            const std::array<MlxMetalDtypeTemplate, 0> gate_dtype_templates{};
-            const std::array<MlxMetalIntTemplate, 5> gate_int_templates{{
-                {.name = "OUT", .value = expert_gate_.output_dimension},
-                {.name = "IN", .value = expert_gate_.input_dimension},
-                {.name = "NGRP", .value = expert_gate_.input_dimension / 64},
-                {.name = "RTILE", .value = route_tile_rows},
-                {.name = "OTILE", .value = output_tile_rows},
-            }};
-            const std::array<MlxMetalOutputSpec, 1> gate_output_specs{{
-                {.shape = {route_count, expert_gate_.output_dimension},
-                 .dtype = MLX_FLOAT16},
-            }};
             const int gate_output_tiles =
                 (expert_gate_.output_dimension + output_tile_rows - 1) /
                 output_tile_rows;
-            const std::array<int, 3> gate_grid{
-                gate_output_tiles * 32,
-                tile_count * (output_tile_rows / 8), 1};
-            const std::array<int, 3> gate_threadgroup{
-                32, output_tile_rows / 8, 1};
-            const MlxArray* gate_inputs[]{
-                &expert_gate_.weight, &expert_gate_.codebook, &expert_gate_.scales,
-                &expert_up_.weight, &expert_up_.codebook, &expert_up_.scales,
-                &input_half, &source_rows_array, &metadata_array};
-            auto gate_outputs = vq_gemmseg_gate_up_d8_kernel()->apply(
-                gate_inputs, gate_output_specs, gate_grid, gate_threadgroup,
-                gate_dtype_templates, gate_int_templates);
-            MlxArray hidden = std::move(gate_outputs[0]);
+            const auto gate_group = [&](const MlxArray& group_source_rows,
+                                        const MlxArray& group_metadata,
+                                        const int group_route_count,
+                                        const int group_tile_count,
+                                        const int group_tile_rows) {
+                const std::array<MlxMetalDtypeTemplate, 0> gate_dtype_templates{};
+                const std::array<MlxMetalIntTemplate, 5> gate_int_templates{{
+                    {.name = "OUT", .value = expert_gate_.output_dimension},
+                    {.name = "IN", .value = expert_gate_.input_dimension},
+                    {.name = "NGRP", .value = expert_gate_.input_dimension / 64},
+                    {.name = "RTILE", .value = group_tile_rows},
+                    {.name = "OTILE", .value = output_tile_rows},
+                }};
+                const std::array<MlxMetalOutputSpec, 1> gate_output_specs{{
+                    {.shape = {group_route_count, expert_gate_.output_dimension},
+                     .dtype = MLX_FLOAT16},
+                }};
+                const std::array<int, 3> gate_grid{
+                    gate_output_tiles * 32,
+                    group_tile_count * (output_tile_rows / 8), 1};
+                const std::array<int, 3> gate_threadgroup{
+                    32, output_tile_rows / 8, 1};
+                const MlxArray* gate_inputs[]{
+                    &expert_gate_.weight, &expert_gate_.codebook, &expert_gate_.scales,
+                    &expert_up_.weight, &expert_up_.codebook, &expert_up_.scales,
+                    &input_half, &group_source_rows, &group_metadata};
+                return std::move(vq_gemmseg_gate_up_d8_kernel()->apply(
+                    gate_inputs, gate_output_specs, gate_grid, gate_threadgroup,
+                    gate_dtype_templates, gate_int_templates).front());
+            };
+            MlxArray primary_hidden = gate_group(
+                primary_source_rows, primary_metadata, primary_count,
+                primary_tiles, primary.tile_rows);
+            MlxArray tail_hidden;
+            MlxArray tail_source_rows;
+            MlxArray tail_metadata;
+            if (tail_count > 0) {
+                tail_source_rows = MlxArray::from_int32(
+                    tail.source_rows, std::vector<int>{tail_count});
+                tail_metadata = MlxArray::from_int32(
+                    tail.metadata, std::vector<int>{tail_tiles * 3});
+                tail_hidden = gate_group(
+                    tail_source_rows, tail_metadata, tail_count, tail_tiles, tail.tile_rows);
+            }
             if (timings != nullptr) {
-                hidden.eval();
+                primary_hidden.eval();
+                if (tail_count > 0) tail_hidden.eval();
                 timings->gate_up_ms = elapsed_ms(gate_started);
             }
             const auto down_started = Clock::now();
-            MlxArray projected = project_gemmseg(hidden, identity_array, expert_down_);
+            MlxArray hidden = primary_hidden.share();
+            if (tail_count > 0) {
+                const std::array<MlxArray, 2> hidden_parts{
+                    primary_hidden.share(), tail_hidden.share()};
+                hidden = MlxArray::concatenate_many(hidden_parts, 0);
+            }
+            MlxArray projected = project_gemmseg(
+                hidden, combined_identity_array, combined_metadata_array,
+                route_count, combined_tiles, rows >= 768 ? 24 : 16, expert_down_);
             const std::array<const MlxArray*, 3> reduce_inputs{
                 &projected, &weights, &inverse_order_array};
             const std::array<MlxMetalOutputSpec, 1> reduce_outputs{{
