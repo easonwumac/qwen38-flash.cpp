@@ -147,7 +147,13 @@ int main(int argc, char** argv) {
                   << ",\"full_layers_ms\":" << full_layer_ms
                   << ",\"slowest_layer\":"
                   << std::distance(batched.layer_ms.begin(), slowest)
-                  << ",\"slowest_layer_ms\":" << *slowest << "}"
+                  << ",\"slowest_layer_ms\":" << *slowest
+                  << ",\"layer_ms\":[";
+        for (std::size_t layer = 0; layer < batched.layer_ms.size(); ++layer) {
+            if (layer != 0) std::cout << ',';
+            std::cout << batched.layer_ms[layer];
+        }
+        std::cout << "]}"
                   << ",\"serial_token_id\":";
         if (benchmark_only) {
             std::cout << "null,\"serial_text\":null";

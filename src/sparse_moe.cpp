@@ -1655,10 +1655,14 @@ MlxArray SparseMoe::forward_prefill_impl(
             timings->routing_ms = elapsed_ms(routing_started);
         }
 
-        const bool use_gemmseg = rows >= 128 &&
-            expert_gate_.vector_dimension == 8 && expert_gate_.packed_bits == 14 &&
-            expert_up_.vector_dimension == 8 && expert_up_.packed_bits == 14 &&
-            expert_down_.vector_dimension == 8 && expert_down_.packed_bits == 14 &&
+        const bool segmented_geometry =
+            (expert_gate_.vector_dimension == 8 && expert_gate_.packed_bits == 14) ||
+            (expert_gate_.vector_dimension == 2 && expert_gate_.packed_bits == 0);
+        const bool use_gemmseg = rows >= 128 && segmented_geometry &&
+            expert_up_.vector_dimension == expert_gate_.vector_dimension &&
+            expert_up_.packed_bits == expert_gate_.packed_bits &&
+            expert_down_.vector_dimension == expert_gate_.vector_dimension &&
+            expert_down_.packed_bits == expert_gate_.packed_bits &&
             expert_gate_.group_size == 64 && expert_up_.group_size == 64 &&
             expert_down_.group_size == 64 &&
             expert_gate_.input_dimension == expert_up_.input_dimension &&
@@ -1781,12 +1785,14 @@ MlxArray SparseMoe::forward_prefill_impl(
                                                  const int group_tile_rows,
                                                  const QuantizedProjection& projection) {
                 const std::array<MlxMetalDtypeTemplate, 0> dtype_templates{};
-                const std::array<MlxMetalIntTemplate, 5> int_templates{{
+                const std::array<MlxMetalIntTemplate, 7> int_templates{{
                     {.name = "OUT", .value = projection.output_dimension},
                     {.name = "IN", .value = projection.input_dimension},
                     {.name = "NGRP", .value = projection.input_dimension / 64},
                     {.name = "RTILE", .value = group_tile_rows},
                     {.name = "OTILE", .value = output_tile_rows},
+                    {.name = "D", .value = projection.vector_dimension},
+                    {.name = "BITS", .value = projection.packed_bits},
                 }};
                 const std::array<MlxMetalOutputSpec, 1> output_specs{{
                     {.shape = {group_route_count, projection.output_dimension},
@@ -1818,12 +1824,14 @@ MlxArray SparseMoe::forward_prefill_impl(
                                         const int group_tile_count,
                                         const int group_tile_rows) {
                 const std::array<MlxMetalDtypeTemplate, 0> gate_dtype_templates{};
-                const std::array<MlxMetalIntTemplate, 5> gate_int_templates{{
+                const std::array<MlxMetalIntTemplate, 7> gate_int_templates{{
                     {.name = "OUT", .value = expert_gate_.output_dimension},
                     {.name = "IN", .value = expert_gate_.input_dimension},
                     {.name = "NGRP", .value = expert_gate_.input_dimension / 64},
                     {.name = "RTILE", .value = group_tile_rows},
                     {.name = "OTILE", .value = output_tile_rows},
+                    {.name = "D", .value = expert_gate_.vector_dimension},
+                    {.name = "BITS", .value = expert_gate_.packed_bits},
                 }};
                 const std::array<MlxMetalOutputSpec, 1> gate_output_specs{{
                     {.shape = {group_route_count, expert_gate_.output_dimension},
