@@ -37,6 +37,9 @@ fallback checkpoints, or dependencies of the VQ path.
 - **Automatic 2,048-row prefill:** packed-VQ checkpoints use the larger verified
   chunk through 32K; non-VQ checkpoints and explicit resource limits keep their
   prior bounds.
+- **Bounded layer-major prefill:** up to 8,192 prompt rows advance through each
+  eight-layer evaluation group before the next weight group, reducing mapped
+  weight churn without retaining an unbounded prompt graph.
 - **Compile-time tail specialization:** wide VQ batches send complete 24-route
   tiles and short expert tails through separate fixed Metal kernels, then restore
   the exact route order before down reduction.
@@ -48,8 +51,9 @@ fallback checkpoints, or dependencies of the VQ path.
 - **Exact down-slot parallelism:** packed d8 decode distributes three routed
   experts across 30 SIMD lanes, then restores the original group and route
   reduction order; this removes idle-lane work without changing layer bits.
-- **Decode-only affine U8 codebooks:** d8/K16384 layers derive per-dimension U8
-  lookup tables at load time. Direct decode reads half the codebook bytes;
+- **Decode-only compact codebooks:** d8/K16384 layers derive a centered signed
+  INT8 gate table plus affine U8 up/down tables at load time. Direct decode reads
+  half the codebook bytes;
   d2/K256 and segmented prompt GEMM retain the original FP16 codebooks.
 - **Bounded graph lifetime:** temporary compact metadata survives only to the
   existing eight-layer barrier, improving scheduling without retaining every
@@ -61,7 +65,8 @@ fallback checkpoints, or dependencies of the VQ path.
   engine.
 - **Fused long-context selection:** a Metal selector can reuse each representative
   query across four adjacent prefill rows, then restore per-row causal validity.
-  Combined with slabbed Q8 KV, this keeps 128K prefill above 500 tok/s.
+  Combined with slabbed Q8 KV, it bounds selector and KV work; VQ has not yet
+  been requalified at 128K.
 - **Transactional MTP:** batched verification and accepted-row commit are paired
   with adaptive depth and economic fallback. Serial remains the safe default.
 - **Complete-state prefix caching:** target, recurrent, attention, QSA, and
@@ -85,17 +90,19 @@ and MTP off.
 
 | Workload | Configuration | Result |
 |---|---|---:|
-| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.4920 / 17.3909 / 17.4996 s; median **426.1 PP tok/s**; **38.2--38.3 GiB** peak |
-| Repository prefill, 6,469 tokens | VQ 2.1bpw; automatic 2,048-row chunks; d2/K256 and d8/K16384 segmented VQ GEMM; three candidate starts and adjacent controls; fixed first token | candidate 14.121 / 13.695 / 14.070 s, median **459.8 PP tok/s**; controls 15.773 / 15.542 s, median **413.2 PP tok/s**; **38.2--38.3 GiB** peak |
+| Repository prefill, 7,091 tokens | VQ 2.1bpw; README corpus SHA-256 `633c8445...`; automatic 2,048-row chunks and 8,192-row layer-major window; same-process cold/warm server requests; MTP and prefix cache off; fixed first token | **455.45 cold / 519.91 warm PP tok/s**; **38.3 GiB** peak |
+| Repeated repository prefill, 14,173 tokens | same corpus repeated twice; automatic 2,048-row chunks, two bounded windows; same-process cold/warm server requests; MTP and prefix cache off; fixed first text `Based` | **446.3 cold / 479.1 warm PP tok/s**; **39.1 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; signed gate plus affine up/down d8 decode codebooks; three paired independent starts; first two compile/warmup steps excluded | candidate 30.62 / 30.33 / 30.25 tok/s, median **30.33 tok/s**; affine controls 29.28 / 29.25 / 29.14, median 29.25 tok/s (**+3.7%**); **36.3 GiB** peak |
+| External-drafter capacity probe, 128 output tokens | VQ target remains authoritative; compatible external Q8 drafter, depth 4; greedy/no-thinking; two warm samples on one retained high-acceptance fixture | **44.804 / 44.809 tok/s**; 95/128 drafts accepted in 32 rounds; **38.8 GiB** peak; not a mixed-workload or 60 tok/s result |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 | IFBench stratified development set, keys 0,10,...,90 | VQ 2.1bpw; signed gate plus affine up/down d8 decode codebooks; greedy, non-thinking, max 4,096; official scorer | **5/10 loose and strict**; same passing keys 20/30/60/70/90 as the affine control; 0 errors; **36.9 GiB** peak |
 
-The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
-7,454-token workload from a 375.3 PP tok/s median to 426.1 PP tok/s
-(**+13.5%**) while remaining below the 40 GiB product ceiling. These are
-current milestones, not claims that the
-600 PP tok/s or 40 tok/s decode targets have been reached.
+The bounded layer-major schedule keeps the existing VQ arithmetic and state
+ordering. In the 7,091-token developer A/B, warm layer-major runs reached
+526.21/527.34 PP tok/s versus 497.81/505.90 for chunk-major, with the same next
+token 27775 and logit 17.125. The product server reached 519.91 warm PP tok/s
+at 38.3 GiB. These are current milestones, not claims that the 600 PP tok/s or
+40 tok/s decode targets have been reached.
 
 The route planner sends <=8-row expert tails to an RTILE8 kernel instead of
 padding them to 16 rows. The same segmented matrix path now also handles the
@@ -188,13 +195,15 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 ## Known limits
 
-- VQ currently reaches 426.1 PP tok/s on the retained 7,454-token prompt and
-  29.59 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
-  open.
+- VQ currently reaches 519.91 warm PP tok/s on the retained repository prompt
+  and 30.33 tok/s on the short decode fixture. The 600 PP and 40 decode goals
+  remain open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.
-- The VQ package has no usable MTP tensors. An external REAP drafter was slower
-  in the VQ verifier and is not a production dependency or 60 tok/s solution.
+- The VQ package has no usable MTP tensors. A compatible external Q8 drafter
+  reached 44.8 tok/s on one high-acceptance fixture, but low-acceptance IFBench
+  probes fell to roughly 23--24 tok/s. It is not a production dependency or a
+  demonstrated 60 tok/s solution.
 - The three-case IFBench gate is a fast regression signal, not a full quality
   estimate. Larger official scoring remains required before a release claim.
 - The executor automatically coalesces up to four ordinary requests into one
