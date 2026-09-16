@@ -109,6 +109,7 @@ private:
     std::unique_ptr<PrefixCacheEntry> prefix_cache_;
     std::unique_ptr<PrefixCacheStore> ssd_prefix_cache_;
     std::size_t mtp_depth_{0};
+    bool adaptive_mtp_depth_{false};
     std::uint32_t chat_end_token_{0};
     std::mutex inference_mutex_;
 

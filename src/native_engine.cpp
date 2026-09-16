@@ -412,7 +412,10 @@ NativeEngine::NativeEngine(
       tensors_(prepare_manifest(model_directory, options_)),
       tokenizer_(Tokenizer::load(model_directory)),
       model_(tensors_),
-      mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)) {
+      mtp_depth_(resolved_mtp_depth(tensors_.manifest(), options_)),
+      adaptive_mtp_depth_(
+          !options_.mtp_depth.has_value() &&
+          has_native_vqlab_mtp_weights(tensors_.manifest())) {
     const std::vector<std::uint32_t> chat_end = tokenizer_.encode("<|im_end|>");
     if (chat_end.size() != 1) {
         throw std::runtime_error("chat end marker must encode to one token");
@@ -1306,7 +1309,8 @@ GenerationResult NativeEngine::complete_impl(
             std::clog << "qwen38: prefix cache skipped previously losing MTP probe\n";
         }
     }
-    MtpDepthPolicy depth_policy(mtp_depth_, prompt_tokens.size());
+    MtpDepthPolicy depth_policy(
+        mtp_depth_, prompt_tokens.size(), adaptive_mtp_depth_);
     result.mtp_final_depth = serial_only ? 0 : depth_policy.depth();
     bool stopped_on_terminator = false;
     const auto is_stop_token = [&](const std::uint32_t token) {

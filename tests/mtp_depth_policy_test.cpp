@@ -77,6 +77,19 @@ void run_mtp_depth_policy_tests() {
 
     qwen38::MtpDepthPolicy explicit_four(4, 100000);
     QWEN38_CHECK(explicit_four.depth() == 4);
+    for (int round = 0; round < 8; ++round) explicit_four.observe(4, 0);
+    QWEN38_CHECK(explicit_four.depth() == 4);
+    QWEN38_CHECK(explicit_four.demotions() == 0);
+
+    qwen38::MtpDepthPolicy automatic_four(4, 32, true);
+    QWEN38_CHECK(automatic_four.depth() == 4);
+    automatic_four.observe(4, 4);
+    for (int round = 0; round < 3; ++round) automatic_four.observe(4, 3);
+    QWEN38_CHECK(automatic_four.depth() == 3);
+    QWEN38_CHECK(automatic_four.demotions() == 1);
+
+    qwen38::MtpDepthPolicy automatic_four_long(4, 2049, true);
+    QWEN38_CHECK(automatic_four_long.depth() == 4);
 
     setenv("QWEN38_MTP_ADAPTIVE_DEPTH4", "1", 1);
     qwen38::MtpDepthPolicy adaptive_four(3, 32);

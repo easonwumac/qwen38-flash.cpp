@@ -34,13 +34,17 @@ bool demotion_enabled() {
 
 MtpDepthPolicy::MtpDepthPolicy(
     const std::size_t maximum_depth,
-    const std::size_t prompt_tokens)
+    const std::size_t prompt_tokens,
+    const bool adaptive_depth_four)
     : maximum_depth_(maximum_depth), depth_(maximum_depth) {
     if (maximum_depth != 0 && (maximum_depth < 2 || maximum_depth > 4)) {
         throw std::runtime_error("MTP policy depth must be 0 or between 2 and 4");
     }
-    if (maximum_depth == 3) {
-        adaptive_four_ = adaptive_depth_four_enabled();
+    if (maximum_depth == 4 && adaptive_depth_four && prompt_tokens <= short_prompt_limit) {
+        adaptive_four_ = true;
+        monitoring_ = true;
+    } else if (maximum_depth == 3) {
+        adaptive_four_ = adaptive_depth_four || adaptive_depth_four_enabled();
         if (adaptive_four_ && prompt_tokens <= short_prompt_limit) {
             depth_ = 4;
             monitoring_ = true;

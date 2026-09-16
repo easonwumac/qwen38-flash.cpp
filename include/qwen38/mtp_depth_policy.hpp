@@ -6,7 +6,10 @@ namespace qwen38 {
 
 class MtpDepthPolicy final {
 public:
-    MtpDepthPolicy(std::size_t maximum_depth, std::size_t prompt_tokens);
+    MtpDepthPolicy(
+        std::size_t maximum_depth,
+        std::size_t prompt_tokens,
+        bool adaptive_depth_four = false);
 
     [[nodiscard]] std::size_t depth() const noexcept { return depth_; }
     [[nodiscard]] std::size_t promotions() const noexcept { return promotions_; }
