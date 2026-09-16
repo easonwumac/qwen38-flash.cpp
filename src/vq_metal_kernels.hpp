@@ -237,7 +237,7 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
                 simdgroup_multiply_accumulate(gate3, input_matrix, weight_matrix, gate3);
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
 
         const float up_scale = (float)up_scale_row[group];
         for (int local = code_begin; local < code_begin + 2; ++local) {
@@ -262,7 +262,7 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
             weight_tile[column + 6][weight_row] = (half)(up_scale * (float)high.z);
             weight_tile[column + 7][weight_row] = (half)(up_scale * (float)high.w);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
         for (int k8 = 0; k8 < 8; ++k8) {
             simdgroup_half8x8 weight_matrix;
             simdgroup_half8x8 input_matrix;

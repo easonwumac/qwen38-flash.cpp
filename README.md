@@ -79,13 +79,13 @@ and MTP off.
 
 | Workload | Configuration | Result |
 |---|---|---:|
-| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.5660 / 17.5028 / 17.5574 s; median **424.6 PP tok/s**; **38.2--38.3 GiB** peak |
+| Long prefill, 7,454 tokens | VQ 2.1bpw; automatic 2,048-row chunks; exact fused intermediates and tail specialization; three independent starts; fixed first token | 17.4920 / 17.3909 / 17.4996 s; median **426.1 PP tok/s**; **38.2--38.3 GiB** peak |
 | Short steady decode, fixed input, 64 steps | VQ 2.1bpw; exact top-10; one directional run | **27.85 tok/s**; **36.3 GiB** peak |
 | IFBench development gate, keys 20/70/100 | VQ 2.1bpw; greedy, non-thinking, max 512; official per-row loose/strict scoring | **3/3 loose and strict**; **36.7 GiB** peak |
 
 The 2,048-row VQ prefill path plus exact intermediate fusion raises the same
-7,454-token workload from a 375.3 PP tok/s median to 424.6 PP tok/s
-(**+13.1%**) while remaining below the 40 GiB product ceiling. These are
+7,454-token workload from a 375.3 PP tok/s median to 426.1 PP tok/s
+(**+13.5%**) while remaining below the 40 GiB product ceiling. These are
 current milestones, not claims that the
 600 PP tok/s or 40 tok/s decode targets have been reached.
 
@@ -158,7 +158,7 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 
 ## Known limits
 
-- VQ currently reaches 424.6 PP tok/s on the retained 7,454-token prompt and
+- VQ currently reaches 426.1 PP tok/s on the retained 7,454-token prompt and
   27.85 tok/s on the short decode fixture. The 600 PP and 40 decode goals remain
   open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
