@@ -196,16 +196,19 @@ MlxArray Ple::forward_verify(
     const int width = streams * hidden;
 
     NgramState ngram = origin.ngram;
-    std::vector<float> embeddings;
-    embeddings.reserve(tokens.size() * hidden_size_);
+    std::vector<std::int64_t> row_ids;
+    row_ids.reserve(tokens.size() * 16);
     checkpoints.clear();
     checkpoints.resize(tokens.size());
     for (std::size_t row = 0; row < tokens.size(); ++row) {
-        const auto row_ids = hash_.row_ids(tokens[row], ngram);
-        std::vector<float> embedding = table_.gather(row_ids);
-        embeddings.insert(embeddings.end(), embedding.begin(), embedding.end());
+        const auto token_rows = hash_.row_ids(tokens[row], ngram);
+        row_ids.insert(row_ids.end(), token_rows.begin(), token_rows.end());
         checkpoints[row].ngram = ngram;
     }
+    // Issue page advice for the complete chunk before decoding its randomly
+    // addressed VQ rows. This also avoids one allocation and shard-location
+    // pass per token while preserving the original token/head row order.
+    std::vector<float> embeddings = table_.gather(row_ids);
     MlxArray embedding = MlxArray::from_float32(
         embeddings, std::vector<int>{1, rows, hidden}).astype(stream.dtype());
     MlxArray key = grouped_norm(project(embedding, key_projection_), norm_key_);
