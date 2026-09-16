@@ -251,6 +251,51 @@ MlxArray QwenModel::prefill_chunk_batch(
     return std::move(chunk.stream_batch);
 }
 
+std::vector<MlxArray> QwenModel::prefill_chunks_layer_major(
+    const std::span<const std::uint32_t> tokens,
+    const std::size_t chunk_rows,
+    ModelDecodeState& state,
+    std::vector<double>* layer_ms) const {
+    constexpr std::size_t max_layer_major_rows = 8192;
+    if (tokens.empty() || tokens.size() > max_layer_major_rows ||
+        chunk_rows == 0 || chunk_rows > 2048) {
+        throw std::runtime_error(
+            "layer-major prefill requires 1..8192 tokens and chunk_rows between 1 and 2048");
+    }
+    if (state.token_count > std::numeric_limits<std::size_t>::max() - tokens.size()) {
+        throw std::runtime_error("layer-major prefill token count overflow");
+    }
+    struct PendingChunk {
+        std::size_t offset;
+        std::size_t count;
+        ModelPrefillChunk chunk;
+    };
+    std::vector<PendingChunk> pending;
+    pending.reserve((tokens.size() + chunk_rows - 1) / chunk_rows);
+    for (std::size_t offset = 0; offset < tokens.size(); offset += chunk_rows) {
+        const std::size_t count = std::min(chunk_rows, tokens.size() - offset);
+        const std::span<const std::uint32_t> chunk_tokens(tokens.data() + offset, count);
+        pending.push_back(PendingChunk{
+            .offset = offset,
+            .count = count,
+            .chunk = begin_prefill_chunk_batch(chunk_tokens, state),
+        });
+    }
+    while (pending.front().chunk.next_layer < layers_.size()) {
+        for (PendingChunk& item : pending) {
+            const std::span<const std::uint32_t> chunk_tokens(
+                tokens.data() + item.offset, item.count);
+            static_cast<void>(advance_prefill_chunk_batch(
+                item.chunk, chunk_tokens, state, layer_ms));
+        }
+    }
+    std::vector<MlxArray> outputs;
+    outputs.reserve(pending.size());
+    for (PendingChunk& item : pending)
+        outputs.push_back(std::move(item.chunk.stream_batch));
+    return outputs;
+}
+
 ModelPrefillChunk QwenModel::begin_prefill_chunk_batch(
     const std::span<const std::uint32_t> tokens,
     const ModelDecodeState& state) const {

@@ -87,17 +87,37 @@ int main(int argc, char **argv) {
         const qwen38::ModelConfig &config = tensors.manifest().config();
 
         qwen38::QwenModel model(tensors);
+        const std::size_t prefill_tokens = tokens.size() - 1;
+        const char* layer_major_value = std::getenv("QWEN38_LONG_CONTEXT_LAYER_MAJOR");
+        const bool layer_major = layer_major_value != nullptr &&
+            std::string_view(layer_major_value) == "1";
+        const auto run_prefill = [&](qwen38::ModelDecodeState& target_state,
+                                     std::vector<double>* target_layer_ms) {
+            if (!layer_major) {
+                for (std::size_t offset = 0; offset < prefill_tokens;
+                     offset += chunk_rows) {
+                    const std::size_t count =
+                        std::min(chunk_rows, prefill_tokens - offset);
+                    static_cast<void>(model.prefill_chunk(
+                        std::span<const std::uint32_t>(tokens.data() + offset, count),
+                        target_state, target_layer_ms));
+                }
+                return;
+            }
+
+            constexpr std::size_t window_rows = 8192;
+            for (std::size_t offset = 0; offset < prefill_tokens; offset += window_rows) {
+                const std::size_t count = std::min(window_rows, prefill_tokens - offset);
+                static_cast<void>(model.prefill_chunks_layer_major(
+                    std::span<const std::uint32_t>(tokens.data() + offset, count),
+                    chunk_rows, target_state, target_layer_ms));
+            }
+        };
         if (const char* warmup = std::getenv("QWEN38_LONG_CONTEXT_WARMUP");
             warmup != nullptr && std::string_view(warmup) == "1") {
             {
                 qwen38::ModelDecodeState warm_state = model.make_state();
-                const std::size_t warm_rows = tokens.size() - 1;
-                for (std::size_t offset = 0; offset < warm_rows; offset += chunk_rows) {
-                    const std::size_t count = std::min(chunk_rows, warm_rows - offset);
-                    static_cast<void>(model.prefill_chunk(
-                        std::span<const std::uint32_t>(tokens.data() + offset, count),
-                        warm_state));
-                }
+                run_prefill(warm_state, nullptr);
             }
             model.clear_prefill_qmeta_cache();
             qwen38::MlxArray::clear_cache();
@@ -105,12 +125,7 @@ int main(int argc, char **argv) {
         qwen38::ModelDecodeState state = model.make_state();
         std::vector<double> layer_ms;
         const auto started = std::chrono::steady_clock::now();
-        const std::size_t prefill_tokens = tokens.size() - 1;
-        for (std::size_t offset = 0; offset < prefill_tokens; offset += chunk_rows) {
-            const std::size_t count = std::min(chunk_rows, prefill_tokens - offset);
-            static_cast<void>(model.prefill_chunk(
-                std::span<const std::uint32_t>(tokens.data() + offset, count), state, &layer_ms));
-        }
+        run_prefill(state, &layer_ms);
         const auto prefill_done = std::chrono::steady_clock::now();
         const qwen38::GreedyStep next = model.greedy_decode(tokens.back(), state);
         const auto finished = std::chrono::steady_clock::now();
@@ -200,6 +215,7 @@ int main(int argc, char **argv) {
             std::chrono::duration<double, std::milli>(finished - prefill_done).count();
         std::cout << "{\"prompt_tokens\":" << tokens.size() << ",\"chunk_rows\":" << chunk_rows
                   << ",\"profile\":\"" << profile << "\""
+                  << ",\"layer_major\":" << (layer_major ? "true" : "false")
                   << ",\"full_attention_layers\":" << full_attention_layers
                   << ",\"qsa_layers\":" << qsa_layers
                   << ",\"kv_q8_layers\":" << kv_q8_layers
@@ -211,7 +227,8 @@ int main(int argc, char **argv) {
                   << 1000.0 * static_cast<double>(prefill_tokens) / prefill_ms
                   << ",\"linear_layer_ms\":" << linear_layer_ms
                   << ",\"full_layer_ms\":" << full_layer_ms << ",\"decode_ms\":" << decode_ms
-                  << ",\"next_token\":" << next.token << "}\n";
+                  << ",\"next_token\":" << next.token
+                  << ",\"next_logit\":" << next.logit << "}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception &error) {
         std::cerr << "qwen38-long-context-smoke: " << error.what() << '\n';

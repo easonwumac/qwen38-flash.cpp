@@ -1052,13 +1052,9 @@ GenerationResult NativeEngine::complete_impl(
             }
         }
     };
-    for (std::size_t offset = prefill_offset; offset < prefill_rows;
-         offset += request_prefill_chunk) {
-        const std::size_t count = std::min(
-            request_prefill_chunk, prefill_rows - offset);
-        MlxArray stream_batch = model_.prefill_chunk_batch(
-            std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state,
-            profile_prefill_enabled ? &prefill_layer_ms : nullptr);
+    const auto consume_stream_batch = [&](const MlxArray& stream_batch,
+                                           const std::size_t offset,
+                                           const std::size_t count) {
         for (std::size_t batch_offset = 0; batch_offset < count; batch_offset += 512) {
             const std::size_t batch_count = std::min<std::size_t>(512, count - batch_offset);
             MlxArray batch = batch_offset == 0 && batch_count == count
@@ -1066,6 +1062,40 @@ GenerationResult NativeEngine::complete_impl(
                 : slice_sequence_rows(
                       stream_batch, batch_offset, batch_offset + batch_count);
             consume_target_batch(batch, offset + batch_offset, batch_count);
+        }
+    };
+    const bool packed_vq_layer_major = mtp_head_ == nullptr &&
+        prefill_rows - prefill_offset > request_prefill_chunk &&
+        tensors_.manifest().vector_quantization_for(
+            "language_model.model.layers.2.mlp.switch_mlp.gate_proj") != nullptr;
+    if (packed_vq_layer_major) {
+        // Bound retained hidden streams by rows rather than chunk count. Long
+        // prompts automatically use smaller chunks but keep the same memory cap.
+        constexpr std::size_t window_rows = 8192;
+        for (std::size_t window_offset = prefill_offset; window_offset < prefill_rows;
+             window_offset += window_rows) {
+            const std::size_t count = std::min(window_rows, prefill_rows - window_offset);
+            std::vector<MlxArray> outputs = model_.prefill_chunks_layer_major(
+                std::span<const std::uint32_t>(prompt_tokens.data() + window_offset, count),
+                request_prefill_chunk, state,
+                profile_prefill_enabled ? &prefill_layer_ms : nullptr);
+            std::size_t output_offset = window_offset;
+            for (const MlxArray& output : outputs) {
+                const std::size_t output_count =
+                    std::min(request_prefill_chunk, prefill_rows - output_offset);
+                consume_stream_batch(output, output_offset, output_count);
+                output_offset += output_count;
+            }
+        }
+    } else {
+        for (std::size_t offset = prefill_offset; offset < prefill_rows;
+             offset += request_prefill_chunk) {
+            const std::size_t count = std::min(
+                request_prefill_chunk, prefill_rows - offset);
+            MlxArray stream_batch = model_.prefill_chunk_batch(
+                std::span<const std::uint32_t>(prompt_tokens.data() + offset, count), state,
+                profile_prefill_enabled ? &prefill_layer_ms : nullptr);
+            consume_stream_batch(stream_batch, offset, count);
         }
     }
     model_.clear_prefill_qmeta_cache();

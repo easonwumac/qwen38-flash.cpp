@@ -74,6 +74,13 @@ public:
         std::span<const std::uint32_t> tokens,
         ModelDecodeState& state,
         std::vector<double>* layer_ms = nullptr) const;
+    // Process several consecutive prompt chunks at each graph barrier before
+    // advancing to the next layers. Token order within every layer is unchanged.
+    [[nodiscard]] std::vector<MlxArray> prefill_chunks_layer_major(
+        std::span<const std::uint32_t> tokens,
+        std::size_t chunk_rows,
+        ModelDecodeState& state,
+        std::vector<double>* layer_ms = nullptr) const;
     [[nodiscard]] ModelPrefillChunk begin_prefill_chunk_batch(
         std::span<const std::uint32_t> tokens,
         const ModelDecodeState& state) const;
