@@ -34,7 +34,8 @@ constexpr int expert_count = 512;
 constexpr int top_k = 10;
 constexpr int group_size = 64;
 
-using qwen38::persistent_metal::metal_source;
+using qwen38::persistent_metal::metal_source_prefix;
+using qwen38::persistent_metal::metal_source_suffix;
 
 std::uint16_t bf16(const float value) {
     std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
@@ -1337,8 +1338,12 @@ int main(int argc, char **argv) {
             MTLCompileOptions *options = [MTLCompileOptions new];
             options.languageVersion = MTLLanguageVersion3_2;
             NSError *error = nil;
+            std::string metal_source;
+            metal_source.reserve(metal_source_prefix.size() + metal_source_suffix.size());
+            metal_source.append(metal_source_prefix);
+            metal_source.append(metal_source_suffix);
             id<MTLLibrary> library =
-                [device newLibraryWithSource:[NSString stringWithUTF8String:metal_source.data()]
+                [device newLibraryWithSource:[NSString stringWithUTF8String:metal_source.c_str()]
                                      options:options
                                        error:&error];
             if (library == nil)

@@ -26,25 +26,35 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 33> pipeline_names{
+constexpr std::array<const char*, 48> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
-    "q4_shared_down_merge", "fused_all_gate_up", "fused_all_down",
-    "q8_router_logits", "select_top10", "qsa_score_blocks",
+    "q4_shared_down_merge", "q8_shared_gate_up", "q8_shared_down_merge",
+    "fused_all_gate_up", "fused_all_down",
+    "vq_d8_gate_up", "vq_d2_gate_up", "vq_d8_down_reduce", "vq_d2_down_reduce",
+    "q8_router_logits", "bf16_router_logits", "select_top10", "qsa_score_blocks",
     "qsa_append_decode_state", "qsa_top128_first", "qsa_top128_merge",
-    "qsa_attention_q8_blocks", "attention_qkv_index", "attention_normalize_rope",
-    "attention_apply_gate", "attention_output_projection", "q4_input_projection",
+    "qsa_attention_q8_blocks", "attention_qkv_index", "attention_qkv_index_q8",
+    "attention_normalize_rope", "attention_apply_gate", "attention_output_projection",
+    "q8_output_projection_6144", "q4_input_projection", "q8_input_projection",
     "gdn_prework", "gdn_recurrence", "gdn_norm_gate", "gdn_output_projection",
-    "hc_write", "hc_normalize", "hc_down_injection", "hc_up_mix", "healing_left",
-    "healing_right_write", "ple_fused_update", "embedding_q4_stream",
-    "hc_down_only", "lm_head_q4",
+    "hc_write", "hc_normalize", "hc_down_injection", "hc_down_injection_q8",
+    "hc_up_mix", "hc_up_mix_q8", "healing_left", "healing_right_write",
+    "ple_fused_update", "embedding_q4_stream", "embedding_q8_stream",
+    "hc_down_only", "hc_down_only_q8", "lm_head_q4", "lm_head_q8",
 };
 
-bool has_expected_layer_split(const ModelConfig& config) noexcept {
-    if (config.layer_types.size() != 48 || config.shared_only_layers.size() != 24) return false;
+bool has_expected_attention_split(const ModelConfig& config) noexcept {
+    if (config.layer_types.size() != 48) return false;
     for (std::size_t layer = 0; layer < config.layer_types.size(); ++layer) {
         const char* expected = layer % 4 == 3 ? "full_attention" : "linear_attention";
         if (config.layer_types[layer] != expected) return false;
     }
+    return true;
+}
+
+bool has_expected_layer_split(const ModelConfig& config) noexcept {
+    if (!has_expected_attention_split(config) || config.shared_only_layers.size() != 24)
+        return false;
     for (std::size_t index = 0; index < config.shared_only_layers.size(); ++index) {
         if (config.shared_only_layers[index] != index + 10) return false;
     }
@@ -102,8 +112,12 @@ public:
             if (device_ == nil) throw std::runtime_error("Metal device is unavailable");
 
             NSError* error = nil;
-            NSString* source = [NSString stringWithUTF8String:
-                persistent_metal::metal_source.data()];
+            std::string metal_source;
+            metal_source.reserve(persistent_metal::metal_source_prefix.size() +
+                                 persistent_metal::metal_source_suffix.size());
+            metal_source.append(persistent_metal::metal_source_prefix);
+            metal_source.append(persistent_metal::metal_source_suffix);
+            NSString* source = [NSString stringWithUTF8String:metal_source.c_str()];
             library_ = [device_ newLibraryWithSource:source options:nil error:&error];
             if (library_ == nil) {
                 throw std::runtime_error(error == nil ? "Metal library compilation failed" :
@@ -152,6 +166,16 @@ public:
             inventory_.shard_count = shards_.size();
             weight_map_ = manifest.weight_map();
             config_ = manifest.config();
+            for (std::size_t layer = 0; layer < config_.layer_count; ++layer) {
+                const std::string base = "language_model.model.layers." +
+                    std::to_string(layer) + ".mlp.switch_mlp.gate_proj";
+                if (const VectorQuantizationSpec* spec =
+                        manifest.vector_quantization_for(base)) {
+                    vq_routed_ = true;
+                    vq_d2_layers_[layer] = spec->vector_dimension == 2 &&
+                        spec->packed_bits == 0;
+                }
+            }
             queue_ = [device_ newCommandQueue];
             if (queue_ == nil) throw std::runtime_error("cannot create persistent Metal queue");
             allocate_scratch();
@@ -228,7 +252,9 @@ public:
         post_attention_ = make_buffer(10240 * sizeof(std::uint16_t));
         expert_ids_ = make_buffer(10 * sizeof(std::uint32_t));
         route_weights_ = make_buffer(10 * sizeof(std::uint16_t));
-        routed_hidden_ = make_buffer(10 * 448 * sizeof(std::uint16_t));
+        routed_hidden_ = make_buffer(
+            10 * std::max<std::size_t>(448, config_.moe_intermediate_size) *
+            sizeof(std::uint16_t));
         shared_hidden_ = make_buffer(640 * sizeof(std::uint16_t));
         shared_scale_ = make_buffer(sizeof(std::uint16_t));
         moe_output_ = make_buffer(2560 * sizeof(std::uint16_t));
@@ -267,13 +293,29 @@ public:
     void bind(id<MTLComputeCommandEncoder> encoder, const std::string& tensor,
               NSUInteger index) const {
         if (!shared_tensors_.empty()) {
-            [encoder setBuffer:shared_tensors_.at(tensor).buffer offset:0 atIndex:index];
+            auto found = shared_tensors_.find(tensor);
+            if (found == shared_tensors_.end() &&
+                std::string_view(tensor).starts_with("language_model.")) {
+                found = shared_tensors_.find(tensor.substr(15));
+            }
+            if (found == shared_tensors_.end()) {
+                throw std::runtime_error("missing persistent tensor: " + tensor);
+            }
+            [encoder setBuffer:found->second.buffer offset:0 atIndex:index];
             return;
         }
-        const std::string& shard_name = weight_map_.at(tensor);
+        auto weight = weight_map_.find(tensor);
+        if (weight == weight_map_.end() &&
+            std::string_view(tensor).starts_with("language_model.")) {
+            weight = weight_map_.find(tensor.substr(15));
+        }
+        if (weight == weight_map_.end()) {
+            throw std::runtime_error("missing persistent tensor: " + tensor);
+        }
+        const std::string& shard_name = weight->second;
         const Shard& shard = *shards_.at(shard_name);
         const auto mapped = shard.file.mapped_view();
-        const auto view = shard.file.tensor(tensor);
+        const auto view = shard.file.tensor(weight->first);
         const auto offset = static_cast<NSUInteger>(view.bytes.data() - mapped.data());
         [encoder setBuffer:shard.buffer offset:offset atIndex:index];
     }
@@ -281,7 +323,15 @@ public:
     void bind_row(id<MTLComputeCommandEncoder> encoder, const std::string& tensor,
                   std::size_t row, NSUInteger index) const {
         if (!shared_tensors_.empty()) {
-            const SharedTensor& shared = shared_tensors_.at(tensor);
+            auto found = shared_tensors_.find(tensor);
+            if (found == shared_tensors_.end() &&
+                std::string_view(tensor).starts_with("language_model.")) {
+                found = shared_tensors_.find(tensor.substr(15));
+            }
+            if (found == shared_tensors_.end()) {
+                throw std::runtime_error("missing persistent row tensor: " + tensor);
+            }
+            const SharedTensor& shared = found->second;
             const std::vector<int> shape = shared.array.shape();
             if (shape.empty() || row >= static_cast<std::size_t>(shape.front()) ||
                 shared.array.byte_size() % static_cast<std::size_t>(shape.front()) != 0) {
@@ -292,10 +342,18 @@ public:
             [encoder setBuffer:shared.buffer offset:row * row_bytes atIndex:index];
             return;
         }
-        const std::string& shard_name = weight_map_.at(tensor);
+        auto weight = weight_map_.find(tensor);
+        if (weight == weight_map_.end() &&
+            std::string_view(tensor).starts_with("language_model.")) {
+            weight = weight_map_.find(tensor.substr(15));
+        }
+        if (weight == weight_map_.end()) {
+            throw std::runtime_error("missing persistent row tensor: " + tensor);
+        }
+        const std::string& shard_name = weight->second;
         const Shard& shard = *shards_.at(shard_name);
         const auto mapped = shard.file.mapped_view();
-        const auto view = shard.file.tensor(tensor);
+        const auto view = shard.file.tensor(weight->first);
         if (view.shape.empty() || row >= view.shape.front() ||
             view.bytes.size() % view.shape.front() != 0) {
             throw std::runtime_error("invalid persistent row tensor geometry");
@@ -314,6 +372,13 @@ public:
         bind(encoder, base + ".biases", first + 2);
     }
 
+    void bind_vq_projection(id<MTLComputeCommandEncoder> encoder, const std::string& base,
+                            NSUInteger first) const {
+        bind(encoder, base + ".codes", first);
+        bind(encoder, base + ".codebook", first + 1);
+        bind(encoder, base + ".vq_scales", first + 2);
+    }
+
     void encode_hc_read(id<MTLCommandBuffer> command, id<MTLBuffer> input,
                         const std::string& base) {
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
@@ -326,7 +391,8 @@ public:
         [encoder endEncoding];
 
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("hc_down_injection")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "hc_down_injection_q8" : "hc_down_injection")];
         [encoder setBuffer:normalized_ offset:0 atIndex:0];
         bind_projection(encoder, base + ".input_mix_weight_down", 1);
         bind_projection(encoder, base + ".block_inject_weight", 4);
@@ -337,7 +403,8 @@ public:
         [encoder endEncoding];
 
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("hc_up_mix")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "hc_up_mix_q8" : "hc_up_mix")];
         [encoder setBuffer:normalized_ offset:0 atIndex:0];
         [encoder setBuffer:activation_ offset:0 atIndex:1];
         bind_projection(encoder, base + ".input_mix_weight_up", 2);
@@ -352,7 +419,8 @@ public:
         const auto project = [&](const char* suffix, std::uint32_t rows,
                                  NSUInteger output_offset) {
             id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("q4_input_projection")];
+            [encoder setComputePipelineState:pipeline(
+                vq_routed_ ? "q8_input_projection" : "q4_input_projection")];
             [encoder setBuffer:mixed_ offset:0 atIndex:0];
             bind_projection(encoder, base + suffix, 1);
             [encoder setBuffer:projected_ offset:output_offset * sizeof(std::uint16_t) atIndex:4];
@@ -406,7 +474,8 @@ public:
         [encoder endEncoding];
 
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("gdn_output_projection")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "q8_output_projection_6144" : "gdn_output_projection")];
         [encoder setBuffer:gated_ offset:0 atIndex:0];
         bind_projection(encoder, base + ".out_proj", 1);
         [encoder setBuffer:block_output_ offset:0 atIndex:4];
@@ -452,8 +521,9 @@ public:
     }
 
     void encode_mlp(id<MTLCommandBuffer> command, const std::string& layer,
-                    bool shared_only) {
+                    std::size_t layer_index) {
         const std::string mlp = layer + ".mlp";
+        const bool shared_only = !vq_routed_ && layer_index >= 10 && layer_index <= 33;
         encode_hc_read(command, post_attention_, layer + ".mlp_hyper_connection");
         id<MTLComputeCommandEncoder> encoder;
         if (shared_only) {
@@ -486,9 +556,11 @@ public:
             [encoder endEncoding];
         } else {
             encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("q8_router_logits")];
+            [encoder setComputePipelineState:pipeline(
+                vq_routed_ ? "bf16_router_logits" : "q8_router_logits")];
             [encoder setBuffer:mixed_ offset:0 atIndex:0];
-            bind_projection(encoder, mlp + ".gate", 1);
+            if (vq_routed_) bind(encoder, mlp + ".gate.weight", 1);
+            else bind_projection(encoder, mlp + ".gate", 1);
             [encoder setBuffer:router_logits_ offset:0 atIndex:4];
             [encoder dispatchThreadgroups:MTLSizeMake(128, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
@@ -501,36 +573,94 @@ public:
             [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
             [encoder endEncoding];
-            encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("fused_all_gate_up")];
-            [encoder setBuffer:mixed_ offset:0 atIndex:0];
-            bind_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
-            bind_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
-            [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
-            [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
-            bind_projection(encoder, mlp + ".shared_expert.gate_proj", 9);
-            bind_projection(encoder, mlp + ".shared_expert.up_proj", 12);
-            [encoder setBuffer:shared_hidden_ offset:0 atIndex:15];
-            bind_projection(encoder, mlp + ".shared_expert_gate", 16);
-            [encoder setBuffer:shared_scale_ offset:0 atIndex:19];
-            [encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [encoder endEncoding];
-            encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("fused_all_down")];
-            [encoder setBuffer:routed_hidden_ offset:0 atIndex:0];
-            bind_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
-            [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
-            [encoder setBuffer:route_weights_ offset:0 atIndex:5];
-            [encoder setBuffer:shared_hidden_ offset:0 atIndex:6];
-            bind_projection(encoder, mlp + ".shared_expert.down_proj", 7);
-            [encoder setBuffer:shared_scale_ offset:0 atIndex:10];
-            [encoder setBuffer:moe_output_ offset:0 atIndex:11];
-            [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [encoder endEncoding];
+            if (vq_routed_) {
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline(
+                    vq_d2_layers_[layer_index] ? "vq_d2_gate_up" : "vq_d8_gate_up")];
+                [encoder setBuffer:mixed_ offset:0 atIndex:0];
+                bind_vq_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
+                bind_vq_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
+                [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
+                [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
+                [encoder dispatchThreadgroups:MTLSizeMake(1600, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("q8_shared_gate_up")];
+                [encoder setBuffer:mixed_ offset:0 atIndex:0];
+                bind_projection(encoder, mlp + ".shared_expert.gate_proj", 1);
+                bind_projection(encoder, mlp + ".shared_expert.up_proj", 4);
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:7];
+                [encoder dispatchThreadgroups:MTLSizeMake(160, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("q8_shared_router")];
+                [encoder setBuffer:mixed_ offset:0 atIndex:0];
+                bind_projection(encoder, mlp + ".shared_expert_gate", 1);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:4];
+                [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline(
+                    vq_d2_layers_[layer_index] ?
+                        "vq_d2_down_reduce" : "vq_d8_down_reduce")];
+                [encoder setBuffer:routed_hidden_ offset:0 atIndex:0];
+                bind_vq_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
+                [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
+                [encoder setBuffer:route_weights_ offset:0 atIndex:5];
+                [encoder setBuffer:zero_output_ offset:0 atIndex:6];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("q8_shared_down_merge")];
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:0];
+                bind_projection(encoder, mlp + ".shared_expert.down_proj", 1);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:4];
+                [encoder setBuffer:zero_output_ offset:0 atIndex:5];
+                [encoder setBuffer:moe_output_ offset:0 atIndex:6];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            } else {
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("fused_all_gate_up")];
+                [encoder setBuffer:mixed_ offset:0 atIndex:0];
+                bind_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
+                bind_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
+                [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
+                [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
+                bind_projection(encoder, mlp + ".shared_expert.gate_proj", 9);
+                bind_projection(encoder, mlp + ".shared_expert.up_proj", 12);
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:15];
+                bind_projection(encoder, mlp + ".shared_expert_gate", 16);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:19];
+                [encoder dispatchThreadgroups:MTLSizeMake(1281, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+                encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("fused_all_down")];
+                [encoder setBuffer:routed_hidden_ offset:0 atIndex:0];
+                bind_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
+                [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
+                [encoder setBuffer:route_weights_ offset:0 atIndex:5];
+                [encoder setBuffer:shared_hidden_ offset:0 atIndex:6];
+                bind_projection(encoder, mlp + ".shared_expert.down_proj", 7);
+                [encoder setBuffer:shared_scale_ offset:0 atIndex:10];
+                [encoder setBuffer:moe_output_ offset:0 atIndex:11];
+                [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            }
         }
-        encode_healing_write(command, mlp, post_attention_);
+        if (vq_routed_) encode_hc_write(command, post_attention_, moe_output_, output_stream_);
+        else encode_healing_write(command, mlp, post_attention_);
     }
 
     std::vector<std::uint16_t> decode_gdn_layer(std::size_t index,
@@ -550,7 +680,7 @@ public:
         encode_hc_read(command, stream_, layer + ".attn_hyper_connection");
         encode_gdn(command, layer + ".linear_attn", state);
         encode_hc_write(command, stream_, block_output_, post_attention_);
-        encode_mlp(command, layer, index >= 10 && index <= 33);
+        encode_mlp(command, layer, index);
         [command commit];
         [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted) {
@@ -638,7 +768,8 @@ public:
                     state.position_base + old_blocks * 4);
 
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("attention_qkv_index")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "attention_qkv_index_q8" : "attention_qkv_index")];
         [encoder setBuffer:mixed_ offset:0 atIndex:0];
         bind_projection(encoder, base + ".indexer.index_qk_proj", 1);
         bind_projection(encoder, base + ".q_proj", 4);
@@ -724,7 +855,8 @@ public:
              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [encoder endEncoding];
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("attention_output_projection")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "q8_output_projection_6144" : "attention_output_projection")];
         [encoder setBuffer:attention_gated_ offset:0 atIndex:0];
         bind_projection(encoder, base + ".o_proj", 1);
         [encoder setBuffer:block_output_ offset:0 atIndex:4];
@@ -757,7 +889,7 @@ public:
         encode_hc_read(command, stream_, layer + ".attn_hyper_connection");
         encode_attention(command, layer + ".self_attn", state);
         encode_hc_write(command, stream_, block_output_, post_attention_);
-        encode_mlp(command, layer, index >= 10 && index <= 33);
+        encode_mlp(command, layer, index);
         [command commit];
         [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted) {
@@ -781,7 +913,8 @@ public:
         const auto project = [&](const char* suffix, std::uint32_t rows_count,
                                  NSUInteger output_offset) {
             id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("q4_input_projection")];
+            [encoder setComputePipelineState:pipeline(
+                vq_routed_ ? "q8_input_projection" : "q4_input_projection")];
             [encoder setBuffer:ple_embedding_ offset:0 atIndex:0];
             bind_projection(encoder, base + suffix, 1);
             [encoder setBuffer:ple_projected_
@@ -998,7 +1131,7 @@ public:
                 encode_gdn(command, layer + ".linear_attn", gdn_states_[index]);
             }
             encode_hc_write(command, layer_input, block_output_, post_attention_);
-            encode_mlp(command, layer, index >= 10 && index <= 33);
+            encode_mlp(command, layer, index);
             if ((index + 1) % group_size == 0 || index + 1 == 48) {
                 [command commit];
                 commands.push_back(command);
@@ -1022,7 +1155,8 @@ public:
         const std::string base = "language_model.model.embed_tokens";
         id<MTLCommandBuffer> command = [queue_ commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("embedding_q4_stream")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "embedding_q8_stream" : "embedding_q4_stream")];
         bind_row(encoder, base + ".weight", token, 0);
         bind_row(encoder, base + ".scales", token, 1);
         bind_row(encoder, base + ".biases", token, 2);
@@ -1047,7 +1181,7 @@ public:
         id<MTLCommandBuffer> command = [queue_ commandBuffer];
         encode_hc_read_final(command, stream_);
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("lm_head_q4")];
+        [encoder setComputePipelineState:pipeline(vq_routed_ ? "lm_head_q8" : "lm_head_q4")];
         [encoder setBuffer:mixed_ offset:0 atIndex:0];
         bind_projection(encoder, "language_model.lm_head", 1);
         [encoder setBuffer:head_logits_ offset:0 atIndex:4];
@@ -1094,7 +1228,8 @@ public:
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [encoder endEncoding];
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("hc_down_only")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "hc_down_only_q8" : "hc_down_only")];
         [encoder setBuffer:normalized_ offset:0 atIndex:0];
         bind_projection(encoder, base + ".input_mix_weight_down", 1);
         [encoder setBuffer:activation_ offset:0 atIndex:4];
@@ -1102,7 +1237,8 @@ public:
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [encoder endEncoding];
         encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("hc_up_mix")];
+        [encoder setComputePipelineState:pipeline(
+            vq_routed_ ? "hc_up_mix_q8" : "hc_up_mix")];
         [encoder setBuffer:normalized_ offset:0 atIndex:0];
         [encoder setBuffer:activation_ offset:0 atIndex:1];
         bind_projection(encoder, base + ".input_mix_weight_up", 2);
@@ -1133,6 +1269,8 @@ public:
     std::unordered_map<std::string, SharedTensor> shared_tensors_;
     std::unordered_map<std::string, std::string> weight_map_;
     ModelConfig config_;
+    bool vq_routed_{false};
+    std::array<bool, 48> vq_d2_layers_{};
     std::unique_ptr<NgramHash> ple_hash_;
     std::unique_ptr<NgramTable> ple_table_;
     NgramState ple_ngram_state_;
@@ -1157,22 +1295,30 @@ public:
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
-    return config.hidden_size == 2560 && config.layer_count == 48 &&
+    const bool common = config.hidden_size == 2560 && config.layer_count == 48 &&
         config.expert_count == 512 && config.experts_per_token == 10 &&
-        config.hyper_connection_count == 4 && config.moe_intermediate_size == 448 &&
+        config.hyper_connection_count == 4 &&
         config.shared_expert_intermediate_size == 640 && config.attention_head_count == 24 &&
         config.key_value_head_count == 2 && config.head_dimension == 256 &&
         config.indexer_head_count == 4 && config.indexer_key_value_head_count == 1 &&
         config.indexer_head_dimension == 128 && config.indexer_compress_ratio == 4 &&
         config.linear_convolution_kernel_size == 4 && config.linear_key_head_dimension == 128 &&
         config.linear_value_head_dimension == 128 && config.linear_key_head_count == 16 &&
-        config.linear_value_head_count == 48 && config.niwaki_maps_unfolded &&
-        has_expected_layer_split(config);
+        config.linear_value_head_count == 48 && has_expected_attention_split(config);
+    const bool niwaki = config.moe_intermediate_size == 448 &&
+        config.niwaki_maps_unfolded && has_expected_layer_split(config);
+    const bool vq = config.moe_intermediate_size == 640 &&
+        !config.niwaki_maps_unfolded && config.shared_only_layers.empty();
+    return common && (niwaki || vq);
 }
 
 std::unique_ptr<PersistentMetalBackend> PersistentMetalBackend::create(
     const ModelManifest& manifest, MlxTensorStore* shared_weights) {
     if (!supports(manifest.config())) return nullptr;
+    const bool vq = manifest.vector_quantization_for(
+        "language_model.model.layers.2.mlp.switch_mlp.gate_proj") != nullptr;
+    const char* enable_vq = std::getenv("QWEN38_PERSISTENT_VQ");
+    if (vq && (enable_vq == nullptr || std::string_view(enable_vq) != "1")) return nullptr;
     return std::unique_ptr<PersistentMetalBackend>(
         new PersistentMetalBackend(std::make_unique<Impl>(manifest, shared_weights)));
 }

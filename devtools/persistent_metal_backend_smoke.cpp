@@ -1,4 +1,5 @@
 #include "qwen38/decoder_layer.hpp"
+#include "qwen38/hyper_connection.hpp"
 #include "qwen38/mlx_backend.hpp"
 #include "qwen38/model_manifest.hpp"
 #include "qwen38/model.hpp"
@@ -71,7 +72,8 @@ void check_layer(qwen38::PersistentMetalBackend& backend,
     std::cout << "layer " << layer_index << " gpu_ms " << gpu_ms
               << " cosine " << cosine << " rmse " << rmse
               << " max_abs " << max_abs << '\n';
-    if (cosine < 0.99998 || rmse > 0.002 || max_abs > 0.012) {
+    if (!std::isfinite(cosine) || !std::isfinite(rmse) ||
+        cosine < 0.99998 || rmse > 0.002 || max_abs > 0.012) {
         throw std::runtime_error("persistent GDN layer parity failed");
     }
 }
@@ -118,7 +120,8 @@ void check_attention_layer(qwen38::PersistentMetalBackend& backend,
     std::cout << "layer " << layer_index << " gpu_ms " << gpu_ms
               << " cosine " << cosine << " rmse " << rmse
               << " max_abs " << max_abs << '\n';
-    if (cosine < 0.99994 || rmse > 0.004 || max_abs > 0.025) {
+    if (!std::isfinite(cosine) || !std::isfinite(rmse) ||
+        cosine < 0.99994 || rmse > 0.004 || max_abs > 0.025) {
         throw std::runtime_error("persistent attention layer parity failed");
     }
 
@@ -161,7 +164,8 @@ void check_attention_layer(qwen38::PersistentMetalBackend& backend,
     std::cout << "layer " << layer_index << " trajectory_min_cosine "
               << minimum_cosine << " trajectory_max_rmse " << maximum_rmse
               << " trajectory_max_abs " << maximum_abs << '\n';
-    if (minimum_cosine < 0.99990 || maximum_rmse > 0.015 || maximum_abs > 0.20) {
+    if (!std::isfinite(minimum_cosine) || !std::isfinite(maximum_rmse) ||
+        minimum_cosine < 0.99990 || maximum_rmse > 0.015 || maximum_abs > 0.20) {
         throw std::runtime_error("persistent attention trajectory parity failed");
     }
 }
@@ -290,6 +294,37 @@ void check_ple(qwen38::PersistentMetalBackend& backend,
     std::cout << "ple_gpu_ms " << gpu_ms << " ple_cosine " << cosine
               << " ple_rmse " << rmse << " ple_max_abs " << max_abs << '\n';
     if (cosine < 0.999 || rmse > 0.05) throw std::runtime_error("persistent PLE parity failed");
+}
+
+void check_head(qwen38::PersistentMetalBackend& backend,
+                qwen38::MlxTensorStore& tensors,
+                const std::vector<float>& input_f32,
+                const std::vector<std::uint16_t>& input_bf16) {
+    const qwen38::ModelConfig& config = tensors.manifest().config();
+    qwen38::HyperConnection mixer(
+        tensors, "language_model.model.hyper_connection_mixer",
+        config.hidden_size, config.hyper_connection_count,
+        config.quantization_bits, config.quantization_group_size,
+        static_cast<float>(config.rms_norm_epsilon), false);
+    qwen38::MlxArray input = qwen38::MlxArray::from_float32(
+        input_f32, std::vector<int>{1, 1, 10240}).astype(MLX_BFLOAT16);
+    qwen38::MlxArray mixed = mixer.read(input).mixed;
+    const qwen38::QuantizationSpec quantization =
+        tensors.manifest().quantization_for("language_model.lm_head");
+    qwen38::MlxArray logits = qwen38::MlxArray::quantized_matmul(
+        mixed,
+        tensors.tensor("language_model.lm_head.weight"),
+        tensors.tensor("language_model.lm_head.scales"),
+        tensors.tensor("language_model.lm_head.biases"),
+        static_cast<int>(quantization.group_size),
+        static_cast<int>(quantization.bits));
+    const std::uint32_t expected = logits.argmax_all().item_uint32();
+    const auto actual = backend.greedy_head(input_bf16);
+    std::cout << "head_token " << actual.token << " mlx_token " << expected
+              << " head_logit " << actual.logit << '\n';
+    if (actual.token != expected || !std::isfinite(actual.logit)) {
+        throw std::runtime_error("persistent head parity failed");
+    }
 }
 
 void check_greedy(qwen38::PersistentMetalBackend& backend,
@@ -427,7 +462,7 @@ int main(int argc, char** argv) {
         const auto& inventory = backend->inventory();
         std::cout << "pipelines " << inventory.pipeline_count << '\n'
                   << "shards " << inventory.shard_count << '\n'
-                  << "mapped_weight_bytes " << inventory.mapped_weight_bytes << '\n';
+                  << "mapped_weight_bytes " << inventory.mapped_weight_bytes << std::endl;
         std::vector<float> input_f32(10240);
         for (std::size_t index = 0; index < input_f32.size(); ++index) {
             input_f32[index] = static_cast<float>(
@@ -438,7 +473,19 @@ int main(int argc, char** argv) {
             input_bf16[index] = bf16(input_f32[index]);
         }
         qwen38::MlxTensorStore tensors(manifest);
-        check_layer(*backend, tensors, 0, input_f32, input_bf16);
+        std::size_t first_layer = 0;
+        if (const char* requested = std::getenv("QWEN38_PERSISTENT_SMOKE_LAYER");
+            requested != nullptr && *requested != '\0') {
+            first_layer = static_cast<std::size_t>(std::strtoul(requested, nullptr, 10));
+        }
+        check_layer(*backend, tensors, first_layer, input_f32, input_bf16);
+        if (const char* quick = std::getenv("QWEN38_PERSISTENT_SMOKE_QUICK");
+            quick != nullptr && std::string_view(quick) == "1") {
+            check_ple(*backend, tensors, input_f32, input_bf16);
+            check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
+            check_head(*backend, tensors, input_f32, input_bf16);
+            return inventory.pipeline_count == 48 && inventory.shard_count != 0 ? 0 : 1;
+        }
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 11, input_f32, input_bf16);
@@ -451,7 +498,7 @@ int main(int argc, char** argv) {
             q8_import != nullptr && std::string_view(q8_import) == "1") {
             check_q8_state_import(*backend, tensors, input_f32, input_bf16);
         }
-        return inventory.pipeline_count == 33 && inventory.shard_count != 0 ? 0 : 1;
+        return inventory.pipeline_count == 48 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

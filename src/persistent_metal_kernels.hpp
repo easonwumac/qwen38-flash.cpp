@@ -4,7 +4,7 @@
 
 namespace qwen38::persistent_metal {
 
-inline constexpr std::string_view metal_source = R"metal(
+inline constexpr std::string_view metal_source_prefix = R"metal(
 #include <metal_stdlib>
 using namespace metal;
 
@@ -30,11 +30,68 @@ inline float q8_dot4(const device uchar* packed, const device bfloat* x) {
     return value;
 }
 
+inline float q8_dot8(const device uchar* packed, const device bfloat* x) {
+    float value = 0.0f;
+    for (uint i = 0; i < 8; ++i) value += float(packed[i]) * float(x[i]);
+    return value;
+}
+
 inline bfloat load_bf16_unaligned(const device uchar* bytes, ulong index) {
     const ulong offset = index * 2;
     const ushort bits = ushort(ushort(bytes[offset]) |
                                ushort(ushort(bytes[offset + 1]) << 8));
     return as_type<bfloat>(bits);
+}
+
+inline half load_f16_unaligned(const device uchar* bytes, ulong index) {
+    const ulong offset = index * 2;
+    const ushort bits = ushort(ushort(bytes[offset]) |
+                               ushort(ushort(bytes[offset + 1]) << 8));
+    return as_type<half>(bits);
+}
+
+inline uint load_u32_unaligned(const device uchar* bytes, ulong index) {
+    const ulong offset = index * 4;
+    return uint(bytes[offset]) | (uint(bytes[offset + 1]) << 8) |
+        (uint(bytes[offset + 2]) << 16) | (uint(bytes[offset + 3]) << 24);
+}
+
+inline uint vq14_code(const device uchar* row, uint subvector) {
+    const uint within = subvector & 31u;
+    const uint bit_offset = within * 14u;
+    const uint word = (subvector >> 5) * 14u + (bit_offset >> 5);
+    const uint shift = bit_offset & 31u;
+    ulong packed = ulong(load_u32_unaligned(row, word) >> shift);
+    if (shift + 14u > 32u)
+        packed |= ulong(load_u32_unaligned(row, word + 1u)) << (32u - shift);
+    return uint(packed & 0x3fffu);
+}
+
+inline float vq_d8_group_dot(const device uchar* codes, const device uchar* codebook,
+                             const device bfloat* x, uint group) {
+    float value = 0.0f;
+    for (uint local = 0; local < 8; ++local) {
+        const uint code = vq14_code(codes, group * 8u + local);
+        const uint xb = group * 64u + local * 8u;
+        const uint cb = code * 8u;
+        for (uint element = 0; element < 8; ++element)
+            value += float(x[xb + element]) *
+                float(load_f16_unaligned(codebook, cb + element));
+    }
+    return value;
+}
+
+inline float vq_d2_group_dot(const device uchar* codes, const device uchar* codebook,
+                             const device bfloat* x, uint group) {
+    float value = 0.0f;
+    for (uint local = 0; local < 32; ++local) {
+        const uint code = uint(codes[group * 32u + local]);
+        const uint xb = group * 64u + local * 2u;
+        value += float(x[xb]) * float(load_f16_unaligned(codebook, code * 2u));
+        value += float(x[xb + 1u]) *
+            float(load_f16_unaligned(codebook, code * 2u + 1u));
+    }
+    return value;
 }
 
 kernel void q3_gate_up(
@@ -116,6 +173,150 @@ kernel void q3_down_reduce(
     if (lane == 0) output[row] = total;
 }
 
+kernel void vq_d8_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* gate_codes [[buffer(1)]],
+    const device uchar* gate_codebook [[buffer(2)]],
+    const device uchar* gate_scales [[buffer(3)]],
+    const device uchar* up_codes [[buffer(4)]],
+    const device uchar* up_codebook [[buffer(5)]],
+    const device uchar* up_scales [[buffer(6)]],
+    const device uint* experts [[buffer(7)]],
+    device bfloat* output [[buffer(8)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 640, groups = 40, words = 140;
+    const uint linear = group_id * 4u + simd;
+    if (linear >= 10u * rows) return;
+    const uint slot = linear / rows, row = linear % rows;
+    const ulong matrix_row = ulong(experts[slot]) * rows + row;
+    const device uchar* gate_row = gate_codes + matrix_row * words * 4u;
+    const device uchar* up_row = up_codes + matrix_row * words * 4u;
+    float gate = 0.0f, up = 0.0f;
+    for (uint quant_group = lane; quant_group < groups; quant_group += 32u) {
+        gate += float(load_f16_unaligned(
+                    gate_scales, matrix_row * groups + quant_group)) *
+            vq_d8_group_dot(gate_row, gate_codebook, x, quant_group);
+        up += float(load_f16_unaligned(
+                    up_scales, matrix_row * groups + quant_group)) *
+            vq_d8_group_dot(up_row, up_codebook, x, quant_group);
+    }
+    gate = simd_sum(gate);
+    up = simd_sum(up);
+    if (lane == 0) {
+        const float rounded_gate = float(bfloat(gate));
+        const float rounded_up = float(bfloat(up));
+        output[linear] = bfloat(
+            float(bfloat(rounded_gate / (1.0f + metal::exp(-rounded_gate)))) * rounded_up);
+    }
+}
+
+kernel void vq_d2_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* gate_codes [[buffer(1)]],
+    const device uchar* gate_codebook [[buffer(2)]],
+    const device uchar* gate_scales [[buffer(3)]],
+    const device uchar* up_codes [[buffer(4)]],
+    const device uchar* up_codebook [[buffer(5)]],
+    const device uchar* up_scales [[buffer(6)]],
+    const device uint* experts [[buffer(7)]],
+    device bfloat* output [[buffer(8)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 640, groups = 40, codes_per_row = 1280;
+    const uint linear = group_id * 4u + simd;
+    if (linear >= 10u * rows) return;
+    const uint slot = linear / rows, row = linear % rows;
+    const ulong matrix_row = ulong(experts[slot]) * rows + row;
+    const device uchar* gate_row = gate_codes + matrix_row * codes_per_row;
+    const device uchar* up_row = up_codes + matrix_row * codes_per_row;
+    float gate = 0.0f, up = 0.0f;
+    for (uint quant_group = lane; quant_group < groups; quant_group += 32u) {
+        gate += float(load_f16_unaligned(
+                    gate_scales, matrix_row * groups + quant_group)) *
+            vq_d2_group_dot(gate_row, gate_codebook, x, quant_group);
+        up += float(load_f16_unaligned(
+                    up_scales, matrix_row * groups + quant_group)) *
+            vq_d2_group_dot(up_row, up_codebook, x, quant_group);
+    }
+    gate = simd_sum(gate);
+    up = simd_sum(up);
+    if (lane == 0) {
+        const float rounded_gate = float(bfloat(gate));
+        const float rounded_up = float(bfloat(up));
+        output[linear] = bfloat(
+            float(bfloat(rounded_gate / (1.0f + metal::exp(-rounded_gate)))) * rounded_up);
+    }
+}
+
+kernel void vq_d8_down_reduce(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* codes [[buffer(1)]],
+    const device uchar* codebook [[buffer(2)]],
+    const device uchar* scales [[buffer(3)]],
+    const device uint* experts [[buffer(4)]],
+    const device bfloat* route_weights [[buffer(5)]],
+    device bfloat* output [[buffer(6)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, groups = 10, words = 42;
+    const uint row = group_id * 4u + simd;
+    if (row >= rows) return;
+    bfloat total = bfloat(0.0f);
+    for (uint slot = 0; slot < 10; ++slot) {
+        const ulong matrix_row = ulong(experts[slot]) * rows + row;
+        const device uchar* code_row = codes + matrix_row * words * 4u;
+        const device bfloat* x = input + slot * k;
+        float dot = 0.0f;
+        if (lane < groups) {
+            dot = float(load_f16_unaligned(scales, matrix_row * groups + lane)) *
+                vq_d8_group_dot(code_row, codebook, x, lane);
+        }
+        dot = simd_sum(dot);
+        if (lane == 0) {
+            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
+            total = bfloat(float(total) + float(weighted));
+        }
+    }
+    if (lane == 0) output[row] = total;
+}
+
+kernel void vq_d2_down_reduce(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* codes [[buffer(1)]],
+    const device uchar* codebook [[buffer(2)]],
+    const device uchar* scales [[buffer(3)]],
+    const device uint* experts [[buffer(4)]],
+    const device bfloat* route_weights [[buffer(5)]],
+    device bfloat* output [[buffer(6)]],
+    uint group_id [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, groups = 10, codes_per_row = 320;
+    const uint row = group_id * 4u + simd;
+    if (row >= rows) return;
+    bfloat total = bfloat(0.0f);
+    for (uint slot = 0; slot < 10; ++slot) {
+        const ulong matrix_row = ulong(experts[slot]) * rows + row;
+        const device uchar* code_row = codes + matrix_row * codes_per_row;
+        const device bfloat* x = input + slot * k;
+        float dot = 0.0f;
+        if (lane < groups) {
+            dot = float(load_f16_unaligned(scales, matrix_row * groups + lane)) *
+                vq_d2_group_dot(code_row, codebook, x, lane);
+        }
+        dot = simd_sum(dot);
+        if (lane == 0) {
+            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
+            total = bfloat(float(total) + float(weighted));
+        }
+    }
+    if (lane == 0) output[row] = total;
+}
+
 kernel void q4_shared_gate_up(
     const device bfloat* x [[buffer(0)]],
     const device uchar* gate_weight [[buffer(1)]],
@@ -143,6 +344,45 @@ kernel void q4_shared_gate_up(
             float(load_bf16_unaligned(gate_bias, row * groups + affine)) * sum;
         up += float(load_bf16_unaligned(up_scale, row * groups + affine)) *
                 q4_dot8(uw + quant, x + base) +
+            float(load_bf16_unaligned(up_bias, row * groups + affine)) * sum;
+    }
+    gate = simd_sum(gate);
+    up = simd_sum(up);
+    if (lane == 0) {
+        const float rounded_gate = float(bfloat(gate));
+        const float rounded_up = float(bfloat(up));
+        output[row] = bfloat(
+            float(bfloat(rounded_gate / (1.0f + metal::exp(-rounded_gate)))) * rounded_up);
+    }
+}
+
+kernel void q8_shared_gate_up(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* gate_weight [[buffer(1)]],
+    const device uchar* gate_scale [[buffer(2)]],
+    const device uchar* gate_bias [[buffer(3)]],
+    const device uchar* up_weight [[buffer(4)]],
+    const device uchar* up_scale [[buffer(5)]],
+    const device uchar* up_bias [[buffer(6)]],
+    device bfloat* output [[buffer(7)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 640, k = 2560, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    const device uchar* gw = gate_weight + row * k;
+    const device uchar* uw = up_weight + row * k;
+    float gate = 0.0f, up = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+        const uint affine = base / 64;
+        gate += float(load_bf16_unaligned(gate_scale, row * groups + affine)) *
+                q8_dot8(gw + base, x + base) +
+            float(load_bf16_unaligned(gate_bias, row * groups + affine)) * sum;
+        up += float(load_bf16_unaligned(up_scale, row * groups + affine)) *
+                q8_dot8(uw + base, x + base) +
             float(load_bf16_unaligned(up_bias, row * groups + affine)) * sum;
     }
     gate = simd_sum(gate);
@@ -200,6 +440,36 @@ kernel void q4_shared_down_merge(
         dot += float(load_bf16_unaligned(scale, row * groups + base / 32)) *
                 q4_dot8(wr + base / 2, input + base) +
             float(load_bf16_unaligned(bias, row * groups + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) {
+        const bfloat shared = bfloat(float(bfloat(dot)) * float(router[0]));
+        output[row] = bfloat(float(routed[row]) + float(shared));
+    }
+}
+
+kernel void q8_shared_down_merge(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]],
+    const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]],
+    const device bfloat* router [[buffer(4)]],
+    const device bfloat* routed [[buffer(5)]],
+    device bfloat* output [[buffer(6)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 640, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    const device uchar* wr = weight + row * k;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(input[base + i]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(wr + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) {
@@ -344,6 +614,20 @@ kernel void q8_router_logits(
     }
     dot = simd_sum(dot);
     if (lane == 0) logits[row] = float(bfloat(dot));
+}
+
+kernel void bf16_router_logits(
+    const device bfloat* x [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    device float* logits [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint row = group * 4u + simd;
+    if (row >= 512u) return;
+    float dot = 0.0f;
+    for (uint column = lane; column < 2560u; column += 32u)
+        dot += float(load_bf16_unaligned(weight, ulong(row) * 2560u + column)) *
+            float(x[column]);
+    dot = simd_sum(dot);
+    if (lane == 0) logits[row] = dot;
 }
 
 kernel void select_top10(
@@ -648,6 +932,45 @@ kernel void attention_qkv_index(
     if (lane == 0) output[linear] = bfloat(dot);
 }
 
+kernel void attention_qkv_index_q8(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* iw [[buffer(1)]], const device uchar* is [[buffer(2)]],
+    const device uchar* ib [[buffer(3)]], const device uchar* qw [[buffer(4)]],
+    const device uchar* qs [[buffer(5)]], const device uchar* qb [[buffer(6)]],
+    const device uchar* kw [[buffer(7)]], const device uchar* ks [[buffer(8)]],
+    const device uchar* kb [[buffer(9)]], const device uchar* vw [[buffer(10)]],
+    const device uchar* vs [[buffer(11)]], const device uchar* vb [[buffer(12)]],
+    device bfloat* output [[buffer(13)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 2560, groups = k / 64;
+    const uint linear = group * 4 + simd;
+    if (linear >= 13952) return;
+    const device uchar* weight;
+    const device uchar* scale;
+    const device uchar* bias;
+    uint row;
+    if (linear < 640) {
+        row = linear; weight = iw; scale = is; bias = ib;
+    } else if (linear < 12928) {
+        row = linear - 640; weight = qw; scale = qs; bias = qb;
+    } else if (linear < 13440) {
+        row = linear - 12928; weight = kw; scale = ks; bias = kb;
+    } else {
+        row = linear - 13440; weight = vw; scale = vs; bias = vb;
+    }
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[linear] = bfloat(dot);
+}
+
 kernel void attention_normalize_rope(
     const device bfloat* projected [[buffer(0)]], const device uchar* query_norm [[buffer(1)]],
     const device uchar* key_norm [[buffer(2)]], const device uchar* index_norm [[buffer(3)]],
@@ -719,6 +1042,27 @@ kernel void attention_output_projection(
     if (lane == 0) output[row] = bfloat(dot);
 }
 
+kernel void q8_output_projection_6144(
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint rows = 2560, k = 6144, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[row] = bfloat(dot);
+}
+
 kernel void q4_input_projection(
     const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
     const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
@@ -735,6 +1079,28 @@ kernel void q4_input_projection(
         dot += float(load_bf16_unaligned(scale, row * 80 + base / 32)) *
                 q4_dot8(weight + row * 1280 + base / 2, input + base) +
             float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[row] = bfloat(dot);
+}
+
+kernel void q8_input_projection(
+    const device bfloat* input [[buffer(0)]], const device uchar* weight [[buffer(1)]],
+    const device uchar* scale [[buffer(2)]], const device uchar* bias [[buffer(3)]],
+    device bfloat* output [[buffer(4)]], constant uint& rows [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 2560, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) output[row] = bfloat(dot);
@@ -878,6 +1244,9 @@ kernel void gdn_output_projection(
     if (lane == 0) output[row] = bfloat(dot);
 }
 
+)metal";
+
+inline constexpr std::string_view metal_source_suffix = R"metal(
 kernel void hc_write(
     const device bfloat* stream [[buffer(0)]], const device bfloat* block [[buffer(1)]],
     const device bfloat* injection [[buffer(2)]], device bfloat* output [[buffer(3)]],
@@ -960,6 +1329,50 @@ kernel void hc_down_injection(
     }
 }
 
+kernel void hc_down_injection_q8(
+    const device bfloat* x [[buffer(0)]],
+    const device uchar* down_weight [[buffer(1)]],
+    const device uchar* down_scale [[buffer(2)]],
+    const device uchar* down_bias [[buffer(3)]],
+    const device uchar* injection_weight [[buffer(4)]],
+    const device uchar* injection_scale [[buffer(5)]],
+    const device uchar* injection_bias [[buffer(6)]],
+    device bfloat* activation [[buffer(7)]], device bfloat* injection [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint row [[threadgroup_position_in_grid]]) {
+    constexpr uint k = 10240, groups = k / 64;
+    threadgroup float partial[8];
+    const bool is_down = row < 320;
+    const uint local_row = is_down ? row : row - 320;
+    const device uchar* weight = is_down ? down_weight : injection_weight;
+    const device uchar* scale = is_down ? down_scale : injection_scale;
+    const device uchar* bias = is_down ? down_bias : injection_bias;
+    float dot = 0.0f;
+    for (uint base = tid * 8; base < k; base += 2048) {
+        const device uchar* bytes = weight + local_row * k + base;
+        const float s = float(load_bf16_unaligned(scale, local_row * groups + base / 64));
+        const float b = float(load_bf16_unaligned(bias, local_row * groups + base / 64));
+        float sum = 0.0f;
+        for (uint i = 0; i < 8; ++i) sum += float(x[base + i]);
+        dot += s * q8_dot8(bytes, x + base) + b * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) partial[simd] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) total += partial[i];
+        const bfloat value = bfloat(total / 4.0f);
+        if (is_down) {
+            const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(value))));
+            activation[row] = value * gate;
+        } else {
+            injection[local_row] =
+                bfloat(2.0f * (1.0f / (1.0f + metal::exp(-float(value)))));
+        }
+    }
+}
+
 kernel void hc_up_mix(
     const device bfloat* normalized [[buffer(0)]], const device bfloat* activation [[buffer(1)]],
     const device uchar* weight [[buffer(2)]], const device uchar* scale [[buffer(3)]],
@@ -979,6 +1392,33 @@ kernel void hc_up_mix(
             float sum = 0.0f;
             for (uint i = 0; i < 8; ++i) sum += float(activation[base + i]);
             dot += s * q4_dot8(bytes, activation + base) + b * sum;
+        }
+        dot = simd_sum(dot);
+        const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(bfloat(dot)))));
+        stream_sum += float(bfloat(float(gate) * float(normalized[row])));
+    }
+    if (lane == 0) mixed[column] = bfloat(float(bfloat(stream_sum)) / 4.0f);
+}
+
+kernel void hc_up_mix_q8(
+    const device bfloat* normalized [[buffer(0)]], const device bfloat* activation [[buffer(1)]],
+    const device uchar* weight [[buffer(2)]], const device uchar* scale [[buffer(3)]],
+    const device uchar* bias [[buffer(4)]], device bfloat* mixed [[buffer(5)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 320, groups = k / 64;
+    const uint column = group * 8 + simd;
+    if (column >= 2560) return;
+    float stream_sum = 0.0f;
+    for (uint hc = 0; hc < 4; ++hc) {
+        const uint row = hc * 2560 + column;
+        float dot = 0.0f;
+        for (uint base = lane * 8; base < k; base += 256) {
+            float sum = 0.0f;
+            for (uint i = 0; i < 8; ++i) sum += float(activation[base + i]);
+            dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                    q8_dot8(weight + row * k + base, activation + base) +
+                float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
         }
         dot = simd_sum(dot);
         const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(bfloat(dot)))));
@@ -1131,6 +1571,18 @@ kernel void embedding_q4_stream(
     for (uint hc = 0; hc < 4; ++hc) stream[hc * 2560 + column] = value;
 }
 
+kernel void embedding_q8_stream(
+    const device uchar* weight [[buffer(0)]], const device uchar* scale [[buffer(1)]],
+    const device uchar* bias [[buffer(2)]], device bfloat* stream [[buffer(3)]],
+    uint column [[thread_position_in_grid]]) {
+    if (column >= 2560) return;
+    const uint group = column / 64;
+    const bfloat value = bfloat(float(weight[column]) *
+        float(load_bf16_unaligned(scale, group)) +
+        float(load_bf16_unaligned(bias, group)));
+    for (uint hc = 0; hc < 4; ++hc) stream[hc * 2560 + column] = value;
+}
+
 kernel void hc_down_only(
     const device bfloat* input [[buffer(0)]],
     const device uchar* weight [[buffer(1)]], const device uchar* scale [[buffer(2)]],
@@ -1148,7 +1600,36 @@ kernel void hc_down_only(
             float(load_bf16_unaligned(bias, row * 320 + base / 32)) * sum;
     }
     dot = simd_sum(dot);
-    if (lane == 0) activation[row] = bfloat(dot);
+    if (lane == 0) {
+        const bfloat value = bfloat(dot / 4.0f);
+        const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(value))));
+        activation[row] = value * gate;
+    }
+}
+
+kernel void hc_down_only_q8(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]], const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]], device bfloat* activation [[buffer(4)]],
+    uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 10240, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= 320) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint item = 0; item < 8; ++item) sum += float(input[base + item]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) {
+        const bfloat value = bfloat(dot / 4.0f);
+        const bfloat gate = bfloat(1.0f / (1.0f + metal::exp(-float(value))));
+        activation[row] = value * gate;
+    }
 }
 
 kernel void lm_head_q4(
@@ -1166,6 +1647,27 @@ kernel void lm_head_q4(
         dot += float(load_bf16_unaligned(scale, row * 80 + base / 32)) *
                 q4_dot8(weight + row * 1280 + base / 2, input + base) +
             float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) logits[row] = dot;
+}
+
+kernel void lm_head_q8(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* weight [[buffer(1)]], const device uchar* scale [[buffer(2)]],
+    const device uchar* bias [[buffer(3)]], device float* logits [[buffer(4)]],
+    constant uint& rows [[buffer(5)]], uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 2560, groups = k / 64;
+    const uint row = group * 4 + simd;
+    if (row >= rows) return;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint item = 0; item < 8; ++item) sum += float(input[base + item]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
     }
     dot = simd_sum(dot);
     if (lane == 0) logits[row] = dot;
