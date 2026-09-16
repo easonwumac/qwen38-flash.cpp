@@ -9,6 +9,321 @@ inline constexpr std::string_view header = R"metal(
 using namespace metal;
 )metal";
 
+// Segmented-tile VQ GEMM for the Flash-Next d8/K16384 packed-14 down
+// projection. Each sorted route writes its FP32 weighted result directly to
+// its original slot, fusing the inverse permutation and route multiply.
+// The design is adapted from VQLab's checkpoint-bundled VQ runtime, distributed
+// under the Qwen Community License 1.0; see NOTICE and
+// licenses/qwen-community-1.0.txt. It decodes one 32-output x 64-input weight
+// tile and reuses it for 32 routed rows before advancing to the next group.
+inline constexpr std::string_view gemmseg_d8 = R"metal(
+    const uint lane = thread_position_in_threadgroup.x;
+    const uint simdgroup = thread_position_in_threadgroup.y;
+    const uint tid = simdgroup * 32 + lane;
+    const uint output_tile = threadgroup_position_in_grid.x;
+    const uint route_tile = thread_position_in_grid.y / (OTILE / 8);
+
+    const int expert = tmeta[route_tile * 3];
+    const int route_start = tmeta[route_tile * 3 + 1];
+    const int route_count = tmeta[route_tile * 3 + 2];
+    const int output_start = (int)output_tile * OTILE;
+    const int output_row = output_start + (int)lane;
+    const int subvectors = IN / 8;
+    const int words_per_row = ((subvectors + 31) / 32) * 14;
+
+    threadgroup half weight_tile[64][OTILE];
+    threadgroup half input_tile[RTILE][64];
+    threadgroup float output_tile_buffer[RTILE][OTILE];
+
+    const int weight_row = (int)tid / 4;
+    const int code_begin = ((int)tid % 4) * 2;
+    const device uint* packed_row = (const device uint*)codes
+        + ((size_t)expert * OUT + (size_t)(output_start + weight_row))
+            * words_per_row;
+    const device half* scale_row = scales
+        + ((size_t)expert * OUT + (size_t)(output_start + weight_row)) * NGRP;
+    const device half4* codebook4 = (const device half4*)codebook;
+    const int input_row = (int)tid / 4;
+
+    simdgroup_float8x8 accum0 = simdgroup_float8x8(0);
+    simdgroup_float8x8 accum1 = simdgroup_float8x8(0);
+    simdgroup_float8x8 accum2 = simdgroup_float8x8(0);
+    simdgroup_float8x8 accum3 = simdgroup_float8x8(0);
+
+    for (int group = 0; group < NGRP; ++group) {
+        const int subvector_begin = group * 8;
+        const float scale = (float)scale_row[group];
+        for (int local = code_begin; local < code_begin + 2; ++local) {
+            const int subvector = subvector_begin + local;
+            const uint within = (uint)subvector & 31u;
+            const uint bit_offset = within * 14u;
+            const uint word = ((uint)subvector >> 5) * 14u + (bit_offset >> 5);
+            const uint shift = bit_offset & 31u;
+            ulong packed = (ulong)(packed_row[word] >> shift);
+            if (shift + 14u > 32u)
+                packed |= (ulong)packed_row[word + 1] << (32u - shift);
+            const uint code = (uint)(packed & 0x3fffu);
+            const half4 low = codebook4[2u * code];
+            const half4 high = codebook4[2u * code + 1u];
+            const int column = local * 8;
+            weight_tile[column][weight_row] = (half)(scale * (float)low.x);
+            weight_tile[column + 1][weight_row] = (half)(scale * (float)low.y);
+            weight_tile[column + 2][weight_row] = (half)(scale * (float)low.z);
+            weight_tile[column + 3][weight_row] = (half)(scale * (float)low.w);
+            weight_tile[column + 4][weight_row] = (half)(scale * (float)high.x);
+            weight_tile[column + 5][weight_row] = (half)(scale * (float)high.y);
+            weight_tile[column + 6][weight_row] = (half)(scale * (float)high.z);
+            weight_tile[column + 7][weight_row] = (half)(scale * (float)high.w);
+        }
+
+        if (input_row < RTILE) {
+            const device half* source = nullptr;
+            if (input_row < route_count)
+                source = xsrc + (size_t)srcrows[route_start + input_row] * IN
+                    + (size_t)group * 64;
+            for (int local = code_begin; local < code_begin + 2; ++local) {
+                const int column = local * 8;
+                for (int element = 0; element < 8; ++element)
+                    input_tile[input_row][column + element] = input_row < route_count
+                        ? source[column + element] : (half)0;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int k8 = 0; k8 < 8; ++k8) {
+            simdgroup_half8x8 weight_matrix;
+            simdgroup_load(weight_matrix,
+                &weight_tile[k8 * 8][(int)simdgroup * 8], OTILE);
+            simdgroup_half8x8 input_matrix;
+            simdgroup_load(input_matrix, &input_tile[0][k8 * 8], 64);
+            simdgroup_multiply_accumulate(accum0, input_matrix, weight_matrix, accum0);
+            if constexpr (RTILE >= 16) {
+                simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
+                simdgroup_multiply_accumulate(accum1, input_matrix, weight_matrix, accum1);
+            }
+            if constexpr (RTILE >= 24) {
+                simdgroup_load(input_matrix, &input_tile[16][k8 * 8], 64);
+                simdgroup_multiply_accumulate(accum2, input_matrix, weight_matrix, accum2);
+            }
+            if constexpr (RTILE >= 32) {
+                simdgroup_load(input_matrix, &input_tile[24][k8 * 8], 64);
+                simdgroup_multiply_accumulate(accum3, input_matrix, weight_matrix, accum3);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    simdgroup_store(accum0, &output_tile_buffer[0][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 16)
+        simdgroup_store(accum1, &output_tile_buffer[8][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 24)
+        simdgroup_store(accum2, &output_tile_buffer[16][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 32)
+        simdgroup_store(accum3, &output_tile_buffer[24][(int)simdgroup * 8], OTILE);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint threadgroup_threads =
+        threads_per_threadgroup.x * threads_per_threadgroup.y;
+    for (uint linear = tid; linear < (uint)(route_count * OTILE);
+         linear += threadgroup_threads) {
+        const int route = (int)linear / OTILE;
+        const int column = (int)linear - route * OTILE;
+        const int output_column = output_start + column;
+        if (output_column < OUT) {
+            const int sorted_route = route_start + route;
+            const int destination = destination_slots[sorted_route];
+            const float projected =
+                (float)(half)output_tile_buffer[route][column];
+            y[(size_t)destination * OUT + output_column] =
+                route_weights[destination] * projected;
+        }
+    }
+)metal";
+
+// Gate/up twin of gemmseg_d8. Both projections share the route plan and input
+// tile; weight decode and matrix accumulation remain ordered independently so
+// the two FP16 projection outputs match separate gemmseg dispatches.
+inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
+    const uint lane = thread_position_in_threadgroup.x;
+    const uint simdgroup = thread_position_in_threadgroup.y;
+    const uint tid = simdgroup * 32 + lane;
+    const uint output_tile = threadgroup_position_in_grid.x;
+    const uint route_tile = thread_position_in_grid.y / (OTILE / 8);
+    const int expert = tmeta[route_tile * 3];
+    const int route_start = tmeta[route_tile * 3 + 1];
+    const int route_count = tmeta[route_tile * 3 + 2];
+    const int output_start = (int)output_tile * OTILE;
+    const int subvectors = IN / 8;
+    const int words_per_row = ((subvectors + 31) / 32) * 14;
+    const int weight_row = (int)tid / 4;
+    const int code_begin = ((int)tid % 4) * 2;
+    const int input_row = (int)tid / 4;
+
+    threadgroup half weight_tile[64][OTILE];
+    threadgroup half input_tile[RTILE][64];
+    threadgroup float output_buffer[RTILE][OTILE];
+
+    const size_t row_offset =
+        ((size_t)expert * OUT + (size_t)(output_start + weight_row));
+    const device uint* gate_row = (const device uint*)gate_codes
+        + row_offset * words_per_row;
+    const device uint* up_row = (const device uint*)up_codes
+        + row_offset * words_per_row;
+    const device half* gate_scale_row = gate_scales + row_offset * NGRP;
+    const device half* up_scale_row = up_scales + row_offset * NGRP;
+    const device half4* gate_codebook4 = (const device half4*)gate_codebook;
+    const device half4* up_codebook4 = (const device half4*)up_codebook;
+
+    simdgroup_float8x8 gate0 = simdgroup_float8x8(0);
+    simdgroup_float8x8 gate1 = simdgroup_float8x8(0);
+    simdgroup_float8x8 gate2 = simdgroup_float8x8(0);
+    simdgroup_float8x8 gate3 = simdgroup_float8x8(0);
+    simdgroup_float8x8 up0 = simdgroup_float8x8(0);
+    simdgroup_float8x8 up1 = simdgroup_float8x8(0);
+    simdgroup_float8x8 up2 = simdgroup_float8x8(0);
+    simdgroup_float8x8 up3 = simdgroup_float8x8(0);
+
+    for (int group = 0; group < NGRP; ++group) {
+        const int subvector_begin = group * 8;
+        if (input_row < RTILE) {
+            const device half* source = nullptr;
+            if (input_row < route_count)
+                source = xsrc + (size_t)srcrows[route_start + input_row] * IN
+                    + (size_t)group * 64;
+            for (int local = code_begin; local < code_begin + 2; ++local) {
+                const int column = local * 8;
+                for (int element = 0; element < 8; ++element)
+                    input_tile[input_row][column + element] = input_row < route_count
+                        ? source[column + element] : (half)0;
+            }
+        }
+
+        const float gate_scale = (float)gate_scale_row[group];
+        for (int local = code_begin; local < code_begin + 2; ++local) {
+            const int subvector = subvector_begin + local;
+            const uint within = (uint)subvector & 31u;
+            const uint bit_offset = within * 14u;
+            const uint word = ((uint)subvector >> 5) * 14u + (bit_offset >> 5);
+            const uint shift = bit_offset & 31u;
+            ulong packed = (ulong)(gate_row[word] >> shift);
+            if (shift + 14u > 32u)
+                packed |= (ulong)gate_row[word + 1] << (32u - shift);
+            const uint code = (uint)(packed & 0x3fffu);
+            const half4 low = gate_codebook4[2u * code];
+            const half4 high = gate_codebook4[2u * code + 1u];
+            const int column = local * 8;
+            weight_tile[column][weight_row] = (half)(gate_scale * (float)low.x);
+            weight_tile[column + 1][weight_row] = (half)(gate_scale * (float)low.y);
+            weight_tile[column + 2][weight_row] = (half)(gate_scale * (float)low.z);
+            weight_tile[column + 3][weight_row] = (half)(gate_scale * (float)low.w);
+            weight_tile[column + 4][weight_row] = (half)(gate_scale * (float)high.x);
+            weight_tile[column + 5][weight_row] = (half)(gate_scale * (float)high.y);
+            weight_tile[column + 6][weight_row] = (half)(gate_scale * (float)high.z);
+            weight_tile[column + 7][weight_row] = (half)(gate_scale * (float)high.w);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k8 = 0; k8 < 8; ++k8) {
+            simdgroup_half8x8 weight_matrix;
+            simdgroup_half8x8 input_matrix;
+            simdgroup_load(weight_matrix,
+                &weight_tile[k8 * 8][(int)simdgroup * 8], OTILE);
+            simdgroup_load(input_matrix, &input_tile[0][k8 * 8], 64);
+            simdgroup_multiply_accumulate(gate0, input_matrix, weight_matrix, gate0);
+            simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
+            simdgroup_multiply_accumulate(gate1, input_matrix, weight_matrix, gate1);
+            if constexpr (RTILE >= 24) {
+                simdgroup_load(input_matrix, &input_tile[16][k8 * 8], 64);
+                simdgroup_multiply_accumulate(gate2, input_matrix, weight_matrix, gate2);
+            }
+            if constexpr (RTILE >= 32) {
+                simdgroup_load(input_matrix, &input_tile[24][k8 * 8], 64);
+                simdgroup_multiply_accumulate(gate3, input_matrix, weight_matrix, gate3);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const float up_scale = (float)up_scale_row[group];
+        for (int local = code_begin; local < code_begin + 2; ++local) {
+            const int subvector = subvector_begin + local;
+            const uint within = (uint)subvector & 31u;
+            const uint bit_offset = within * 14u;
+            const uint word = ((uint)subvector >> 5) * 14u + (bit_offset >> 5);
+            const uint shift = bit_offset & 31u;
+            ulong packed = (ulong)(up_row[word] >> shift);
+            if (shift + 14u > 32u)
+                packed |= (ulong)up_row[word + 1] << (32u - shift);
+            const uint code = (uint)(packed & 0x3fffu);
+            const half4 low = up_codebook4[2u * code];
+            const half4 high = up_codebook4[2u * code + 1u];
+            const int column = local * 8;
+            weight_tile[column][weight_row] = (half)(up_scale * (float)low.x);
+            weight_tile[column + 1][weight_row] = (half)(up_scale * (float)low.y);
+            weight_tile[column + 2][weight_row] = (half)(up_scale * (float)low.z);
+            weight_tile[column + 3][weight_row] = (half)(up_scale * (float)low.w);
+            weight_tile[column + 4][weight_row] = (half)(up_scale * (float)high.x);
+            weight_tile[column + 5][weight_row] = (half)(up_scale * (float)high.y);
+            weight_tile[column + 6][weight_row] = (half)(up_scale * (float)high.z);
+            weight_tile[column + 7][weight_row] = (half)(up_scale * (float)high.w);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int k8 = 0; k8 < 8; ++k8) {
+            simdgroup_half8x8 weight_matrix;
+            simdgroup_half8x8 input_matrix;
+            simdgroup_load(weight_matrix,
+                &weight_tile[k8 * 8][(int)simdgroup * 8], OTILE);
+            simdgroup_load(input_matrix, &input_tile[0][k8 * 8], 64);
+            simdgroup_multiply_accumulate(up0, input_matrix, weight_matrix, up0);
+            simdgroup_load(input_matrix, &input_tile[8][k8 * 8], 64);
+            simdgroup_multiply_accumulate(up1, input_matrix, weight_matrix, up1);
+            if constexpr (RTILE >= 24) {
+                simdgroup_load(input_matrix, &input_tile[16][k8 * 8], 64);
+                simdgroup_multiply_accumulate(up2, input_matrix, weight_matrix, up2);
+            }
+            if constexpr (RTILE >= 32) {
+                simdgroup_load(input_matrix, &input_tile[24][k8 * 8], 64);
+                simdgroup_multiply_accumulate(up3, input_matrix, weight_matrix, up3);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    simdgroup_store(gate0, &output_buffer[0][(int)simdgroup * 8], OTILE);
+    simdgroup_store(gate1, &output_buffer[8][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 24)
+        simdgroup_store(gate2, &output_buffer[16][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 32)
+        simdgroup_store(gate3, &output_buffer[24][(int)simdgroup * 8], OTILE);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint threadgroup_threads =
+        threads_per_threadgroup.x * threads_per_threadgroup.y;
+    for (uint linear = tid; linear < (uint)(route_count * OTILE);
+         linear += threadgroup_threads) {
+        const int route = (int)linear / OTILE;
+        const int column = (int)linear - route * OTILE;
+        const int output_column = output_start + column;
+        if (output_column < OUT)
+            raw_gate[(size_t)(route_start + route) * OUT + output_column] =
+                (half)output_buffer[route][column];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_store(up0, &output_buffer[0][(int)simdgroup * 8], OTILE);
+    simdgroup_store(up1, &output_buffer[8][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 24)
+        simdgroup_store(up2, &output_buffer[16][(int)simdgroup * 8], OTILE);
+    if constexpr (RTILE >= 32)
+        simdgroup_store(up3, &output_buffer[24][(int)simdgroup * 8], OTILE);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint linear = tid; linear < (uint)(route_count * OTILE);
+         linear += threadgroup_threads) {
+        const int route = (int)linear / OTILE;
+        const int column = (int)linear - route * OTILE;
+        const int output_column = output_start + column;
+        if (output_column < OUT)
+            up[(size_t)(route_start + route) * OUT + output_column] =
+                (half)output_buffer[route][column];
+    }
+)metal";
+
 // Correctness-first decoder for one selected expert. Packed rows contain
 // independent 32-code blocks, each occupying BITS uint32 words.
 inline constexpr std::string_view decode_expert = R"metal(

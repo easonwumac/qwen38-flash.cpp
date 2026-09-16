@@ -1,5 +1,6 @@
 #include "qwen38/chat_template.hpp"
 #include "qwen38/model.hpp"
+#include "qwen38/runtime_profile.hpp"
 #include "qwen38/tokenizer.hpp"
 
 #include <algorithm>
@@ -86,6 +87,8 @@ int main(int argc, char** argv) {
             throw std::runtime_error(
                 "full-model prefill tests must run through devtools/memory_guard.py");
         }
+        qwen38::apply_automatic_runtime_config();
+        static_cast<void>(qwen38::MlxArray::set_cache_limit(256ULL * 1024ULL * 1024ULL));
         const std::filesystem::path model_path = argv[1];
         const std::size_t chunk_rows = std::stoul(argv[3]);
         if (chunk_rows == 0 || chunk_rows > 1024) {

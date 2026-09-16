@@ -1,6 +1,11 @@
 qwen38-flash.cpp
 Copyright 2026 qwen38-flash.cpp contributors
 
+The segmented-tile vector-quantized GEMM design is adapted from the VQLab
+runtime bundled with TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw
+(quantization by TheDrainFlorist, 2026), distributed under the Qwen Community
+License 1.0. The license is retained in licenses/qwen-community-1.0.txt.
+
 Portions of the fused selected-MoE Metal kernel design are adapted from MTPLX
 (Copyright 2026 MTPLX), licensed under the Apache License, Version 2.0.
 

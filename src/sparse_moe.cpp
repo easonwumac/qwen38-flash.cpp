@@ -167,6 +167,32 @@ std::shared_ptr<MlxMetalKernel> vq_down_reduce_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> vq_gemmseg_d8_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{
+            "codes", "codebook", "scales", "xsrc", "srcrows", "tmeta",
+            "destination_slots", "route_weights"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_vq_gemmseg_d8", inputs, "y",
+            vq_metal::gemmseg_d8, vq_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> vq_gemmseg_gate_up_d8_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{
+            "gate_codes", "gate_codebook", "gate_scales",
+            "up_codes", "up_codebook", "up_scales",
+            "xsrc", "srcrows", "tmeta"};
+        const char* outputs[]{"raw_gate", "up"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_vq_gemmseg_gate_up_d8", inputs, outputs,
+            vq_metal::gemmseg_gate_up_d8, vq_metal::header);
+    }();
+    return kernel;
+}
+
 std::shared_ptr<MlxMetalKernel> fused_gate_up_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{"x", "gw", "gs", "gb", "uw", "us", "ub", "experts"};
@@ -1603,6 +1629,161 @@ MlxArray SparseMoe::forward_prefill_impl(
             experts.eval();
             weights.eval();
             timings->routing_ms = elapsed_ms(routing_started);
+        }
+
+        const bool use_gemmseg = rows >= 128 &&
+            expert_gate_.vector_dimension == 8 && expert_gate_.packed_bits == 14 &&
+            expert_up_.vector_dimension == 8 && expert_up_.packed_bits == 14 &&
+            expert_down_.vector_dimension == 8 && expert_down_.packed_bits == 14 &&
+            expert_gate_.group_size == 64 && expert_up_.group_size == 64 &&
+            expert_down_.group_size == 64 &&
+            expert_gate_.input_dimension == expert_up_.input_dimension &&
+            expert_gate_.output_dimension == expert_up_.output_dimension;
+        if (use_gemmseg) {
+            // Build one stable expert-sorted route plan and reuse it for
+            // gate/up/down. The measured crossover is between 96 and 128
+            // token rows, so dispatch selection remains automatic.
+            const auto expert_values = experts.astype(MLX_FLOAT32).to_float32();
+            const int route_count = checked_int(expert_values.size(), "VQ routes");
+            std::vector<std::int32_t> order(static_cast<std::size_t>(route_count));
+            std::iota(order.begin(), order.end(), 0);
+            std::stable_sort(order.begin(), order.end(), [&](const auto left, const auto right) {
+                return expert_values[static_cast<std::size_t>(left)] <
+                    expert_values[static_cast<std::size_t>(right)];
+            });
+            std::vector<std::int32_t> source_rows(static_cast<std::size_t>(route_count));
+            std::vector<std::int32_t> identity(static_cast<std::size_t>(route_count));
+            std::vector<std::int32_t> tile_metadata;
+            const int route_tile_rows = rows >= 768 ? 24 : 16;
+            tile_metadata.reserve(
+                static_cast<std::size_t>(route_count / route_tile_rows + 3) * 3);
+            for (int sorted = 0; sorted < route_count; ++sorted) {
+                const int original = order[static_cast<std::size_t>(sorted)];
+                source_rows[static_cast<std::size_t>(sorted)] = original / slots;
+                identity[static_cast<std::size_t>(sorted)] = sorted;
+            }
+            int begin = 0;
+            while (begin < route_count) {
+                const auto expert = static_cast<std::int32_t>(
+                    expert_values[static_cast<std::size_t>(order[static_cast<std::size_t>(begin)])]);
+                int end = begin + 1;
+                while (end < route_count && static_cast<std::int32_t>(
+                    expert_values[static_cast<std::size_t>(order[static_cast<std::size_t>(end)])]) == expert) {
+                    ++end;
+                }
+                for (int tile = begin; tile < end; tile += route_tile_rows) {
+                    tile_metadata.push_back(expert);
+                    tile_metadata.push_back(tile);
+                    tile_metadata.push_back(std::min(route_tile_rows, end - tile));
+                }
+                begin = end;
+            }
+            const int tile_count = checked_int(tile_metadata.size() / 3, "VQ route tiles");
+            const MlxArray source_rows_array = MlxArray::from_int32(
+                source_rows, std::vector<int>{route_count});
+            const MlxArray identity_array = MlxArray::from_int32(
+                identity, std::vector<int>{route_count});
+            const MlxArray destination_slots_array = MlxArray::from_int32(
+                order, std::vector<int>{route_count});
+            const MlxArray metadata_array = MlxArray::from_int32(
+                tile_metadata, std::vector<int>{tile_count * 3});
+            const MlxArray input_half = input.astype(MLX_FLOAT16).reshape(
+                std::vector<int>{rows, shape[2]});
+            constexpr int output_tile_rows = 32;
+            const auto project_gemmseg = [&](
+                                                 const MlxArray& source,
+                                                 const MlxArray& row_map,
+                                                 const QuantizedProjection& projection) {
+                const std::array<MlxMetalDtypeTemplate, 0> dtype_templates{};
+                const std::array<MlxMetalIntTemplate, 5> int_templates{{
+                    {.name = "OUT", .value = projection.output_dimension},
+                    {.name = "IN", .value = projection.input_dimension},
+                    {.name = "NGRP", .value = projection.input_dimension / 64},
+                    {.name = "RTILE", .value = route_tile_rows},
+                    {.name = "OTILE", .value = output_tile_rows},
+                }};
+                const std::array<MlxMetalOutputSpec, 1> output_specs{{
+                    {.shape = {route_count, projection.output_dimension},
+                     .dtype = MLX_FLOAT32},
+                }};
+                const int output_tiles =
+                    (projection.output_dimension + output_tile_rows - 1) /
+                    output_tile_rows;
+                const std::array<int, 3> grid{
+                    output_tiles * 32,
+                    tile_count * (output_tile_rows / 8), 1};
+                const std::array<int, 3> threadgroup{
+                    32, output_tile_rows / 8, 1};
+                const MlxArray* projection_inputs[]{
+                    &projection.weight, &projection.codebook, &projection.scales,
+                    &source, &row_map, &metadata_array,
+                    &destination_slots_array, &weights};
+                return std::move(vq_gemmseg_d8_kernel()->apply(
+                    projection_inputs, output_specs, grid, threadgroup,
+                    dtype_templates, int_templates).front());
+            };
+
+            const auto gate_started = Clock::now();
+            const std::array<MlxMetalDtypeTemplate, 0> gate_dtype_templates{};
+            const std::array<MlxMetalIntTemplate, 5> gate_int_templates{{
+                {.name = "OUT", .value = expert_gate_.output_dimension},
+                {.name = "IN", .value = expert_gate_.input_dimension},
+                {.name = "NGRP", .value = expert_gate_.input_dimension / 64},
+                {.name = "RTILE", .value = route_tile_rows},
+                {.name = "OTILE", .value = output_tile_rows},
+            }};
+            const std::array<MlxMetalOutputSpec, 2> gate_output_specs{{
+                {.shape = {route_count, expert_gate_.output_dimension},
+                 .dtype = MLX_FLOAT16},
+                {.shape = {route_count, expert_up_.output_dimension},
+                 .dtype = MLX_FLOAT16},
+            }};
+            const int gate_output_tiles =
+                (expert_gate_.output_dimension + output_tile_rows - 1) /
+                output_tile_rows;
+            const std::array<int, 3> gate_grid{
+                gate_output_tiles * 32,
+                tile_count * (output_tile_rows / 8), 1};
+            const std::array<int, 3> gate_threadgroup{
+                32, output_tile_rows / 8, 1};
+            const MlxArray* gate_inputs[]{
+                &expert_gate_.weight, &expert_gate_.codebook, &expert_gate_.scales,
+                &expert_up_.weight, &expert_up_.codebook, &expert_up_.scales,
+                &input_half, &source_rows_array, &metadata_array};
+            auto gate_outputs = vq_gemmseg_gate_up_d8_kernel()->apply(
+                gate_inputs, gate_output_specs, gate_grid, gate_threadgroup,
+                gate_dtype_templates, gate_int_templates);
+            MlxArray raw_gate = std::move(gate_outputs[0]);
+            MlxArray up = std::move(gate_outputs[1]);
+            MlxArray hidden = MlxArray::multiply(raw_gate.silu(), up);
+            if (timings != nullptr) {
+                hidden.eval();
+                timings->gate_up_ms = elapsed_ms(gate_started);
+            }
+            const auto down_started = Clock::now();
+            MlxArray weighted = project_gemmseg(
+                hidden, identity_array, expert_down_).reshape(
+                    std::vector<int>{rows, slots, expert_down_.output_dimension});
+            MlxArray routed = weighted.sum_axis(1).reshape(
+                std::vector<int>{1, rows, expert_down_.output_dimension})
+                .astype(input.dtype());
+            if (timings != nullptr) {
+                routed.eval();
+                timings->down_reduce_ms = elapsed_ms(down_started);
+            }
+            const auto shared_started = Clock::now();
+            MlxArray shared = forward_shared(input);
+            if (timings != nullptr) {
+                shared.eval();
+                timings->shared_expert_ms = elapsed_ms(shared_started);
+            }
+            const auto merge_started = Clock::now();
+            MlxArray output = MlxArray::add(routed, shared);
+            if (timings != nullptr) {
+                output.eval();
+                timings->merge_ms = elapsed_ms(merge_started);
+            }
+            return output;
         }
 
         const auto gate_started = Clock::now();
