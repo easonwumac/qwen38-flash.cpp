@@ -88,3 +88,21 @@ This improves the warm persistent result by about 10.6% over its prior
 30.53 tok/s, but still misses the 40 tok/s target. The next gate is eliminating
 the embedding/trunk/head host round trips and measuring the remaining shared
 expert and GDN cost before adding another numerical approximation.
+
+## Selective shared-weight residency
+
+The server handoff originally wrapped every tensor in the manifest as an MLX-
+backed Metal buffer. For the VQ checkpoint this unnecessarily materialized the
+8.97 GiB SSD PLE n-gram shard bank and inactive MTP tensors even though
+persistent decode gathers PLE rows through `NgramTable` and runs target-only in
+this gate. The handoff now shares only target-decode tensors; an absent shared
+binding falls back to the existing read-only mmap shard.
+
+With Qwen3.8-Flash-Next-VQ-2.1bpw, MTP/thinking off, prefix cache off, serial
+IFBench keys 20/70/100, max 512, M5 Pro 64 GiB on AC power and no active thermal
+control, selective residency peaked at 37.7 GiB footprint and 28.7 GiB RSS with
+11.9 GiB minimum available memory. The full-residency diagnostic reached 49.1
+GiB footprint and 30.8 GiB RSS. Keys 70/100 were byte-identical between arms;
+the three selective requests decoded at 27.83, 30.15 and 28.46 tok/s. The
+current main scored 2/3, while the older 3/3 artifact came from an earlier
+runtime revision, so this result establishes memory and output parity only.

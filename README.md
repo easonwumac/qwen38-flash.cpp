@@ -147,6 +147,16 @@ above was 30.59 tok/s at 36.3 GiB. IFBench keys 20/70/100 remained 3/3 strict
 and loose. Native MTP target verification has its own retained stride and is
 not changed by this setting.
 
+Persistent Metal now shares only tensors used by target decode. It leaves the
+8.97 GiB SSD-backed PLE n-gram bank and inactive MTP tensors out of the MLX-to-
+Metal residency handoff, while missing bindings safely fall back to mmap. On the
+VQ 2.1bpw target, MTP/thinking off, serial IFBench keys 20/70/100 at max 512,
+this reduced guarded peak footprint from 49.1 to **37.7 GiB**. The selective and
+full-residency controls produced byte-identical outputs on the paired keys; the
+current main scored 2/3, so this is a memory/scheduling fix rather than a new
+quality claim. The run used the M5 Pro 64 GiB validation Mac, AC power and no
+active thermal control.
+
 ## Historical reference evaluation
 
 Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified

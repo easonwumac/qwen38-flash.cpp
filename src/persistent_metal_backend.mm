@@ -64,6 +64,13 @@ bool has_expected_layer_split(const ModelConfig& config) noexcept {
     return true;
 }
 
+bool should_share_persistent_tensor(const std::string_view name) noexcept {
+    const std::string_view flat = name.starts_with("language_model.")
+        ? name.substr(15) : name;
+    if (flat.starts_with("block.") || flat.starts_with("mtp_")) return false;
+    return flat.find(".ple.ple_embedding.ngram_embedding.") == std::string_view::npos;
+}
+
 } // namespace
 
 class PersistentMetalBackend::Impl final {
@@ -165,6 +172,7 @@ public:
                 shared_tensors_.reserve(manifest.weight_map().size());
                 for (const auto& [tensor, shard] : manifest.weight_map()) {
                     static_cast<void>(shard);
+                    if (!should_share_persistent_tensor(tensor)) continue;
                     MlxArray array = shared_weights->tensor(tensor);
                     const void* data = array.data_bytes();
                     shared_tensors_.emplace(
@@ -414,11 +422,10 @@ public:
                 std::string_view(tensor).starts_with("language_model.")) {
                 found = shared_tensors_.find(tensor.substr(15));
             }
-            if (found == shared_tensors_.end()) {
-                throw std::runtime_error("missing persistent tensor: " + tensor);
+            if (found != shared_tensors_.end()) {
+                [encoder setBuffer:found->second.buffer offset:0 atIndex:index];
+                return;
             }
-            [encoder setBuffer:found->second.buffer offset:0 atIndex:index];
-            return;
         }
         auto weight = weight_map_.find(tensor);
         if (weight == weight_map_.end() &&
@@ -444,19 +451,18 @@ public:
                 std::string_view(tensor).starts_with("language_model.")) {
                 found = shared_tensors_.find(tensor.substr(15));
             }
-            if (found == shared_tensors_.end()) {
-                throw std::runtime_error("missing persistent row tensor: " + tensor);
+            if (found != shared_tensors_.end()) {
+                const SharedTensor& shared = found->second;
+                const std::vector<int> shape = shared.array.shape();
+                if (shape.empty() || row >= static_cast<std::size_t>(shape.front()) ||
+                    shared.array.byte_size() % static_cast<std::size_t>(shape.front()) != 0) {
+                    throw std::runtime_error("invalid shared persistent row tensor geometry");
+                }
+                const std::size_t row_bytes =
+                    shared.array.byte_size() / static_cast<std::size_t>(shape.front());
+                [encoder setBuffer:shared.buffer offset:row * row_bytes atIndex:index];
+                return;
             }
-            const SharedTensor& shared = found->second;
-            const std::vector<int> shape = shared.array.shape();
-            if (shape.empty() || row >= static_cast<std::size_t>(shape.front()) ||
-                shared.array.byte_size() % static_cast<std::size_t>(shape.front()) != 0) {
-                throw std::runtime_error("invalid shared persistent row tensor geometry");
-            }
-            const std::size_t row_bytes =
-                shared.array.byte_size() / static_cast<std::size_t>(shape.front());
-            [encoder setBuffer:shared.buffer offset:row * row_bytes atIndex:index];
-            return;
         }
         auto weight = weight_map_.find(tensor);
         if (weight == weight_map_.end() &&
