@@ -1590,23 +1590,60 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
     const bool vq_branch_batch_enabled = fused_vq_ && inputs.size() == 2 &&
         vq_branch_batch != nullptr && std::string_view(vq_branch_batch) == "1";
     if (vq_branch_batch_enabled) {
-        std::vector<std::int32_t> expert_values;
-        std::vector<float> weight_values;
-        expert_values.reserve(2 * experts_per_token_);
-        weight_values.reserve(2 * experts_per_token_);
-        for (const MlxArray& input : inputs) {
-            RouterSelection selection = route_decode(input);
-            for (const std::size_t expert : selection.experts) {
-                expert_values.push_back(static_cast<std::int32_t>(expert));
-            }
-            weight_values.insert(
-                weight_values.end(), selection.weights.begin(), selection.weights.end());
-        }
         const int topk = checked_int(experts_per_token_, "VQ branch top-k");
-        MlxArray experts = MlxArray::from_int32(
-            expert_values, std::vector<int>{2, topk});
-        MlxArray weights = MlxArray::from_float32(
-            weight_values, std::vector<int>{2, topk});
+        const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
+        const bool route_on_device = device_router != nullptr &&
+            std::string_view(device_router) == "1";
+        MlxArray experts;
+        MlxArray weights;
+        if (route_on_device) {
+            std::vector<MlxArray> expert_rows;
+            std::vector<MlxArray> weight_rows;
+            expert_rows.reserve(2);
+            weight_rows.reserve(2);
+            for (const MlxArray& input : inputs) {
+                MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
+                const bool use_selected_softmax =
+                    selected_softmax_router_enabled(normalize_topk_probability_);
+                MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
+                MlxArray partition = gates.argpartition_axis(-topk, -1);
+                const std::vector<int> start{
+                    0, 0, static_cast<int>(expert_count_) - topk};
+                const std::vector<int> stop{1, 1, static_cast<int>(expert_count_)};
+                const std::vector<int> strides{1, 1, 1};
+                MlxArray selected = partition.slice(start, stop, strides);
+                MlxArray row_weights = MlxArray::take_along_axis(gates, selected, -1);
+                if (use_selected_softmax) {
+                    row_weights = row_weights.softmax_axis(-1);
+                } else if (normalize_topk_probability_) {
+                    row_weights = MlxArray::divide(
+                        row_weights, row_weights.sum_axis(-1, true));
+                }
+                MlxArray route_order = row_weights.negative().argsort_axis(-1);
+                expert_rows.push_back(MlxArray::take_along_axis(
+                    selected, route_order, -1).reshape(std::vector<int>{1, topk}));
+                weight_rows.push_back(MlxArray::take_along_axis(
+                    row_weights, route_order, -1)
+                    .reshape(std::vector<int>{1, topk}).astype(MLX_FLOAT32));
+            }
+            experts = MlxArray::concatenate(expert_rows[0], expert_rows[1], 0);
+            weights = MlxArray::concatenate(weight_rows[0], weight_rows[1], 0);
+        } else {
+            std::vector<std::int32_t> expert_values;
+            std::vector<float> weight_values;
+            expert_values.reserve(2 * experts_per_token_);
+            weight_values.reserve(2 * experts_per_token_);
+            for (const MlxArray& input : inputs) {
+                RouterSelection selection = route_decode(input);
+                for (const std::size_t expert : selection.experts) {
+                    expert_values.push_back(static_cast<std::int32_t>(expert));
+                }
+                weight_values.insert(
+                    weight_values.end(), selection.weights.begin(), selection.weights.end());
+            }
+            experts = MlxArray::from_int32(expert_values, std::vector<int>{2, topk});
+            weights = MlxArray::from_float32(weight_values, std::vector<int>{2, topk});
+        }
         MlxArray routed = forward_vq_routed_batch(
             concatenate_sequence_rows(inputs), experts, weights, 2);
         std::vector<MlxArray> shared;

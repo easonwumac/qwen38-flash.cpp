@@ -594,6 +594,26 @@ The implementation order is deliberately narrow:
   be credited as exact verifier reuse. This repeats the older S-row HC warning:
   do not batch hyper-connections unless the production serial arithmetic is
   reproduced exactly.
+- The complete exact two-request target path is now the automatic runtime
+  default: GDN, full attention including QSA indexing, hyper-connections, and
+  routed VQ all share their quantized weight reads at width two. The last VQ
+  mismatch was not caused by the VQ kernels; the batch path had used the CPU
+  router while production serial decode used the FP32 device router, selected
+  softmax, top-k normalization, and descending route order. Reproducing that
+  graph restored zero full-target-logit error. A clean-build 64-step recurrent
+  test preserved every token and improved aggregate throughput from 31.06 to
+  41.79 tok/s (1.345x), with a 36.5 GiB peak footprint. The strict native-MTP
+  sibling probe measured the two target branches at 65.76 versus 47.43 ms
+  (1.386x), zero target-logit error, and a 39.5 GiB peak; the proposal head
+  itself still moved by 0.00112 and is not claimed exact. On the deliberately
+  imbalanced IFBench keys 20 and 70, rolling concurrency two improved aggregate
+  decode from 23.76 to 25.91 tok/s and wall time from 12.83 to 11.93 seconds;
+  both response files were byte-identical. Conditions: Qwen3.8-Flash-Next
+  VQ-2.1bpw, exact top-10, greedy, thinking and MTP off for the 64-step and
+  IFBench tests, M5 Pro 64 GiB, no active thermal control; performance samples
+  are directional rather than a release distribution. This makes two target
+  paths cost about 1.49 times one path, not literally one pass, and real gains
+  shrink when one rolling request finishes much earlier than the other.
 
 ## Promotion gates
 
