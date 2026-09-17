@@ -614,6 +614,19 @@ The implementation order is deliberately narrow:
   are directional rather than a release distribution. This makes two target
   paths cost about 1.49 times one path, not literally one pass, and real gains
   shrink when one rolling request finishes much earlier than the other.
+- An exact two-row Q8 shared-expert prototype reused gate, up, and down weights
+  while retaining the serial shared-router arithmetic. Full target logits stayed
+  identical, but an adjacent three-pair A/B/A measured 46.76 ms for the existing
+  path versus 48.11 ms for the prototype, a 2.9% regression, while peak footprint
+  rose from 39.5 to 39.7 GiB. The small shared projections are already hidden by
+  cache and lazy overlap; another custom dispatch costs more than the saved reads.
+  The prototype and switch were removed.
+- Batching the unquantized 512-by-2560 router projection before keeping the
+  production per-row selected-softmax, top-k, normalization, and ordering also
+  retained zero target-logit error. Three adjacent pairs nevertheless measured
+  47.36 ms for the existing path and 47.56 ms for the batched router, roughly a
+  0.4% regression. Router reads are not the remaining width-two bottleneck; the
+  prototype and switch were removed.
 
 ## Promotion gates
 
