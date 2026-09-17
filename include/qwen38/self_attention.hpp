@@ -86,7 +86,8 @@ private:
         const MlxArray& input,
         SelfAttentionState& state,
         bool packed = false,
-        bool decode_verification = false) const;
+        bool decode_verification = false,
+        const MlxArray* projected_qk = nullptr) const;
     [[nodiscard]] MlxArray packed_qsa_attention(
         const MlxArray& query,
         const MlxArray& keys,

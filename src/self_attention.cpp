@@ -670,7 +670,8 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const MlxArray& input,
     SelfAttentionState& state,
     const bool packed,
-    const bool decode_verification) const {
+    const bool decode_verification,
+    const MlxArray* projected_qk) const {
     const std::vector<int> input_shape = input.shape();
     if (input_shape.size() != 3 || input_shape[0] != 1 || input_shape[1] < 1) {
         throw std::runtime_error("QSA requires a single [1,S,hidden] sequence");
@@ -691,7 +692,8 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const auto selection_started = std::chrono::steady_clock::now();
 #endif
 
-    MlxArray qk = project(input, indexer_projection_);
+    MlxArray qk = projected_qk == nullptr
+        ? project(input, indexer_projection_) : projected_qk->share();
     MlxArray raw_keys = qk.slice(
         std::vector<int>{0, 0, index_heads * index_dimension},
         std::vector<int>{1, rows, (index_heads + 1) * index_dimension},
@@ -1328,6 +1330,12 @@ std::vector<MlxArray> SelfAttention::forward_decode_multi(
             throw std::runtime_error("attention sibling input requires [1,1,hidden]");
         }
     }
+    std::vector<MlxArray> input_rows;
+    input_rows.reserve(2);
+    input_rows.push_back(inputs[0].share());
+    input_rows.push_back(inputs[1].share());
+    MlxArray input_batch = concatenate_sequence_rows(input_rows);
+    MlxArray indexer_batch = project_branch2(input_batch, indexer_projection_);
     std::vector<QsaSelection> selections;
     std::array<bool, 2> want_q8{};
     selections.reserve(2);
@@ -1335,18 +1343,14 @@ std::vector<MlxArray> SelfAttention::forward_decode_multi(
         SelfAttentionState& state = *states[row];
         want_q8[row] = state.kv_q8 ||
             (q8_kv_requested() && state.token_count + 1 >= q8_kv_min_tokens());
+        MlxArray projected_qk = slice_sequence_row(indexer_batch, row);
         selections.push_back(update_qsa_and_build_mask(
-            inputs[row], state, want_q8[row], true));
+            inputs[row], state, want_q8[row], true, &projected_qk));
     }
 
     const int heads = dimension(attention_heads_, "attention heads");
     const int kv_heads = dimension(key_value_heads_, "key/value heads");
     const int head_dimension = dimension(head_dimension_, "head dimension");
-    std::vector<MlxArray> input_rows;
-    input_rows.reserve(2);
-    input_rows.push_back(inputs[0].share());
-    input_rows.push_back(inputs[1].share());
-    MlxArray input_batch = concatenate_sequence_rows(input_rows);
     MlxArray query_gate_batch = project_branch2(
         input_batch, query_projection_).reshape(
             std::vector<int>{1, 2, heads, 2 * head_dimension});

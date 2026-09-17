@@ -557,6 +557,16 @@ The implementation order is deliberately narrow:
   smaller because each branch still selects a largely different expert set.
   Conditions match the preceding GDN experiment and remain a depth-one
   primitive, not an end-to-end tree throughput claim.
+- Batching the QSA indexer projection through the same exact affine-Q6 path
+  removed one more repeated projection per full-attention layer. Three guarded
+  samples reached 88.08--89.36 ms from 110.26--111.21 ms (1.245--1.254x),
+  again with zero maximum logit error and a 39.6--39.7 GiB peak footprint. The
+  branch-local selector, KV update, and attention scan stay separate; only the
+  shared-weight index projection is batched.
+- An exact affine-Q8 B=2 language-head dispatch measured 88.15 ms and was
+  removed. It did not improve on the 88.08--88.13 ms controls because the two
+  existing lazy QMM heads already overlap effectively; a custom dispatch there
+  only adds another code path.
 - A two-row hyper-connection read was not retained. Generic MLX B=2 QMM
   changed final logits by up to 0.765625. Extending the existing S=1 fused HC
   kernels was internally bit-exact only when paired with the folded BF16 dense
