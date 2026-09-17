@@ -471,8 +471,19 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
 
 std::vector<HyperConnectionRead> HyperConnection::read_branch2(
     const std::span<const MlxArray> input_streams) const {
-    if (input_streams.size() != 2 || fused_injection_ready_) {
+    if (input_streams.size() != 2) {
         throw std::runtime_error("exact HC sibling read requires two quantized rows");
+    }
+    // The automatic server uses the fused dense-injection numeric policy.
+    // Its reduction order is different from the quantized projection below,
+    // so retain the exact single-row path until a matching two-row fused
+    // kernel exists. Other sibling components can still share their weights.
+    if (fused_injection_ready_) {
+        std::vector<HyperConnectionRead> result;
+        result.reserve(2);
+        result.push_back(read(input_streams[0]));
+        result.push_back(read(input_streams[1]));
+        return result;
     }
     const int streams = checked_dimension(stream_count_, "stream_count");
     const int hidden = checked_dimension(hidden_size_, "hidden_size");

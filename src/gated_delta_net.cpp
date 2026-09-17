@@ -490,13 +490,8 @@ std::vector<MlxArray> GatedDeltaNet::forward_decode_multi(
 
     MlxArray input_batch = MlxArray::concatenate(inputs[0], inputs[1], 1);
     MlxArray qkv_batch = project_branch2(input_batch, qkv_projection_);
-    MlxArray beta_batch = project_branch2(input_batch, beta_projection_).sigmoid();
-    MlxArray decay_input = MlxArray::add(
-        project_branch2(input_batch, decay_projection_), decay_bias_);
-    MlxArray softplus = decay_input.astype(MLX_FLOAT32).exp().log1p();
-    MlxArray decay = MlxArray::multiply(
-        decay_log_.astype(MLX_FLOAT32).exp(), softplus)
-        .negative().exp().astype(qkv_batch.dtype());
+    MlxArray beta_input_batch = project_branch2(input_batch, beta_projection_);
+    MlxArray decay_input_batch = project_branch2(input_batch, decay_projection_);
     MlxArray z_batch = project_branch2(input_batch, z_projection_);
 
     const std::vector<float> ones_data(key_head_dimension_, 1.0F);
@@ -505,7 +500,16 @@ std::vector<MlxArray> GatedDeltaNet::forward_decode_multi(
     std::vector<MlxArray> queries;
     std::vector<MlxArray> keys;
     std::vector<MlxArray> values;
+    std::vector<MlxArray> betas;
+    std::vector<MlxArray> decays;
     queries.reserve(2); keys.reserve(2); values.reserve(2);
+    betas.reserve(2); decays.reserve(2);
+    const char* prework_flag = std::getenv("QWEN38_GDN_PREWORK");
+    const bool fused_prework = prework_flag != nullptr &&
+        std::string_view(prework_flag) == "1" && key_dimension == 128 &&
+        value_dimension == 128 && qkv_batch.dtype() == MLX_BFLOAT16 &&
+        convolution_weight_.dtype() == MLX_BFLOAT16 &&
+        decay_bias_.dtype() == MLX_BFLOAT16;
     for (std::size_t row = 0; row < 2; ++row) {
         GatedDeltaNetState& state = *states[row];
         MlxArray qkv = slice_sequence_row(qkv_batch, row);
@@ -517,27 +521,73 @@ std::vector<MlxArray> GatedDeltaNet::forward_decode_multi(
                 qkv.dtype());
             state.initialized = true;
         }
-        MlxArray convolution_input = MlxArray::concatenate(state.convolution, qkv, 1);
-        state.convolution = convolution_input.slice(
-            std::vector<int>{0, 1, 0},
-            std::vector<int>{1, 4, convolution_width}, strides);
-        MlxArray convolved = MlxArray::conv1d(
-            convolution_input, convolution_weight_, 1, 0, 1, convolution_width).silu();
-        MlxArray query = convolved.slice(
-            std::vector<int>{0, 0, 0}, std::vector<int>{1, 1, key_width}, strides)
-            .reshape(qk_shape).rms_norm(ones, 1.0e-6F);
-        MlxArray key = convolved.slice(
-            std::vector<int>{0, 0, key_width},
-            std::vector<int>{1, 1, 2 * key_width}, strides)
-            .reshape(qk_shape).rms_norm(ones, 1.0e-6F);
-        queries.push_back(MlxArray::multiply(
-            query, scalar(1.0F / static_cast<float>(key_head_dimension_), query.dtype())));
-        keys.push_back(MlxArray::multiply(
-            key, scalar(1.0F / std::sqrt(static_cast<float>(key_head_dimension_)),
-                        key.dtype())));
-        values.push_back(convolved.slice(
-            std::vector<int>{0, 0, 2 * key_width},
-            std::vector<int>{1, 1, convolution_width}, strides).reshape(value_shape));
+        MlxArray beta_input = slice_sequence_row(beta_input_batch, row);
+        MlxArray decay_input = slice_sequence_row(decay_input_batch, row);
+        if (fused_prework && state.convolution.dtype() == MLX_BFLOAT16) {
+            MlxArray query_scale = scalar(
+                1.0F / static_cast<float>(key_head_dimension_), qkv.dtype());
+            MlxArray key_scale = scalar(
+                1.0F / std::sqrt(static_cast<float>(key_head_dimension_)), qkv.dtype());
+            const std::array<const MlxArray*, 9> prework_inputs{
+                &qkv, &state.convolution, &convolution_weight_, &query_scale,
+                &key_scale, &beta_input, &decay_input, &decay_log_, &decay_bias_};
+            const std::array<MlxMetalOutputSpec, 6> prework_outputs{{
+                {.shape = qk_shape, .dtype = qkv.dtype()},
+                {.shape = qk_shape, .dtype = qkv.dtype()},
+                {.shape = value_shape, .dtype = qkv.dtype()},
+                {.shape = {1, 3, convolution_width}, .dtype = qkv.dtype()},
+                {.shape = {1, 1, value_heads}, .dtype = qkv.dtype()},
+                {.shape = {1, 1, value_heads}, .dtype = qkv.dtype()},
+            }};
+            const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+                {.name = "T", .value = qkv.dtype()},
+            }};
+            const std::array<MlxMetalIntTemplate, 5> int_templates{{
+                {.name = "HK", .value = key_heads},
+                {.name = "HV", .value = value_heads},
+                {.name = "DK", .value = key_dimension},
+                {.name = "DV", .value = value_dimension},
+                {.name = "C", .value = convolution_width},
+            }};
+            std::vector<MlxArray> fused = prework_kernel()->apply(
+                prework_inputs, prework_outputs,
+                std::array<int, 3>{32, 1, 2 * key_heads + value_heads},
+                std::array<int, 3>{32, 1, 1}, dtype_templates, int_templates);
+            queries.push_back(std::move(fused[0]));
+            keys.push_back(std::move(fused[1]));
+            values.push_back(std::move(fused[2]));
+            state.convolution = std::move(fused[3]);
+            decays.push_back(std::move(fused[4]));
+            betas.push_back(std::move(fused[5]));
+        } else {
+            MlxArray convolution_input = MlxArray::concatenate(state.convolution, qkv, 1);
+            state.convolution = convolution_input.slice(
+                std::vector<int>{0, 1, 0},
+                std::vector<int>{1, 4, convolution_width}, strides);
+            MlxArray convolved = MlxArray::conv1d(
+                convolution_input, convolution_weight_, 1, 0, 1, convolution_width).silu();
+            MlxArray query = convolved.slice(
+                std::vector<int>{0, 0, 0}, std::vector<int>{1, 1, key_width}, strides)
+                .reshape(qk_shape).rms_norm(ones, 1.0e-6F);
+            MlxArray key = convolved.slice(
+                std::vector<int>{0, 0, key_width},
+                std::vector<int>{1, 1, 2 * key_width}, strides)
+                .reshape(qk_shape).rms_norm(ones, 1.0e-6F);
+            queries.push_back(MlxArray::multiply(
+                query, scalar(1.0F / static_cast<float>(key_head_dimension_), query.dtype())));
+            keys.push_back(MlxArray::multiply(
+                key, scalar(1.0F / std::sqrt(static_cast<float>(key_head_dimension_)),
+                            key.dtype())));
+            values.push_back(convolved.slice(
+                std::vector<int>{0, 0, 2 * key_width},
+                std::vector<int>{1, 1, convolution_width}, strides).reshape(value_shape));
+            betas.push_back(beta_input.sigmoid());
+            MlxArray biased_decay = MlxArray::add(decay_input, decay_bias_);
+            MlxArray softplus = biased_decay.astype(MLX_FLOAT32).exp().log1p();
+            decays.push_back(MlxArray::multiply(
+                decay_log_.astype(MLX_FLOAT32).exp(), softplus)
+                .negative().exp().astype(qkv.dtype()));
+        }
     }
 
     const int repetition = value_heads / key_heads;
@@ -551,9 +601,8 @@ std::vector<MlxArray> GatedDeltaNet::forward_decode_multi(
             std::vector<int>{1, value_heads, 1, key_dimension});
         MlxArray value = values[row].reshape(
             std::vector<int>{1, value_heads, value_dimension});
-        MlxArray beta = slice_sequence_row(beta_batch, row).reshape(
-            std::vector<int>{1, value_heads, 1});
-        MlxArray row_decay = slice_sequence_row(decay, row).reshape(
+        MlxArray beta = betas[row].reshape(std::vector<int>{1, value_heads, 1});
+        MlxArray row_decay = decays[row].reshape(
             std::vector<int>{1, value_heads, 1, 1});
         state.recurrent = MlxArray::multiply(state.recurrent, row_decay);
         MlxArray recalled = MlxArray::multiply(state.recurrent, key).sum_axis(3);
@@ -566,11 +615,35 @@ std::vector<MlxArray> GatedDeltaNet::forward_decode_multi(
                 key));
         MlxArray recurrent_output = MlxArray::multiply(
             state.recurrent, query).sum_axis(3).reshape(value_shape);
-        MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
         MlxArray z = slice_sequence_row(z_batch, row).reshape(value_shape);
-        MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
-        gated_rows.push_back(MlxArray::multiply(normalized, gate).reshape(
-            std::vector<int>{1, 1, value_width}));
+        const char* fused_gate = std::getenv("QWEN38_GDN_NORM_GATE");
+        if (fused_gate != nullptr && std::string_view(fused_gate) == "1" &&
+            value_dimension == 128 && recurrent_output.dtype() == MLX_BFLOAT16 &&
+            z.dtype() == MLX_BFLOAT16 && norm_weight_.dtype() == MLX_BFLOAT16) {
+            MlxArray epsilon = MlxArray::from_float32(
+                std::array<float, 1>{epsilon_}, std::array<int, 1>{1});
+            const std::array<const MlxArray*, 4> gate_inputs{
+                &recurrent_output, &z, &norm_weight_, &epsilon};
+            const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
+                {.shape = {1, 1, value_width}, .dtype = recurrent_output.dtype()},
+            }};
+            const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+                {.name = "T", .value = recurrent_output.dtype()},
+            }};
+            const std::array<MlxMetalIntTemplate, 3> int_templates{{
+                {.name = "HV", .value = value_heads},
+                {.name = "DV", .value = value_dimension},
+                {.name = "SWISH", .value = output_gate_type_ == "sigmoid" ? 0 : 1},
+            }};
+            gated_rows.push_back(std::move(norm_gate_kernel()->apply(
+                gate_inputs, gate_outputs, std::array<int, 3>{32, 1, value_heads},
+                std::array<int, 3>{32, 1, 1}, dtype_templates, int_templates).front()));
+        } else {
+            MlxArray normalized = recurrent_output.rms_norm(norm_weight_, epsilon_);
+            MlxArray gate = output_gate_type_ == "sigmoid" ? z.sigmoid() : z.silu();
+            gated_rows.push_back(MlxArray::multiply(normalized, gate).reshape(
+                std::vector<int>{1, 1, value_width}));
+        }
     }
     MlxArray output_batch = project_branch2(
         MlxArray::concatenate(gated_rows[0], gated_rows[1], 1), output_projection_);
