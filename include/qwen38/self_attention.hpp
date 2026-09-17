@@ -3,6 +3,7 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cstddef>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -37,6 +38,9 @@ public:
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& input,
         SelfAttentionState& state) const;
+    [[nodiscard]] std::vector<MlxArray> forward_decode_multi(
+        std::span<const MlxArray> inputs,
+        std::span<SelfAttentionState* const> states) const;
     [[nodiscard]] MlxArray forward_verify(
         const MlxArray& input,
         const SelfAttentionState& origin,
@@ -64,6 +68,9 @@ private:
         std::string_view name,
         std::size_t group_size);
     [[nodiscard]] MlxArray project(
+        const MlxArray& input,
+        const QuantizedProjection& projection) const;
+    [[nodiscard]] MlxArray project_branch2(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
     [[nodiscard]] MlxArray apply_rope(const MlxArray& input, std::size_t position) const;

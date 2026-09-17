@@ -240,6 +240,10 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     const bool gdn_branch_batch_enabled = linear_attention_ != nullptr &&
         streams.size() == 2 && gdn_branch_batch != nullptr &&
         std::string_view(gdn_branch_batch) == "1";
+    const char* attention_branch_batch = std::getenv("QWEN38_ATTENTION_BRANCH_BATCH");
+    const bool attention_branch_batch_enabled = full_attention_ != nullptr &&
+        streams.size() == 2 && attention_branch_batch != nullptr &&
+        std::string_view(attention_branch_batch) == "1";
     if (streams.size() == 1 ||
         (linear_attention_ != nullptr && !gdn_branch_batch_enabled)) {
         std::vector<MlxArray> result;
@@ -283,6 +287,12 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
             &states[1]->linear_attention};
         attention_outputs = linear_attention_->forward_decode_multi(
             attention_mixed, linear_states);
+    } else if (attention_branch_batch_enabled) {
+        std::array<SelfAttentionState*, 2> attention_states{
+            &states[0]->full_attention,
+            &states[1]->full_attention};
+        attention_outputs = full_attention_->forward_decode_multi(
+            attention_mixed, attention_states);
     } else {
         attention_outputs.reserve(streams.size());
         for (std::size_t row = 0; row < streams.size(); ++row) {

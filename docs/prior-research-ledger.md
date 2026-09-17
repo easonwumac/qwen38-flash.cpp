@@ -544,6 +544,26 @@ The implementation order is deliberately narrow:
   Conditions: VQ-2.1bpw target, native Q4 MTP head, greedy depth-one siblings,
   M5 Pro 64 GiB, no active thermal control, directional warm samples rather
   than an end-to-end tree benchmark.
+- The remaining 12 full-attention layers and routed VQ dispatch now have
+  opt-in exact two-row paths. The attention path preserves MLX's affine-Q6
+  unpacking, activation transforms, K-block accumulation, and SIMD reduction
+  order while batching Q/gate, K, V, and output projections; the VQ path
+  batches the existing gate/up and down/reduce kernels without route remapping.
+  With all three exact sibling switches enabled, guarded true-top-2 samples
+  reduced the complete target pass from 110.22--111.64 to 89.28--90.13 ms
+  (1.227--1.251x), with zero maximum logit error and a 39.5--39.6 GiB peak
+  footprint.
+  The attention projection supplies most of the gain; the VQ dispatch reuse is
+  smaller because each branch still selects a largely different expert set.
+  Conditions match the preceding GDN experiment and remain a depth-one
+  primitive, not an end-to-end tree throughput claim.
+- A two-row hyper-connection read was not retained. Generic MLX B=2 QMM
+  changed final logits by up to 0.765625. Extending the existing S=1 fused HC
+  kernels was internally bit-exact only when paired with the folded BF16 dense
+  injection policy; that is a different numerical policy and therefore cannot
+  be credited as exact verifier reuse. This repeats the older S-row HC warning:
+  do not batch hyper-connections unless the production serial arithmetic is
+  reproduced exactly.
 
 ## Promotion gates
 

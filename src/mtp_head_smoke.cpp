@@ -213,7 +213,9 @@ int main(int argc, char** argv) {
         const char* gdn_branch_batch = std::getenv("QWEN38_GDN_BRANCH_BATCH");
         if (gdn_branch_batch != nullptr && std::string_view(gdn_branch_batch) == "1" &&
             target_branch_error != 0.0) {
-            throw std::runtime_error("GDN sibling batching changed target logits");
+            throw std::runtime_error(
+                "exact sibling batching changed target logits: max absolute error " +
+                std::to_string(target_branch_error));
         }
         const double branch_sequential_ms = sequential.milliseconds;
         const double branch_batched_ms = batched.milliseconds;

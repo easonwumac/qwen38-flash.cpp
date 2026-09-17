@@ -75,6 +75,88 @@ inline constexpr std::string_view q8_branch2 = R"metal(
     }
 )metal";
 
+// Exact two-row affine-Q6 projection adapted from MLX qmv_fast. Q6 stores four
+// values in three bytes and scales selected activation lanes before applying
+// byte masks; preserving that representation also preserves accumulation order.
+inline constexpr std::string_view q6_branch2 = R"metal(
+    const uint lane = thread_index_in_simdgroup;
+    constexpr int ROWS = 4;
+    constexpr int VALUES = 8;
+    constexpr int BLOCK = VALUES * 32;
+    constexpr int BYTES = 6;
+    const uint output = threadgroup_position_in_grid.x * 8 +
+        simdgroup_index_in_threadgroup * ROWS;
+    if (output >= (uint)OUT) return;
+    const int row_bytes = IN * 3 / 4;
+    const int groups = IN / GROUP;
+    float result0[ROWS] = {0.0f};
+    float result1[ROWS] = {0.0f};
+    for (int kblock = 0; kblock < IN; kblock += BLOCK) {
+        const int k = kblock + int(lane) * VALUES;
+        float xv0[VALUES];
+        float xv1[VALUES];
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int pack = 0; pack < 2; ++pack) {
+            const int base = pack * 4;
+            const float a00 = float(x[k + base]);
+            const float a01 = float(x[k + base + 1]);
+            const float a02 = float(x[k + base + 2]);
+            const float a03 = float(x[k + base + 3]);
+            const float a10 = float(x[IN + k + base]);
+            const float a11 = float(x[IN + k + base + 1]);
+            const float a12 = float(x[IN + k + base + 2]);
+            const float a13 = float(x[IN + k + base + 3]);
+            sum0 += a00 + a01 + a02 + a03;
+            sum1 += a10 + a11 + a12 + a13;
+            xv0[base] = a00;
+            xv0[base + 1] = a01 / 64.0f;
+            xv0[base + 2] = a02 / 16.0f;
+            xv0[base + 3] = a03 / 4.0f;
+            xv1[base] = a10;
+            xv1[base + 1] = a11 / 64.0f;
+            xv1[base + 2] = a12 / 16.0f;
+            xv1[base + 3] = a13 / 4.0f;
+        }
+        const int group = k / GROUP;
+        const int byte_offset = kblock * 3 / 4 + int(lane) * BYTES;
+        for (int row = 0; row < ROWS; ++row) {
+            const device uchar* w = (const device uchar*)weight +
+                (size_t)(output + row) * row_bytes + byte_offset;
+            float accum0 = 0.0f;
+            float accum1 = 0.0f;
+            for (int pack = 0; pack < 2; ++pack) {
+                const int xi = pack * 4;
+                const int wi = pack * 3;
+                accum0 += float(w[wi] & 0x3f) * xv0[xi];
+                accum0 += float(w[wi] & 0xc0) * xv0[xi + 1];
+                accum0 += float(w[wi + 1] & 0x0f) * (xv0[xi + 1] * 256.0f);
+                accum0 += float(w[wi + 1] & 0xf0) * xv0[xi + 2];
+                accum0 += float(w[wi + 2] & 0x03) * (xv0[xi + 2] * 256.0f);
+                accum0 += float(w[wi + 2] & 0xfc) * xv0[xi + 3];
+                accum1 += float(w[wi] & 0x3f) * xv1[xi];
+                accum1 += float(w[wi] & 0xc0) * xv1[xi + 1];
+                accum1 += float(w[wi + 1] & 0x0f) * (xv1[xi + 1] * 256.0f);
+                accum1 += float(w[wi + 1] & 0xf0) * xv1[xi + 2];
+                accum1 += float(w[wi + 2] & 0x03) * (xv1[xi + 2] * 256.0f);
+                accum1 += float(w[wi + 2] & 0xfc) * xv1[xi + 3];
+            }
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    for (int row = 0; row < ROWS; ++row) {
+        result0[row] = simd_sum(result0[row]);
+        result1[row] = simd_sum(result1[row]);
+        if (lane == 0 && output + row < (uint)OUT) {
+            y[output + row] = T(result0[row]);
+            y[OUT + output + row] = T(result1[row]);
+        }
+    }
+)metal";
+
 inline constexpr std::string_view prework_header = R"metal(
 inline float qwen38_log1p(float x) {
     float plus_one = 1.0f + x;

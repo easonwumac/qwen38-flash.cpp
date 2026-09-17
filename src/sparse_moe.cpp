@@ -1460,6 +1460,96 @@ MlxArray SparseMoe::forward_decode_profiled(
     return output;
 }
 
+MlxArray SparseMoe::forward_vq_routed_batch(
+    const MlxArray& input,
+    const MlxArray& experts,
+    const MlxArray& weights,
+    const int batch) const {
+    if (!fused_vq_ || batch < 1 || batch > 8) {
+        throw std::runtime_error("VQ routed batch requires 1 to 8 rows");
+    }
+    const int slots = checked_int(experts_per_token_, "VQ batch slots");
+    const bool gate_up_u8 = expert_gate_.codebook_u8_ready &&
+        expert_up_.codebook_u8_ready;
+    const bool down_u8 = expert_down_.codebook_u8_ready;
+    const MlxArray& gate_codebook = gate_up_u8
+        ? expert_gate_.codebook_u8 : expert_gate_.codebook;
+    const MlxArray& gate_cb_scales = gate_up_u8
+        ? expert_gate_.codebook_u8_scales : expert_gate_.codebook;
+    const MlxArray& gate_cb_biases = gate_up_u8
+        ? expert_gate_.codebook_u8_biases : expert_gate_.codebook;
+    const MlxArray& up_codebook = gate_up_u8
+        ? expert_up_.codebook_u8 : expert_up_.codebook;
+    const MlxArray& up_cb_scales = gate_up_u8
+        ? expert_up_.codebook_u8_scales : expert_up_.codebook;
+    const MlxArray& up_cb_biases = gate_up_u8
+        ? expert_up_.codebook_u8_biases : expert_up_.codebook;
+    const MlxArray& down_codebook = down_u8
+        ? expert_down_.codebook_u8 : expert_down_.codebook;
+    const MlxArray& down_cb_scales = down_u8
+        ? expert_down_.codebook_u8_scales : expert_down_.codebook;
+    const MlxArray& down_cb_biases = down_u8
+        ? expert_down_.codebook_u8_biases : expert_down_.codebook;
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = input.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 9> gate_templates{{
+        {.name = "OUT", .value = expert_gate_.output_dimension},
+        {.name = "IN", .value = expert_gate_.input_dimension},
+        {.name = "D", .value = expert_gate_.vector_dimension},
+        {.name = "GROUP", .value = expert_gate_.group_size},
+        {.name = "BITS", .value = expert_gate_.packed_bits},
+        {.name = "SLOTS", .value = slots},
+        {.name = "BATCH", .value = batch},
+        {.name = "GATE_CBQ", .value = gate_up_u8
+            ? expert_gate_.codebook_quantization : 0},
+        {.name = "UP_CBQ", .value = gate_up_u8
+            ? expert_up_.codebook_quantization : 0},
+    }};
+    const std::array<MlxMetalOutputSpec, 1> gate_outputs{{
+        {.shape = {batch * slots, expert_gate_.output_dimension},
+         .dtype = input.dtype()},
+    }};
+    const int gate_groups =
+        (batch * slots * expert_gate_.output_dimension + 7) / 8;
+    const std::array<int, 3> threadgroup{256, 1, 1};
+    const MlxArray* gate_inputs[]{
+        &input,
+        &expert_gate_.weight, &gate_codebook, &gate_cb_scales, &gate_cb_biases,
+        &expert_gate_.scales,
+        &expert_up_.weight, &up_codebook, &up_cb_scales, &up_cb_biases,
+        &expert_up_.scales,
+        &experts};
+    MlxArray hidden = std::move(vq_gate_up_kernel()->apply(
+        gate_inputs, gate_outputs,
+        std::array<int, 3>{gate_groups * 256, 1, 1}, threadgroup,
+        dtype_templates, gate_templates).front());
+
+    const std::array<MlxMetalIntTemplate, 8> down_templates{{
+        {.name = "OUT", .value = expert_down_.output_dimension},
+        {.name = "IN", .value = expert_down_.input_dimension},
+        {.name = "D", .value = expert_down_.vector_dimension},
+        {.name = "GROUP", .value = expert_down_.group_size},
+        {.name = "BITS", .value = expert_down_.packed_bits},
+        {.name = "SLOTS", .value = slots},
+        {.name = "BATCH", .value = batch},
+        {.name = "CBQ", .value = down_u8
+            ? expert_down_.codebook_quantization : 0},
+    }};
+    const std::array<MlxMetalOutputSpec, 1> down_outputs{{
+        {.shape = {1, batch, expert_down_.output_dimension}, .dtype = input.dtype()},
+    }};
+    const int down_groups = (batch * expert_down_.output_dimension + 7) / 8;
+    const MlxArray* down_inputs[]{
+        &hidden, &expert_down_.weight, &down_codebook,
+        &down_cb_scales, &down_cb_biases, &expert_down_.scales,
+        &experts, &weights};
+    return std::move(vq_down_reduce_kernel()->apply(
+        down_inputs, down_outputs,
+        std::array<int, 3>{down_groups * 256, 1, 1}, threadgroup,
+        dtype_templates, down_templates).front());
+}
+
 std::vector<MlxArray> SparseMoe::forward_decode_multi(
     const std::vector<MlxArray>& inputs) const {
     if (inputs.empty()) {
@@ -1495,6 +1585,41 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
                   << " union01=" << (2 * experts_per_token_ - intersection)
                   << " unique=" << unique
                   << " selected=" << inputs.size() * experts_per_token_ << '\n';
+    }
+    const char* vq_branch_batch = std::getenv("QWEN38_VQ_BRANCH_BATCH");
+    const bool vq_branch_batch_enabled = fused_vq_ && inputs.size() == 2 &&
+        vq_branch_batch != nullptr && std::string_view(vq_branch_batch) == "1";
+    if (vq_branch_batch_enabled) {
+        std::vector<std::int32_t> expert_values;
+        std::vector<float> weight_values;
+        expert_values.reserve(2 * experts_per_token_);
+        weight_values.reserve(2 * experts_per_token_);
+        for (const MlxArray& input : inputs) {
+            RouterSelection selection = route_decode(input);
+            for (const std::size_t expert : selection.experts) {
+                expert_values.push_back(static_cast<std::int32_t>(expert));
+            }
+            weight_values.insert(
+                weight_values.end(), selection.weights.begin(), selection.weights.end());
+        }
+        const int topk = checked_int(experts_per_token_, "VQ branch top-k");
+        MlxArray experts = MlxArray::from_int32(
+            expert_values, std::vector<int>{2, topk});
+        MlxArray weights = MlxArray::from_float32(
+            weight_values, std::vector<int>{2, topk});
+        MlxArray routed = forward_vq_routed_batch(
+            concatenate_sequence_rows(inputs), experts, weights, 2);
+        std::vector<MlxArray> shared;
+        shared.reserve(2);
+        shared.push_back(forward_shared(inputs[0]));
+        shared.push_back(forward_shared(inputs[1]));
+        std::vector<MlxArray> outputs;
+        outputs.reserve(2);
+        for (std::size_t row = 0; row < 2; ++row) {
+            outputs.push_back(MlxArray::add(
+                slice_sequence_row(routed, row), shared[row]));
+        }
+        return outputs;
     }
     if (inputs.size() == 1 || inputs.size() > 8 || !has_routed_ || paged_store_ ||
         !compact_qmeta_) {

@@ -145,6 +145,11 @@ private:
     [[nodiscard]] MlxArray forward_experts_decode_profiled(
         const MlxArray& input,
         MoeDecodeTimings* timings) const;
+    [[nodiscard]] MlxArray forward_vq_routed_batch(
+        const MlxArray& input,
+        const MlxArray& experts,
+        const MlxArray& weights,
+        int batch) const;
     [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_grouped(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_packed(const MlxArray& input) const;

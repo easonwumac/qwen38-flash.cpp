@@ -19,8 +19,8 @@ independent C++ implementation in this project.
 
 The Q4 down-projection unpacking pattern is adapted from MLX
 (Copyright Apple Inc.), licensed under the MIT License.
-The exact two-row affine-Q8 sibling projection preserves MLX's qmv_fast
-accumulation and reduction order under the same license.
+The exact two-row affine-Q8 and affine-Q6 sibling projections preserve MLX's
+qmv_fast accumulation and reduction order under the same license.
 
 The experimental PP route-reduction rounding order follows MLX's
 col_reduce_small (Copyright Apple Inc.), under the MIT license retained in

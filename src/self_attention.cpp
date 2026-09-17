@@ -5,6 +5,7 @@
 
 #include "qwen38/quantization_geometry.hpp"
 
+#include "gdn_metal_kernels.hpp"
 #include "qsa_metal_kernels.hpp"
 
 #include <algorithm>
@@ -77,6 +78,26 @@ std::shared_ptr<MlxMetalKernel> packed_qsa_kernel() {
             "output",
             qsa_metal::packed_attention,
             qsa_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> attention_q8_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_attention_q8_branch2", inputs, "y",
+            gdn_metal::q8_branch2, gdn_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> attention_q6_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_attention_q6_branch2", inputs, "y",
+            gdn_metal::q6_branch2, gdn_metal::header);
     }();
     return kernel;
 }
@@ -521,6 +542,49 @@ MlxArray SelfAttention::project(
     return MlxArray::quantized_matmul(
         input, projection.weight, projection.scales, projection.biases,
         group_size_, projection.bits);
+}
+
+MlxArray SelfAttention::project_branch2(
+    const MlxArray& input,
+    const QuantizedProjection& projection) const {
+    const std::vector<int> shape = input.shape();
+    const std::vector<int> weight_shape = projection.weight.shape();
+    const std::vector<int> scale_shape = projection.scales.shape();
+    const int input_width = scale_shape.size() == 2
+        ? scale_shape[1] * group_size_ : 0;
+    const int output_width = weight_shape.size() == 2 ? weight_shape[0] : 0;
+    const bool supported =
+        (projection.bits == 8 && group_size_ == 64) ||
+        (projection.bits == 6 && group_size_ == 32);
+    if (!supported || shape.size() != 3 ||
+        shape[0] != 1 || shape[1] != 2 || shape[2] != input_width ||
+        input_width % 256 != 0 || output_width % 8 != 0) {
+        throw std::runtime_error(
+            "attention branch projection requires supported affine [1,2,K]: bits=" +
+            std::to_string(projection.bits) + " group=" +
+            std::to_string(group_size_) + " input=" +
+            std::to_string(input_width) + " output=" +
+            std::to_string(output_width));
+    }
+    const std::array<const MlxArray*, 4> inputs{
+        &input, &projection.weight, &projection.scales, &projection.biases};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {1, 2, output_width}, .dtype = input.dtype()},
+    }};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = input.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 3> int_templates{{
+        {.name = "IN", .value = input_width},
+        {.name = "OUT", .value = output_width},
+        {.name = "GROUP", .value = group_size_},
+    }};
+    const std::shared_ptr<MlxMetalKernel>& kernel = projection.bits == 8
+        ? attention_q8_branch2_kernel() : attention_q6_branch2_kernel();
+    return std::move(kernel->apply(
+        inputs, outputs,
+        std::array<int, 3>{(output_width / 8) * 64, 1, 1},
+        std::array<int, 3>{64, 1, 1}, dtype_templates, int_templates).front());
 }
 
 MlxArray SelfAttention::apply_rope(const MlxArray& input, const std::size_t position) const {
@@ -1249,6 +1313,120 @@ MlxArray SelfAttention::forward_decode(
     }
 #endif
     return output;
+}
+
+std::vector<MlxArray> SelfAttention::forward_decode_multi(
+    const std::span<const MlxArray> inputs,
+    const std::span<SelfAttentionState* const> states) const {
+    if (inputs.size() != 2 || states.size() != 2 || states[0] == nullptr ||
+        states[1] == nullptr) {
+        throw std::runtime_error("attention sibling decode requires two matching states");
+    }
+    for (const MlxArray& input : inputs) {
+        const std::vector<int> shape = input.shape();
+        if (shape.size() != 3 || shape[0] != 1 || shape[1] != 1) {
+            throw std::runtime_error("attention sibling input requires [1,1,hidden]");
+        }
+    }
+    std::vector<QsaSelection> selections;
+    std::array<bool, 2> want_q8{};
+    selections.reserve(2);
+    for (std::size_t row = 0; row < 2; ++row) {
+        SelfAttentionState& state = *states[row];
+        want_q8[row] = state.kv_q8 ||
+            (q8_kv_requested() && state.token_count + 1 >= q8_kv_min_tokens());
+        selections.push_back(update_qsa_and_build_mask(
+            inputs[row], state, want_q8[row], true));
+    }
+
+    const int heads = dimension(attention_heads_, "attention heads");
+    const int kv_heads = dimension(key_value_heads_, "key/value heads");
+    const int head_dimension = dimension(head_dimension_, "head dimension");
+    std::vector<MlxArray> input_rows;
+    input_rows.reserve(2);
+    input_rows.push_back(inputs[0].share());
+    input_rows.push_back(inputs[1].share());
+    MlxArray input_batch = concatenate_sequence_rows(input_rows);
+    MlxArray query_gate_batch = project_branch2(
+        input_batch, query_projection_).reshape(
+            std::vector<int>{1, 2, heads, 2 * head_dimension});
+    MlxArray key_batch = project_branch2(input_batch, key_projection_).reshape(
+        std::vector<int>{1, 2, kv_heads, head_dimension});
+    MlxArray value_batch = project_branch2(input_batch, value_projection_).reshape(
+        std::vector<int>{1, 2, kv_heads, head_dimension});
+
+    const std::vector<int> strides{1, 1, 1, 1};
+    const std::vector<int> flat_shape{1, 1, heads * head_dimension};
+    std::vector<MlxArray> gated_rows;
+    gated_rows.reserve(2);
+    for (std::size_t row = 0; row < 2; ++row) {
+        SelfAttentionState& state = *states[row];
+        MlxArray query_gate = slice_sequence_row(query_gate_batch, row);
+        MlxArray query = query_gate.slice(
+            std::vector<int>{0, 0, 0, 0},
+            std::vector<int>{1, 1, heads, head_dimension}, strides);
+        MlxArray gate = query_gate.slice(
+            std::vector<int>{0, 0, 0, head_dimension},
+            std::vector<int>{1, 1, heads, 2 * head_dimension}, strides);
+        query = query.rms_norm(query_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray key = slice_sequence_row(key_batch, row)
+            .rms_norm(key_norm_weight_, epsilon_).swapaxes(1, 2);
+        MlxArray value = slice_sequence_row(value_batch, row).swapaxes(1, 2);
+        const std::size_t position = state.position_base + state.token_count;
+        query = apply_rope(query, position);
+        key = apply_rope(key, position);
+        QsaSelection& qsa = selections[row];
+        if (want_q8[row] && qsa.packed_indices.get().ctx != nullptr) {
+            append_q8_kv(state, std::move(key), std::move(value));
+        } else if (state.token_count == 0) {
+            state.keys = std::move(key);
+            state.values = std::move(value);
+        } else {
+            state.keys = MlxArray::concatenate(state.keys, key, 2);
+            state.values = MlxArray::concatenate(state.values, value, 2);
+        }
+        ++state.token_count;
+
+        MlxArray attended;
+        if (state.kv_q8) {
+            if (qsa.packed_indices.get().ctx == nullptr) {
+                throw std::runtime_error("Q8 KV sibling decode requires packed QSA");
+            }
+            attended = packed_qsa_attention_q8(query, state, qsa);
+        } else if (qsa.dense_mask.get().ctx != nullptr) {
+            attended = MlxArray::scaled_dot_product_attention(
+                query, state.keys, state.values,
+                1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+                qsa.dense_mask).swapaxes(1, 2);
+        } else if (use_sdpa_decode(state.token_count)) {
+            attended = MlxArray::scaled_dot_product_attention(
+                query, state.keys, state.values,
+                1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+                false).swapaxes(1, 2);
+        } else {
+            const int repetitions = heads / kv_heads;
+            MlxArray repeated_keys = state.keys.repeat_axis(repetitions, 1);
+            MlxArray repeated_values = state.values.repeat_axis(repetitions, 1);
+            MlxArray scores = MlxArray::matmul(query, repeated_keys.swapaxes(2, 3));
+            scores = MlxArray::multiply(
+                scores,
+                scalar(1.0F / std::sqrt(static_cast<float>(head_dimension_)),
+                       scores.dtype()));
+            MlxArray probabilities = scores.astype(MLX_FLOAT32)
+                .softmax_axis(-1).astype(query.dtype());
+            attended = MlxArray::matmul(
+                probabilities, repeated_values).swapaxes(1, 2);
+        }
+        gated_rows.push_back(MlxArray::multiply(
+            attended.reshape(flat_shape), gate.reshape(flat_shape).sigmoid()));
+    }
+    MlxArray output_batch = project_branch2(
+        concatenate_sequence_rows(gated_rows), output_projection_);
+    std::vector<MlxArray> outputs;
+    outputs.reserve(2);
+    outputs.push_back(slice_sequence_row(output_batch, 0));
+    outputs.push_back(slice_sequence_row(output_batch, 1));
+    return outputs;
 }
 
 MlxArray SelfAttention::forward_verify(
