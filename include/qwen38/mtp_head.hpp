@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <vector>
 
 namespace qwen38 {
 
@@ -50,6 +51,15 @@ public:
         MtpDecodeState& state,
         std::size_t adapter_depth = 0,
         MlxArray* final_mixed_trace = nullptr) const;
+    // Advances independent speculative branches at the same depth in one
+    // decoder dispatch. Each state remains branch-local; only stateless input,
+    // MoE, and language-head work is batched/shared.
+    [[nodiscard]] std::vector<MtpDecodeStep> forward_decode_multi(
+        std::span<const MlxArray* const> target_pre_mixer_streams,
+        std::span<const std::uint32_t> next_tokens,
+        std::size_t query_position,
+        std::span<MtpDecodeState* const> states,
+        std::size_t adapter_depth = 0) const;
     void consume_decode(
         const MlxArray& target_pre_mixer_stream,
         std::uint32_t next_token,

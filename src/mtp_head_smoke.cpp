@@ -2,6 +2,8 @@
 #include "qwen38/mtp_head.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -15,6 +17,115 @@ std::uint32_t argmax(const qwen38::MlxArray& logits) {
     const std::vector<float> values = logits.astype(MLX_FLOAT32).to_float32();
     return static_cast<std::uint32_t>(
         std::distance(values.begin(), std::ranges::max_element(values)));
+}
+
+void evaluate_steps(
+    const std::vector<qwen38::MtpDecodeStep>& steps,
+    const std::vector<qwen38::MtpDecodeState>& states) {
+    std::vector<qwen38::MlxArray> tokens;
+    std::vector<const qwen38::MlxArray*> outputs;
+    tokens.reserve(steps.size());
+    outputs.reserve(steps.size() * 3);
+    for (const qwen38::MtpDecodeStep& step : steps) {
+        tokens.push_back(step.logits.argmax_all());
+        outputs.push_back(&tokens.back());
+    }
+    for (const qwen38::MtpDecodeState& state : states) {
+        if (state.layer.full_attention.qsa_raw_keys.get().ctx != nullptr) {
+            outputs.push_back(&state.layer.full_attention.qsa_raw_keys);
+        }
+        if (state.layer.full_attention.qsa_pooled_keys.get().ctx != nullptr) {
+            outputs.push_back(&state.layer.full_attention.qsa_pooled_keys);
+        }
+    }
+    qwen38::MlxArray::eval_all(outputs);
+}
+
+struct BranchPass {
+    std::vector<qwen38::MtpDecodeStep> steps;
+    std::vector<qwen38::MtpDecodeState> states;
+    double milliseconds{0.0};
+};
+
+struct TargetBranchPass {
+    std::vector<qwen38::TargetDecodeStep> steps;
+    std::vector<qwen38::ModelDecodeState> states;
+    double milliseconds{0.0};
+};
+
+BranchPass run_branch_pass(
+    const qwen38::QwenMtpHead& mtp,
+    const qwen38::MlxArray& target_stream,
+    const std::span<const std::uint32_t> tokens,
+    const bool batched) {
+    BranchPass result;
+    result.states.resize(tokens.size());
+    const auto started = std::chrono::steady_clock::now();
+    if (batched) {
+        std::vector<const qwen38::MlxArray*> streams(tokens.size(), &target_stream);
+        std::vector<qwen38::MtpDecodeState*> states;
+        states.reserve(result.states.size());
+        for (qwen38::MtpDecodeState& state : result.states) states.push_back(&state);
+        result.steps = mtp.forward_decode_multi(streams, tokens, 1, states);
+    } else {
+        result.steps.reserve(tokens.size());
+        for (std::size_t row = 0; row < tokens.size(); ++row) {
+            result.steps.push_back(
+                mtp.forward_decode(target_stream, tokens[row], 1, result.states[row]));
+        }
+    }
+    evaluate_steps(result.steps, result.states);
+    result.milliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return result;
+}
+
+TargetBranchPass run_target_branch_pass(
+    const qwen38::QwenModel& target,
+    const qwen38::ModelDecodeState& origin,
+    const std::span<const std::uint32_t> tokens,
+    const bool batched) {
+    TargetBranchPass result;
+    result.states.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        result.states.push_back(target.snapshot_state(origin));
+    }
+    const auto started = std::chrono::steady_clock::now();
+    if (batched) {
+        std::vector<qwen38::ModelDecodeState*> states;
+        states.reserve(result.states.size());
+        for (qwen38::ModelDecodeState& state : result.states) states.push_back(&state);
+        result.steps = target.forward_decode_capture_multi(tokens, states);
+    } else {
+        result.steps.reserve(tokens.size());
+        for (std::size_t row = 0; row < tokens.size(); ++row) {
+            result.steps.push_back(target.forward_decode_capture(tokens[row], result.states[row]));
+        }
+        std::vector<qwen38::MlxArray> greedy;
+        std::vector<const qwen38::MlxArray*> outputs;
+        greedy.reserve(result.steps.size());
+        for (const qwen38::TargetDecodeStep& step : result.steps) {
+            greedy.push_back(step.logits.argmax_all());
+            outputs.push_back(&greedy.back());
+        }
+        qwen38::MlxArray::eval_all(outputs);
+    }
+    result.milliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    return result;
+}
+
+double maximum_absolute_error(
+    const qwen38::MlxArray& left,
+    const qwen38::MlxArray& right) {
+    const std::vector<float> a = left.astype(MLX_FLOAT32).to_float32();
+    const std::vector<float> b = right.astype(MLX_FLOAT32).to_float32();
+    if (a.size() != b.size()) throw std::runtime_error("MTP branch parity size mismatch");
+    double maximum = 0.0;
+    for (std::size_t index = 0; index < a.size(); ++index) {
+        maximum = std::max(maximum, static_cast<double>(std::abs(a[index] - b[index])));
+    }
+    return maximum;
 }
 
 } // namespace
@@ -55,10 +166,91 @@ int main(int argc, char** argv) {
         if (!rejected_position_gap) {
             throw std::runtime_error("MTP position-gap guard did not engage");
         }
+
+        const std::array<std::uint32_t, 2> branch_tokens{target_token, draft_token};
+        static_cast<void>(run_branch_pass(mtp, target_step.pre_mixer_stream, branch_tokens, false));
+        static_cast<void>(run_branch_pass(mtp, target_step.pre_mixer_stream, branch_tokens, true));
+        BranchPass sequential = run_branch_pass(
+            mtp, target_step.pre_mixer_stream, branch_tokens, false);
+        BranchPass batched = run_branch_pass(
+            mtp, target_step.pre_mixer_stream, branch_tokens, true);
+        double branch_error = 0.0;
+        for (std::size_t row = 0; row < branch_tokens.size(); ++row) {
+            branch_error = std::max(branch_error, maximum_absolute_error(
+                sequential.steps[row].logits, batched.steps[row].logits));
+        }
+        static_cast<void>(run_target_branch_pass(target, target_state, branch_tokens, false));
+        static_cast<void>(run_target_branch_pass(target, target_state, branch_tokens, true));
+        TargetBranchPass target_sequential = run_target_branch_pass(
+            target, target_state, branch_tokens, false);
+        TargetBranchPass target_batched = run_target_branch_pass(
+            target, target_state, branch_tokens, true);
+        double target_branch_error = 0.0;
+        for (std::size_t row = 0; row < branch_tokens.size(); ++row) {
+            target_branch_error = std::max(target_branch_error, maximum_absolute_error(
+                target_sequential.steps[row].logits, target_batched.steps[row].logits));
+        }
+        const double branch_sequential_ms = sequential.milliseconds;
+        const double branch_batched_ms = batched.milliseconds;
+        const double target_branch_sequential_ms = target_sequential.milliseconds;
+        const double target_branch_batched_ms = target_batched.milliseconds;
+        sequential = {};
+        batched = {};
+        target_sequential = {};
+        target_batched = {};
+        const std::array<std::uint32_t, 4> wide_branch_tokens{
+            target_token, draft_token, 9419, 1};
+        static_cast<void>(run_branch_pass(
+            mtp, target_step.pre_mixer_stream, wide_branch_tokens, false));
+        static_cast<void>(run_branch_pass(
+            mtp, target_step.pre_mixer_stream, wide_branch_tokens, true));
+        BranchPass wide_sequential = run_branch_pass(
+            mtp, target_step.pre_mixer_stream, wide_branch_tokens, false);
+        BranchPass wide_batched = run_branch_pass(
+            mtp, target_step.pre_mixer_stream, wide_branch_tokens, true);
+        double wide_branch_error = 0.0;
+        for (std::size_t row = 0; row < wide_branch_tokens.size(); ++row) {
+            wide_branch_error = std::max(wide_branch_error, maximum_absolute_error(
+                wide_sequential.steps[row].logits, wide_batched.steps[row].logits));
+        }
+        static_cast<void>(run_target_branch_pass(
+            target, target_state, wide_branch_tokens, false));
+        static_cast<void>(run_target_branch_pass(
+            target, target_state, wide_branch_tokens, true));
+        TargetBranchPass wide_target_sequential = run_target_branch_pass(
+            target, target_state, wide_branch_tokens, false);
+        TargetBranchPass wide_target_batched = run_target_branch_pass(
+            target, target_state, wide_branch_tokens, true);
+        double wide_target_branch_error = 0.0;
+        for (std::size_t row = 0; row < wide_branch_tokens.size(); ++row) {
+            wide_target_branch_error = std::max(
+                wide_target_branch_error, maximum_absolute_error(
+                    wide_target_sequential.steps[row].logits,
+                    wide_target_batched.steps[row].logits));
+        }
         std::cout << "{\"target_token\":" << target_token
                   << ",\"draft_token\":" << draft_token
                   << ",\"mtp_rows\":" << mtp_state.row_count
                   << ",\"position_gap_rejected\":true"
+                  << ",\"branch_sequential_ms\":" << branch_sequential_ms
+                  << ",\"branch_batched_ms\":" << branch_batched_ms
+                  << ",\"branch_speedup\":"
+                  << branch_sequential_ms / branch_batched_ms
+                  << ",\"branch_max_absolute\":" << branch_error
+                  << ",\"target_branch_sequential_ms\":"
+                  << target_branch_sequential_ms
+                  << ",\"target_branch_batched_ms\":" << target_branch_batched_ms
+                  << ",\"target_branch_speedup\":"
+                  << target_branch_sequential_ms / target_branch_batched_ms
+                  << ",\"target_branch_max_absolute\":" << target_branch_error
+                  << ",\"wide_branch_speedup\":"
+                  << wide_sequential.milliseconds / wide_batched.milliseconds
+                  << ",\"wide_branch_max_absolute\":" << wide_branch_error
+                  << ",\"wide_target_branch_speedup\":"
+                  << wide_target_sequential.milliseconds /
+                      wide_target_batched.milliseconds
+                  << ",\"wide_target_branch_max_absolute\":"
+                  << wide_target_branch_error
                   << ",\"stream_width\":" << stream_shape.back()
                   << ",\"open_shards\":" << tensors.open_shard_count() << "}\n";
         return EXIT_SUCCESS;

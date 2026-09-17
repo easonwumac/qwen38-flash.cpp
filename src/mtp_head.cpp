@@ -507,4 +507,91 @@ MtpDecodeStep QwenMtpHead::forward_decode_lazy_token(
     };
 }
 
+std::vector<MtpDecodeStep> QwenMtpHead::forward_decode_multi(
+    const std::span<const MlxArray* const> target_pre_mixer_streams,
+    const std::span<const std::uint32_t> next_tokens,
+    const std::size_t query_position,
+    const std::span<MtpDecodeState* const> states,
+    const std::size_t adapter_depth) const {
+    const std::size_t rows = next_tokens.size();
+    if (rows == 0 || rows > 64 || target_pre_mixer_streams.size() != rows ||
+        states.size() != rows) {
+        throw std::runtime_error(
+            "MTP branch batch requires 1 to 64 matching streams, tokens, and states");
+    }
+    for (std::size_t row = 0; row < rows; ++row) {
+        if (target_pre_mixer_streams[row] == nullptr || states[row] == nullptr) {
+            throw std::runtime_error("MTP branch batch contains a null row");
+        }
+        const std::vector<int> expected{
+            1, 1, dimension(hidden_size_ * stream_count_, "stream width")};
+        if (target_pre_mixer_streams[row]->shape() != expected) {
+            throw std::runtime_error("MTP branch stream must have shape [1,1,10240]");
+        }
+        if (next_tokens[row] >= vocabulary_size_) {
+            throw std::runtime_error("MTP branch token id is out of range");
+        }
+        MtpDecodeState& state = *states[row];
+        if (!state.position_base.has_value()) state.position_base = query_position;
+        if (query_position != *state.position_base + state.row_count) {
+            throw std::runtime_error("MTP branch query positions must be contiguous");
+        }
+        if (state.row_count == 0) state.layer.full_attention.position_base = query_position;
+    }
+
+    std::vector<std::int32_t> token_values;
+    token_values.reserve(rows);
+    for (const std::uint32_t token : next_tokens) {
+        token_values.push_back(static_cast<std::int32_t>(token));
+    }
+    MlxArray ids = MlxArray::from_int32(
+        token_values, std::vector<int>{dimension(rows, "branch rows")});
+    MlxArray hidden_batch = concatenate_sequence(target_pre_mixer_streams);
+    MlxArray combined = combine_inputs(hidden_batch, ids);
+
+    std::vector<MlxArray> streams;
+    streams.reserve(rows);
+    std::vector<DecoderLayerState*> layer_states;
+    layer_states.reserve(rows);
+    for (std::size_t row = 0; row < rows; ++row) {
+        streams.push_back(slice_sequence_row(combined, row));
+        layer_states.push_back(&states[row]->layer);
+    }
+    streams = layer_.forward_decode_multi(
+        std::move(streams), next_tokens, layer_states);
+    for (MtpDecodeState* state : states) ++state->row_count;
+
+    std::vector<const MlxArray*> stream_pointers;
+    stream_pointers.reserve(streams.size());
+    for (const MlxArray& stream : streams) stream_pointers.push_back(&stream);
+    MlxArray stream_batch = concatenate_sequence(stream_pointers);
+    HyperConnectionRead final = final_mixer_.read(stream_batch);
+    MlxArray head_input = final.mixed.share();
+    if (adapter_depth != 0 && !hidden_adapter_a_.empty()) {
+        const std::size_t index = std::min(adapter_depth, hidden_adapter_a_.size()) - 1;
+        MlxArray projected = MlxArray::matmul(
+            head_input, hidden_adapter_a_[index].transpose());
+        head_input = MlxArray::add(
+            head_input, MlxArray::matmul(projected, hidden_adapter_b_.transpose()));
+    }
+    MlxArray logits_batch = project(head_input, language_head_);
+    if (adapter_depth != 0 && !head_adapter_a_.empty()) {
+        const std::size_t index = std::min(adapter_depth, head_adapter_a_.size()) - 1;
+        MlxArray projected = MlxArray::matmul(
+            final.mixed, head_adapter_a_[index].transpose());
+        logits_batch = MlxArray::add(
+            logits_batch, MlxArray::matmul(projected, head_adapter_b_.transpose()));
+    }
+
+    std::vector<MtpDecodeStep> result;
+    result.reserve(rows);
+    for (std::size_t row = 0; row < rows; ++row) {
+        result.push_back({
+            .logits = slice_sequence_row(logits_batch, row),
+            .pre_mixer_stream = std::move(streams[row]),
+        });
+    }
+    return result;
+}
+
 } // namespace qwen38

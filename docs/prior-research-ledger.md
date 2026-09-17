@@ -495,6 +495,29 @@ The implementation order is deliberately narrow:
   were removed. Revisit only with row-batched kernels that reproduce the native
   MLX QMM reduction and BF16 rounding order, followed by long-generation parity.
 
+## Shared speculative branch execution
+
+- A retained `QwenMtpHead::forward_decode_multi` advances independent MTP
+  branch states at one common depth while batching input fusion, routed MoE,
+  and the language head. On the VQ-2.1bpw target with native Q4 MTP head, a
+  guarded warm microbenchmark observed 1.35--1.53x at two branches and
+  1.64--1.66x at four branches. The final two-row sample was 9.31 versus
+  6.92 ms; maximum absolute logit differences were 4.1e-6 at two rows and
+  5.8e-6 at four. These are fixed-token, greedy, depth-one micro samples on
+  the 64 GiB M5 Pro without external thermal control, not end-to-end decode
+  claims. Peak physical footprint for the final wider probe was 39.4 GiB.
+- Applying the analogous batching shape to the 48-layer VQ target did not
+  share meaningful verification cost: the final sample measured 112.6 versus
+  111.8 ms at two rows and 1.00x at four. A packed-d8 VQ multi-row MoE prototype remained
+  bit-exact only when shared experts kept their single-row arithmetic, but the
+  end-to-end target result was still flat; it was removed. Branches diverge
+  before the trunk and generally route to different experts, so dispatch
+  sharing does not remove the dominant expert-weight traffic.
+- Therefore do not expand a tree and expect target batching alone to pay for
+  it. The retained generation primitive is intended for a bounded candidate
+  producer followed by a rollout-trained, target-aware selector. Only the one
+  selected coherent path should enter the existing linear target verifier.
+
 ## Promotion gates
 
 An optimization is promoted only when all of the following hold:
