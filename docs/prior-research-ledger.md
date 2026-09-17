@@ -500,10 +500,10 @@ The implementation order is deliberately narrow:
 - A retained `QwenMtpHead::forward_decode_multi` advances independent MTP
   branch states at one common depth while batching input fusion, routed MoE,
   and the language head. On the VQ-2.1bpw target with native Q4 MTP head, a
-  guarded warm microbenchmark observed 1.35--1.53x at two branches and
-  1.64--1.66x at four branches. The final two-row sample was 9.31 versus
-  6.92 ms; maximum absolute logit differences were 4.1e-6 at two rows and
-  5.8e-6 at four. These are fixed-token, greedy, depth-one micro samples on
+  guarded warm microbenchmark observed 1.35--1.59x at two branches and
+  1.64--1.72x at four branches. The retained probe now uses the native MTP
+  top-two siblings from one common state; maximum absolute logit differences
+  remained below 5e-6. These are greedy, depth-one micro samples on
   the 64 GiB M5 Pro without external thermal control, not end-to-end decode
   claims. Peak physical footprint for the final wider probe was 39.4 GiB.
 - Applying the analogous batching shape to the 48-layer VQ target did not
@@ -517,6 +517,18 @@ The implementation order is deliberately narrow:
   it. The retained generation primitive is intended for a bounded candidate
   producer followed by a rollout-trained, target-aware selector. Only the one
   selected coherent path should enter the existing linear target verifier.
+- A true-sibling route audit found meaningful but insufficient reuse. Across
+  the target's 12 routed-MoE layers, the two top-2 MTP siblings shared 53 of
+  120 selected experts (44.2% mean intersection); coalescing reduced 240 route
+  occurrences to 187 unique experts, a theoretical 22.1% reduction. A
+  bit-exact Metal prototype decoded each shared expert once and preserved the
+  original per-branch reduction order. End-to-end two-branch target time still
+  regressed: combined gate/down measured 109.8 versus 119.1 ms, gate-only
+  111.2 versus 117.7 ms, and down-only 111.2 versus 116.4 ms. The extra route
+  remap, dual accumulators, temporary projection, and lower occupancy cost more
+  than the reads already served by GPU caches. All three execution kernels
+  were removed; the opt-in overlap diagnostic remains to test future models or
+  wider siblings without repeating the implementation blindly.
 
 ## Promotion gates
 

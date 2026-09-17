@@ -1465,6 +1465,37 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
     if (inputs.empty()) {
         throw std::runtime_error("multi-request MoE requires at least one row");
     }
+    const char* branch_overlap = std::getenv("QWEN38_PROFILE_BRANCH_EXPERT_OVERLAP");
+    if (branch_overlap != nullptr && std::string_view(branch_overlap) == "1" &&
+        fused_vq_ && inputs.size() >= 2) {
+        std::vector<RouterSelection> selections;
+        selections.reserve(inputs.size());
+        std::vector<bool> unique_experts(expert_count_, false);
+        std::size_t unique = 0;
+        for (const MlxArray& input : inputs) {
+            selections.push_back(route_decode(input));
+            for (const std::size_t expert : selections.back().experts) {
+                if (!unique_experts[expert]) {
+                    unique_experts[expert] = true;
+                    ++unique;
+                }
+            }
+        }
+        std::size_t intersection = 0;
+        for (const std::size_t expert : selections[0].experts) {
+            if (std::ranges::find(selections[1].experts, expert) !=
+                selections[1].experts.end()) {
+                ++intersection;
+            }
+        }
+        std::clog << "qwen38-branch-expert-overlap: layer=" << layer_index_
+                  << " rows=" << inputs.size()
+                  << " slots=" << experts_per_token_
+                  << " intersection01=" << intersection
+                  << " union01=" << (2 * experts_per_token_ - intersection)
+                  << " unique=" << unique
+                  << " selected=" << inputs.size() * experts_per_token_ << '\n';
+    }
     if (inputs.size() == 1 || inputs.size() > 8 || !has_routed_ || paged_store_ ||
         !compact_qmeta_) {
         std::vector<MlxArray> outputs;

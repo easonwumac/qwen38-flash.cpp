@@ -57,21 +57,28 @@ BranchPass run_branch_pass(
     const qwen38::QwenMtpHead& mtp,
     const qwen38::MlxArray& target_stream,
     const std::span<const std::uint32_t> tokens,
+    const qwen38::MtpDecodeState& origin,
+    const std::size_t query_position,
     const bool batched) {
     BranchPass result;
-    result.states.resize(tokens.size());
+    result.states.reserve(tokens.size());
+    for (std::size_t row = 0; row < tokens.size(); ++row) {
+        result.states.push_back(mtp.snapshot_state(origin));
+    }
     const auto started = std::chrono::steady_clock::now();
     if (batched) {
         std::vector<const qwen38::MlxArray*> streams(tokens.size(), &target_stream);
         std::vector<qwen38::MtpDecodeState*> states;
         states.reserve(result.states.size());
         for (qwen38::MtpDecodeState& state : result.states) states.push_back(&state);
-        result.steps = mtp.forward_decode_multi(streams, tokens, 1, states);
+        result.steps = mtp.forward_decode_multi(
+            streams, tokens, query_position, states);
     } else {
         result.steps.reserve(tokens.size());
         for (std::size_t row = 0; row < tokens.size(); ++row) {
             result.steps.push_back(
-                mtp.forward_decode(target_stream, tokens[row], 1, result.states[row]));
+                mtp.forward_decode(
+                    target_stream, tokens[row], query_position, result.states[row]));
         }
     }
     evaluate_steps(result.steps, result.states);
@@ -152,6 +159,11 @@ int main(int argc, char** argv) {
         qwen38::MtpDecodeStep draft =
             mtp.forward_decode(target_step.pre_mixer_stream, target_token, 1, mtp_state);
         const std::uint32_t draft_token = argmax(draft.logits);
+        const std::vector<float> top2 = draft.logits.top2_indices_all().to_float32();
+        if (top2.size() != 2) throw std::runtime_error("MTP top-2 size mismatch");
+        const std::array<std::uint32_t, 2> branch_tokens{
+            static_cast<std::uint32_t>(top2[0]),
+            static_cast<std::uint32_t>(top2[1])};
         const std::vector<int> stream_shape = draft.pre_mixer_stream.shape();
         if (stream_shape != std::vector<int>({1, 1, 10240})) {
             throw std::runtime_error("MTP output stream shape mismatch");
@@ -167,24 +179,31 @@ int main(int argc, char** argv) {
             throw std::runtime_error("MTP position-gap guard did not engage");
         }
 
-        const std::array<std::uint32_t, 2> branch_tokens{target_token, draft_token};
-        static_cast<void>(run_branch_pass(mtp, target_step.pre_mixer_stream, branch_tokens, false));
-        static_cast<void>(run_branch_pass(mtp, target_step.pre_mixer_stream, branch_tokens, true));
+        qwen38::ModelDecodeState sibling_target_origin = target.snapshot_state(target_state);
+        qwen38::TargetDecodeStep sibling_prefix =
+            target.forward_decode_capture(target_token, sibling_target_origin);
+        static_cast<void>(argmax(sibling_prefix.logits));
+        static_cast<void>(run_branch_pass(
+            mtp, draft.pre_mixer_stream, branch_tokens, mtp_state, 2, false));
+        static_cast<void>(run_branch_pass(
+            mtp, draft.pre_mixer_stream, branch_tokens, mtp_state, 2, true));
         BranchPass sequential = run_branch_pass(
-            mtp, target_step.pre_mixer_stream, branch_tokens, false);
+            mtp, draft.pre_mixer_stream, branch_tokens, mtp_state, 2, false);
         BranchPass batched = run_branch_pass(
-            mtp, target_step.pre_mixer_stream, branch_tokens, true);
+            mtp, draft.pre_mixer_stream, branch_tokens, mtp_state, 2, true);
         double branch_error = 0.0;
         for (std::size_t row = 0; row < branch_tokens.size(); ++row) {
             branch_error = std::max(branch_error, maximum_absolute_error(
                 sequential.steps[row].logits, batched.steps[row].logits));
         }
-        static_cast<void>(run_target_branch_pass(target, target_state, branch_tokens, false));
-        static_cast<void>(run_target_branch_pass(target, target_state, branch_tokens, true));
+        static_cast<void>(run_target_branch_pass(
+            target, sibling_target_origin, branch_tokens, false));
+        static_cast<void>(run_target_branch_pass(
+            target, sibling_target_origin, branch_tokens, true));
         TargetBranchPass target_sequential = run_target_branch_pass(
-            target, target_state, branch_tokens, false);
+            target, sibling_target_origin, branch_tokens, false);
         TargetBranchPass target_batched = run_target_branch_pass(
-            target, target_state, branch_tokens, true);
+            target, sibling_target_origin, branch_tokens, true);
         double target_branch_error = 0.0;
         for (std::size_t row = 0; row < branch_tokens.size(); ++row) {
             target_branch_error = std::max(target_branch_error, maximum_absolute_error(
@@ -201,26 +220,26 @@ int main(int argc, char** argv) {
         const std::array<std::uint32_t, 4> wide_branch_tokens{
             target_token, draft_token, 9419, 1};
         static_cast<void>(run_branch_pass(
-            mtp, target_step.pre_mixer_stream, wide_branch_tokens, false));
+            mtp, draft.pre_mixer_stream, wide_branch_tokens, mtp_state, 2, false));
         static_cast<void>(run_branch_pass(
-            mtp, target_step.pre_mixer_stream, wide_branch_tokens, true));
+            mtp, draft.pre_mixer_stream, wide_branch_tokens, mtp_state, 2, true));
         BranchPass wide_sequential = run_branch_pass(
-            mtp, target_step.pre_mixer_stream, wide_branch_tokens, false);
+            mtp, draft.pre_mixer_stream, wide_branch_tokens, mtp_state, 2, false);
         BranchPass wide_batched = run_branch_pass(
-            mtp, target_step.pre_mixer_stream, wide_branch_tokens, true);
+            mtp, draft.pre_mixer_stream, wide_branch_tokens, mtp_state, 2, true);
         double wide_branch_error = 0.0;
         for (std::size_t row = 0; row < wide_branch_tokens.size(); ++row) {
             wide_branch_error = std::max(wide_branch_error, maximum_absolute_error(
                 wide_sequential.steps[row].logits, wide_batched.steps[row].logits));
         }
         static_cast<void>(run_target_branch_pass(
-            target, target_state, wide_branch_tokens, false));
+            target, sibling_target_origin, wide_branch_tokens, false));
         static_cast<void>(run_target_branch_pass(
-            target, target_state, wide_branch_tokens, true));
+            target, sibling_target_origin, wide_branch_tokens, true));
         TargetBranchPass wide_target_sequential = run_target_branch_pass(
-            target, target_state, wide_branch_tokens, false);
+            target, sibling_target_origin, wide_branch_tokens, false);
         TargetBranchPass wide_target_batched = run_target_branch_pass(
-            target, target_state, wide_branch_tokens, true);
+            target, sibling_target_origin, wide_branch_tokens, true);
         double wide_target_branch_error = 0.0;
         for (std::size_t row = 0; row < wide_branch_tokens.size(); ++row) {
             wide_target_branch_error = std::max(
