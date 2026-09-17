@@ -69,9 +69,14 @@ depth policy.
 With the diagnostic `QWEN38_MTP_TOP2_ORACLE=1`, the corresponding
 `top2_rejected_by_position` and `top2_recovered_by_position` arrays report
 whether the final-position second choice could have repaired the first rejected
-draft. Use `all` instead of `1` to inspect every position. The oracle performs
-extra vocabulary-wide selection and is intentionally unsuitable for throughput
-measurements.
+draft. Use `all` instead of `1` to inspect every position. The
+`top2_descendant_recovered_by_position` array counts recovered alternatives
+whose following learned-MTP round accepted at least one primary draft, while
+`top2_descendant_accepted_by_position` sums those accepted descendants. These
+are shadow upper bounds for a future tree: no alternate is emitted. The fused
+reduction is much cheaper than the former full-vocabulary partition, but
+collecting every position remains diagnostic work and is not enabled by
+automatic inference.
 When `QWEN38_CONTEXT_COPY=1`, `performance.context_copy` reports its separate
 round, proposal, acceptance, and suspension counters. Long copy blocks still
 contribute to aggregate `mtp.proposed`/`mtp.accepted`; the four positional arrays

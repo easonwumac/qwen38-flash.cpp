@@ -91,6 +91,12 @@ void run_api_tests() {
     QWEN38_CHECK(
         completion.body.find("\"top2_recovered_by_position\":[0,0,0,0]") !=
         std::string::npos);
+    QWEN38_CHECK(
+        completion.body.find("\"top2_descendant_recovered_by_position\":[0,0,0,0]") !=
+        std::string::npos);
+    QWEN38_CHECK(
+        completion.body.find("\"top2_descendant_accepted_by_position\":[0,0,0,0]") !=
+        std::string::npos);
     QWEN38_CHECK(completion.body.find("\"depth\":0") != std::string::npos);
     QWEN38_CHECK(completion.body.find("\"promotions\":0") != std::string::npos);
     QWEN38_CHECK(completion.body.find("\"demotions\":0") != std::string::npos);

@@ -1387,6 +1387,7 @@ GenerationResult NativeEngine::complete_impl(
             forced_tokens.end(), forced_thinking_suffix.begin(), forced_thinking_suffix.end());
         result.thinking_budget_forced = true;
     };
+    std::optional<std::size_t> pending_top2_recovery_position;
     while (result.tokens.size() < max_tokens) {
         if (!thinking_closed && forced_tokens.empty() &&
             sampling.thinking_budget_tokens != 0 &&
@@ -1396,6 +1397,7 @@ GenerationResult NativeEngine::complete_impl(
         const std::size_t remaining = max_tokens - result.tokens.size();
         if (!mtp_profitable || !previous_target_stream.has_value() ||
             remaining == 1 || (extend_cache_enabled && remaining == 2)) {
+            pending_top2_recovery_position.reset();
             if (mtp_head_ != nullptr) {
                 if (extend_cache_enabled && mtp_profitable &&
                     previous_target_stream.has_value() &&
@@ -1516,6 +1518,16 @@ GenerationResult NativeEngine::complete_impl(
             : run_greedy_mtp_round_reference(
                   model_, *mtp_head_, current, *previous_target_stream, state.token_count,
                   depth_policy.depth(), state, mtp_state, stop_tokens);
+        const bool learned_mtp_round = !used_context_copy && !used_history_draft;
+        if (pending_top2_recovery_position.has_value()) {
+            if (learned_mtp_round && step.accepted != 0) {
+                ++result.mtp_top2_descendant_recovered_by_position[
+                    *pending_top2_recovery_position];
+                result.mtp_top2_descendant_accepted_by_position[
+                    *pending_top2_recovery_position] += step.accepted;
+            }
+            pending_top2_recovery_position.reset();
+        }
         ++result.mtp_rounds;
         result.mtp_proposed += step.draft_tokens.size();
         result.mtp_accepted += step.accepted;
@@ -1528,6 +1540,9 @@ GenerationResult NativeEngine::complete_impl(
                 step.top2_rejected_by_position[position];
             result.mtp_top2_recovered_by_position[position] +=
                 step.top2_recovered_by_position[position];
+            if (learned_mtp_round && step.top2_recovered_by_position[position] != 0) {
+                pending_top2_recovery_position = position;
+            }
         }
         result.mtp_draft_ms += step.draft_ms;
         result.mtp_verify_ms += step.verify_ms;
