@@ -27,7 +27,7 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 53> pipeline_names{
+constexpr std::array<const char*, 54> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "q8_shared_gate_up", "q8_shared_down_merge",
     "fused_all_gate_up", "fused_all_down",
@@ -38,6 +38,7 @@ constexpr std::array<const char*, 53> pipeline_names{
     "qsa_attention_q8_blocks", "attention_qkv_index", "attention_qkv_index_q8",
     "attention_normalize_rope", "attention_apply_gate", "attention_output_projection",
     "q8_output_projection_6144", "q4_input_projection", "q8_input_projection",
+    "q8_gdn_input_projections",
     "gdn_prework", "gdn_recurrence", "gdn_norm_gate", "gdn_output_projection",
     "hc_write", "hc_normalize", "hc_down_injection", "hc_down_injection_q8",
     "hc_up_mix", "hc_up_mix_q8", "healing_left", "healing_right_write",
@@ -538,23 +539,37 @@ public:
 
     void encode_gdn(id<MTLCommandBuffer> command, const std::string& base,
                     GdnState& state) {
-        const auto project = [&](const char* suffix, std::uint32_t rows,
-                                 NSUInteger output_offset) {
+        if (vq_routed_) {
             id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline(
-                vq_routed_ ? "q8_input_projection" : "q4_input_projection")];
+            [encoder setComputePipelineState:pipeline("q8_gdn_input_projections")];
             [encoder setBuffer:mixed_ offset:0 atIndex:0];
-            bind_projection(encoder, base + suffix, 1);
-            [encoder setBuffer:projected_ offset:output_offset * sizeof(std::uint16_t) atIndex:4];
-            [encoder setBytes:&rows length:sizeof(rows) atIndex:5];
-            [encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
+            bind_projection(encoder, base + ".in_proj_qkv", 1);
+            bind_projection(encoder, base + ".in_proj_z", 4);
+            bind_projection(encoder, base + ".in_proj_b", 7);
+            bind_projection(encoder, base + ".in_proj_a", 10);
+            [encoder setBuffer:projected_ offset:0 atIndex:13];
+            [encoder dispatchThreadgroups:MTLSizeMake(4120, 1, 1)
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [encoder endEncoding];
-        };
-        project(".in_proj_qkv", 10240, 0);
-        project(".in_proj_z", 6144, 10240);
-        project(".in_proj_b", 48, 16384);
-        project(".in_proj_a", 48, 16432);
+        } else {
+            const auto project = [&](const char* suffix, std::uint32_t rows,
+                                     NSUInteger output_offset) {
+                id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+                [encoder setComputePipelineState:pipeline("q4_input_projection")];
+                [encoder setBuffer:mixed_ offset:0 atIndex:0];
+                bind_projection(encoder, base + suffix, 1);
+                [encoder setBuffer:projected_
+                            offset:output_offset * sizeof(std::uint16_t) atIndex:4];
+                [encoder setBytes:&rows length:sizeof(rows) atIndex:5];
+                [encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
+                        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+                [encoder endEncoding];
+            };
+            project(".in_proj_qkv", 10240, 0);
+            project(".in_proj_z", 6144, 10240);
+            project(".in_proj_b", 48, 16384);
+            project(".in_proj_a", 48, 16432);
+        }
 
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline("gdn_prework")];

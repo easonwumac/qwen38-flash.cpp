@@ -1431,6 +1431,57 @@ kernel void q8_input_projection(
     if (lane == 0) output[row] = bfloat(dot);
 }
 
+kernel void q8_gdn_input_projections(
+    const device bfloat* input [[buffer(0)]],
+    const device uchar* qkv_weight [[buffer(1)]],
+    const device uchar* qkv_scale [[buffer(2)]],
+    const device uchar* qkv_bias [[buffer(3)]],
+    const device uchar* z_weight [[buffer(4)]],
+    const device uchar* z_scale [[buffer(5)]],
+    const device uchar* z_bias [[buffer(6)]],
+    const device uchar* b_weight [[buffer(7)]],
+    const device uchar* b_scale [[buffer(8)]],
+    const device uchar* b_bias [[buffer(9)]],
+    const device uchar* a_weight [[buffer(10)]],
+    const device uchar* a_scale [[buffer(11)]],
+    const device uchar* a_bias [[buffer(12)]],
+    device bfloat* output [[buffer(13)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint k = 2560, groups = k / 64;
+    const device uchar* weight;
+    const device uchar* scale;
+    const device uchar* bias;
+    uint local_group;
+    uint output_base;
+    if (group < 2560) {
+        weight = qkv_weight; scale = qkv_scale; bias = qkv_bias;
+        local_group = group; output_base = 0;
+    } else if (group < 4096) {
+        weight = z_weight; scale = z_scale; bias = z_bias;
+        local_group = group - 2560; output_base = 10240;
+    } else if (group < 4108) {
+        weight = b_weight; scale = b_scale; bias = b_bias;
+        local_group = group - 4096; output_base = 16384;
+    } else {
+        weight = a_weight; scale = a_scale; bias = a_bias;
+        local_group = group - 4108; output_base = 16432;
+    }
+    const uint row = local_group * 4 + simd;
+    float dot = 0.0f;
+    for (uint base = lane * 8; base < k; base += 256) {
+        float sum = 0.0f;
+        for (uint component = 0; component < 8; ++component)
+            sum += float(input[base + component]);
+        dot += float(load_bf16_unaligned(scale, row * groups + base / 64)) *
+                q8_dot8(weight + row * k + base, input + base) +
+            float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
+    }
+    dot = simd_sum(dot);
+    if (lane == 0) output[output_base + row] = bfloat(dot);
+}
+
 kernel void gdn_prework(
     const device bfloat* projected [[buffer(0)]], device bfloat* convolution [[buffer(1)]],
     const device uchar* convolution_weight [[buffer(2)]],

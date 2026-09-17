@@ -539,12 +539,12 @@ int main(int argc, char** argv) {
         if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_TRUNK");
             bench != nullptr && std::string_view(bench) == "1") {
             benchmark_trunk(*backend, input_bf16);
-            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
         }
         if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_GREEDY");
             bench != nullptr && std::string_view(bench) == "1") {
             benchmark_greedy(*backend);
-            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
         }
         qwen38::MlxTensorStore tensors(manifest);
         std::size_t first_layer = 0;
@@ -558,7 +558,7 @@ int main(int argc, char** argv) {
             check_ple(*backend, tensors, input_f32, input_bf16);
             check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
             check_head(*backend, tensors, input_f32, input_bf16);
-            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
         }
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
@@ -572,7 +572,7 @@ int main(int argc, char** argv) {
             q8_import != nullptr && std::string_view(q8_import) == "1") {
             check_q8_state_import(*backend, tensors, input_f32, input_bf16);
         }
-        return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
+        return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
