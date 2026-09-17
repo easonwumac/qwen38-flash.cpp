@@ -567,7 +567,25 @@ The implementation order is deliberately narrow:
   removed. It did not improve on the 88.08--88.13 ms controls because the two
   existing lazy QMM heads already overlap effectively; a custom dispatch there
   only adds another code path.
-- A two-row hyper-connection read was not retained. Generic MLX B=2 QMM
+- Exact two-row hyper-connection projection reuse then removed the largest
+  remaining duplicate-weight path. The retained implementation keeps the
+  original rowwise RMSNorm, gates, means, state writes, and target LM heads,
+  while sharing Q6/Q8 down, up, and injection weight reads. Widths divisible
+  by 256 reproduce MLX `qmv_fast`; the HC rank-320 up projections reproduce
+  general `qmv`'s four-value lanes, 128-value blocks, guarded tail, and SIMD
+  reduction. Three guarded full-target samples reached 66.14--68.27 ms from
+  110.33--112.24 ms (1.619--1.668x), with zero target-logit error and a
+  39.5--39.7 GiB peak footprint. Relative to an approximately 55 ms single
+  branch, the second target path now costs about 11--13 ms rather than the
+  original 55 ms. The native MTP sibling probe retained the same top tokens
+  but its logits moved by at most 2.48e-5, so end-to-end proposal acceptance
+  remains a separate promotion gate.
+- A guessed 256+64 HC up tail was rejected before the retained general-qmv
+  port: it changed target logits by 1.09375. Tail lanes alone are insufficient;
+  K=320 changes MLX from the eight-value `qmv_fast` tree to four-value general
+  `qmv`, including a different block association.
+- The earlier generic/fused two-row hyper-connection read was not retained.
+  Generic MLX B=2 QMM
   changed final logits by up to 0.765625. Extending the existing S=1 fused HC
   kernels was internally bit-exact only when paired with the folded BF16 dense
   injection policy; that is a different numerical policy and therefore cannot

@@ -3,6 +3,7 @@
 #include "qwen38/quantization_geometry.hpp"
 
 #include "hc_metal_kernels.hpp"
+#include "gdn_metal_kernels.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -77,6 +78,46 @@ std::shared_ptr<MlxMetalKernel> hc_up_kernel() {
         const char* inputs[]{"xn", "activation", "weight", "scales", "biases"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_hc_read_up", inputs, "mixed", hc_metal::up);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_q8_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_q8_branch2", inputs, "y",
+            gdn_metal::q8_branch2, gdn_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_q8_branch2_general_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_q8_branch2_general", inputs, "y",
+            gdn_metal::q8_branch2_general, gdn_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_q6_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_q6_branch2", inputs, "y",
+            gdn_metal::q6_branch2, gdn_metal::header);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_q6_branch2_general_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"x", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_q6_branch2_general", inputs, "y",
+            gdn_metal::q6_branch2_general, gdn_metal::header);
     }();
     return kernel;
 }
@@ -183,6 +224,52 @@ MlxArray HyperConnection::project(
     return MlxArray::quantized_matmul(
         input, projection.weight, projection.scales, projection.biases,
         group_size_, projection.bits);
+}
+
+MlxArray HyperConnection::project_branch2(
+    const MlxArray& input,
+    const Projection& projection) const {
+    const std::vector<int> input_shape = input.shape();
+    const std::vector<int> weight_shape = projection.weight.shape();
+    const std::vector<int> scale_shape = projection.scales.shape();
+    const int input_width = scale_shape.size() == 2
+        ? scale_shape[1] * group_size_ : 0;
+    const int output_width = weight_shape.size() == 2 ? weight_shape[0] : 0;
+    const bool supported = (projection.bits == 8 &&
+                            (group_size_ == 32 || group_size_ == 64)) ||
+        (projection.bits == 6 && group_size_ == 32);
+    const bool aligned = input_width % 4 == 0;
+    if (!projection.quantized || !supported ||
+        input_shape != std::vector<int>({1, 2, input_width}) ||
+        !aligned || output_width < 1) {
+        throw std::runtime_error(
+            "HC sibling projection requires supported affine [1,2,K]: bits=" +
+            std::to_string(projection.bits) + " group=" + std::to_string(group_size_) +
+            " input=" + std::to_string(input_width) +
+            " output=" + std::to_string(output_width));
+    }
+    const std::array<const MlxArray*, 4> inputs{
+        &input, &projection.weight, &projection.scales, &projection.biases};
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {1, 2, output_width}, .dtype = input.dtype()},
+    }};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = input.dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 3> int_templates{{
+        {.name = "IN", .value = input_width},
+        {.name = "OUT", .value = output_width},
+        {.name = "GROUP", .value = group_size_},
+    }};
+    const std::shared_ptr<MlxMetalKernel>& kernel = projection.bits == 8
+        ? (input_width % 256 == 0
+              ? hc_q8_branch2_kernel() : hc_q8_branch2_general_kernel())
+        : (input_width % 256 == 0
+              ? hc_q6_branch2_kernel() : hc_q6_branch2_general_kernel());
+    return std::move(kernel->apply(
+        inputs, outputs,
+        std::array<int, 3>{((output_width + 7) / 8) * 64, 1, 1},
+        std::array<int, 3>{64, 1, 1}, dtype_templates, int_templates).front());
 }
 
 MlxArray HyperConnection::initialize_stream(
@@ -380,6 +467,87 @@ HyperConnectionRead HyperConnection::read(const MlxArray& stream) const {
         .injection = doubled.reshape(injection_shape),
         .has_injection = true,
     };
+}
+
+std::vector<HyperConnectionRead> HyperConnection::read_branch2(
+    const std::span<const MlxArray> input_streams) const {
+    if (input_streams.size() != 2 || fused_injection_ready_) {
+        throw std::runtime_error("exact HC sibling read requires two quantized rows");
+    }
+    const int streams = checked_dimension(stream_count_, "stream_count");
+    const int hidden = checked_dimension(hidden_size_, "hidden_size");
+    const std::vector<int> grouped_shape{1, 1, streams, hidden};
+    const std::vector<int> flat_shape{1, 1, streams * hidden};
+    const std::vector<float> ones_data(hidden_size_, 1.0F);
+    const std::vector<int> ones_shape{hidden};
+    std::vector<MlxArray> normalized;
+    std::vector<MlxArray> flat;
+    normalized.reserve(2);
+    flat.reserve(2);
+    for (const MlxArray& stream : input_streams) {
+        if (stream.shape() != flat_shape) {
+            throw std::runtime_error("exact HC sibling rows require [1,1,width]");
+        }
+        MlxArray ones = MlxArray::from_float32(ones_data, ones_shape).astype(stream.dtype());
+        MlxArray weighted = MlxArray::multiply(
+            stream.reshape(grouped_shape).rms_norm(ones, rms_norm_epsilon_),
+            norm_weight_);
+        flat.push_back(weighted.reshape(flat_shape));
+        normalized.push_back(std::move(weighted));
+    }
+    MlxArray flat_batch = MlxArray::concatenate(flat[0], flat[1], 1);
+    MlxArray down_batch = project_branch2(flat_batch, down_);
+    MlxArray injection_batch;
+    if (with_injection_) injection_batch = project_branch2(flat_batch, injection_);
+
+    const std::vector<int> strides3{1, 1, 1};
+    std::vector<MlxArray> activated_rows;
+    activated_rows.reserve(2);
+    for (int row = 0; row < 2; ++row) {
+        MlxArray down = down_batch.slice(
+            std::vector<int>{0, row, 0},
+            std::vector<int>{1, row + 1, down_batch.shape()[2]}, strides3);
+        activated_rows.push_back(MlxArray::multiply(
+            down, scalar_like(
+                1.0F / static_cast<float>(stream_count_), down.dtype())).silu());
+    }
+    MlxArray activated_batch = MlxArray::concatenate(
+        activated_rows[0], activated_rows[1], 1);
+    MlxArray up_batch = project_branch2(activated_batch, up_);
+    std::vector<HyperConnectionRead> result;
+    result.reserve(2);
+    for (int row = 0; row < 2; ++row) {
+        const std::vector<int> start{0, row, 0};
+        MlxArray up = up_batch.slice(
+            start, std::vector<int>{1, row + 1, up_batch.shape()[2]}, strides3);
+        MlxArray mix_gate = up.reshape(grouped_shape).sigmoid();
+        MlxArray mixed = MlxArray::multiply(
+            mix_gate, normalized[static_cast<std::size_t>(row)]).mean_axis(2);
+        if (!with_injection_) {
+            result.push_back({
+                .mixed = std::move(mixed),
+                .injection = MlxArray{},
+                .has_injection = false,
+            });
+            continue;
+        }
+        MlxArray raw_injection = injection_batch.slice(
+            start,
+            std::vector<int>{1, row + 1, injection_batch.shape()[2]},
+            strides3);
+        MlxArray injection_gate = MlxArray::multiply(
+            raw_injection,
+            scalar_like(
+                1.0F / static_cast<float>(stream_count_), raw_injection.dtype())).sigmoid();
+        result.push_back({
+            .mixed = std::move(mixed),
+            .injection = MlxArray::multiply(
+                injection_gate, scalar_like(2.0F, injection_gate.dtype())).reshape(
+                    std::vector<int>{1, 1, streams, 1}),
+            .has_injection = true,
+        });
+    }
+    return result;
 }
 
 MlxArray HyperConnection::write(

@@ -244,6 +244,9 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     const bool attention_branch_batch_enabled = full_attention_ != nullptr &&
         streams.size() == 2 && attention_branch_batch != nullptr &&
         std::string_view(attention_branch_batch) == "1";
+    const char* hc_branch_batch = std::getenv("QWEN38_HC_EXACT_BRANCH_BATCH");
+    const bool hc_branch_batch_enabled = streams.size() == 2 &&
+        hc_branch_batch != nullptr && std::string_view(hc_branch_batch) == "1";
     if (streams.size() == 1 ||
         (linear_attention_ != nullptr && !gdn_branch_batch_enabled)) {
         std::vector<MlxArray> result;
@@ -274,10 +277,20 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
             : MlxArray::add(
                   streams[row],
                   MlxArray::zeros(std::vector<int>{1}, streams[row].dtype())));
-        HyperConnectionRead attention =
-            attention_hyper_connection_.read(prepared_streams.back());
-        attention_mixed.push_back(std::move(attention.mixed));
-        attention_injections.push_back(std::move(attention.injection));
+        if (!hc_branch_batch_enabled) {
+            HyperConnectionRead attention =
+                attention_hyper_connection_.read(prepared_streams.back());
+            attention_mixed.push_back(std::move(attention.mixed));
+            attention_injections.push_back(std::move(attention.injection));
+        }
+    }
+    if (hc_branch_batch_enabled) {
+        std::vector<HyperConnectionRead> attention =
+            attention_hyper_connection_.read_branch2(prepared_streams);
+        for (HyperConnectionRead& row : attention) {
+            attention_mixed.push_back(std::move(row.mixed));
+            attention_injections.push_back(std::move(row.injection));
+        }
     }
 
     std::vector<MlxArray> attention_outputs;
@@ -310,9 +323,20 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     for (std::size_t row = 0; row < streams.size(); ++row) {
         post_attention.push_back(attention_hyper_connection_.write(
             prepared_streams[row], attention_outputs[row], attention_injections[row]));
-        HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention.back());
-        mlp_mixed.push_back(std::move(mlp.mixed));
-        mlp_injections.push_back(std::move(mlp.injection));
+    }
+    if (hc_branch_batch_enabled) {
+        std::vector<HyperConnectionRead> mlp =
+            mlp_hyper_connection_.read_branch2(post_attention);
+        for (HyperConnectionRead& row : mlp) {
+            mlp_mixed.push_back(std::move(row.mixed));
+            mlp_injections.push_back(std::move(row.injection));
+        }
+    } else {
+        for (const MlxArray& row : post_attention) {
+            HyperConnectionRead mlp = mlp_hyper_connection_.read(row);
+            mlp_mixed.push_back(std::move(mlp.mixed));
+            mlp_injections.push_back(std::move(mlp.injection));
+        }
     }
 
     std::vector<MlxArray> mlp_outputs = mlp_.forward_decode_multi(mlp_mixed);

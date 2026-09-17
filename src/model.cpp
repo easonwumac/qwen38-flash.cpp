@@ -525,15 +525,31 @@ std::vector<TargetDecodeStep> QwenModel::forward_decode_capture_multi(
 
     std::vector<MlxArray> logits;
     logits.reserve(tokens.size());
-    for (const MlxArray& stream : streams) {
-        HyperConnectionRead final = final_mixer_.read(stream);
-        logits.push_back(MlxArray::quantized_matmul(
-            final.mixed,
-            language_head_.weight,
-            language_head_.scales,
-            language_head_.biases,
-            head_group_size_,
-            head_bits_));
+    const char* hc_branch_batch = std::getenv("QWEN38_HC_EXACT_BRANCH_BATCH");
+    const bool hc_branch_batch_enabled = streams.size() == 2 &&
+        hc_branch_batch != nullptr && std::string_view(hc_branch_batch) == "1";
+    if (hc_branch_batch_enabled) {
+        std::vector<HyperConnectionRead> final = final_mixer_.read_branch2(streams);
+        for (HyperConnectionRead& row : final) {
+            logits.push_back(MlxArray::quantized_matmul(
+                row.mixed,
+                language_head_.weight,
+                language_head_.scales,
+                language_head_.biases,
+                head_group_size_,
+                head_bits_));
+        }
+    } else {
+        for (const MlxArray& stream : streams) {
+            HyperConnectionRead final = final_mixer_.read(stream);
+            logits.push_back(MlxArray::quantized_matmul(
+                final.mixed,
+                language_head_.weight,
+                language_head_.scales,
+                language_head_.biases,
+                head_group_size_,
+                head_bits_));
+        }
     }
     std::vector<const MlxArray*> logits_to_eval;
     logits_to_eval.reserve(logits.size());

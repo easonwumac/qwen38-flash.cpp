@@ -3,7 +3,9 @@
 #include "qwen38/mlx_backend.hpp"
 
 #include <cstddef>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace qwen38 {
 
@@ -29,6 +31,8 @@ public:
         const MlxArray& embedding,
         std::size_t stream_count);
     [[nodiscard]] HyperConnectionRead read(const MlxArray& stream) const;
+    [[nodiscard]] std::vector<HyperConnectionRead> read_branch2(
+        std::span<const MlxArray> streams) const;
     [[nodiscard]] MlxArray write(
         const MlxArray& stream,
         const MlxArray& block_output,
@@ -47,6 +51,9 @@ private:
         MlxTensorStore& tensors,
         std::string_view name) const;
     [[nodiscard]] MlxArray project(
+        const MlxArray& input,
+        const Projection& projection) const;
+    [[nodiscard]] MlxArray project_branch2(
         const MlxArray& input,
         const Projection& projection) const;
 

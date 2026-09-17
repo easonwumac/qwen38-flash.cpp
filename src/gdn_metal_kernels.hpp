@@ -75,6 +75,91 @@ inline constexpr std::string_view q8_branch2 = R"metal(
     }
 )metal";
 
+// Exact two-row affine-Q8 projection for dimensions that use MLX qmv_impl
+// instead of qmv_fast. It preserves the four-value lane tile, 128-value block,
+// guarded tail, per-lane accumulation, and final SIMD reduction.
+inline constexpr std::string_view q8_branch2_general = R"metal(
+    const uint lane = thread_index_in_simdgroup;
+    constexpr int ROWS = 4;
+    constexpr int VALUES = 4;
+    constexpr int BLOCK = VALUES * 32;
+    const uint output = threadgroup_position_in_grid.x * 8 +
+        simdgroup_index_in_threadgroup * ROWS;
+    if (output >= (uint)OUT) return;
+    const int packed = IN / 4;
+    const int groups = IN / GROUP;
+    float result0[ROWS] = {0.0f};
+    float result1[ROWS] = {0.0f};
+    int kblock = 0;
+    for (; kblock < IN - BLOCK; kblock += BLOCK) {
+        const int k = kblock + int(lane) * VALUES;
+        float xv0[VALUES];
+        float xv1[VALUES];
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int i = 0; i < VALUES; ++i) {
+            xv0[i] = float(x[k + i]);
+            xv1[i] = float(x[IN + k + i]);
+            sum0 += xv0[i];
+            sum1 += xv1[i];
+        }
+        const int group = k / GROUP;
+        const int pack = k / 4;
+        for (int row = 0; row < ROWS; ++row) {
+            const uint q = weight[(size_t)(output + row) * packed + pack];
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            float accum0 = 0.0f;
+            float accum1 = 0.0f;
+            for (int i = 0; i < VALUES; ++i) {
+                const float w = float((q >> (8 * i)) & 255u);
+                accum0 += xv0[i] * w;
+                accum1 += xv1[i] * w;
+            }
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    const int k = kblock + int(lane) * VALUES;
+    const int remaining = clamp(IN - k, 0, VALUES);
+    if (remaining > 0) {
+        float xv0[VALUES] = {0.0f};
+        float xv1[VALUES] = {0.0f};
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int i = 0; i < remaining; ++i) {
+            xv0[i] = float(x[k + i]);
+            xv1[i] = float(x[IN + k + i]);
+            sum0 += xv0[i];
+            sum1 += xv1[i];
+        }
+        const int group = k / GROUP;
+        const int pack = k / 4;
+        for (int row = 0; row < ROWS; ++row) {
+            const uint q = weight[(size_t)(output + row) * packed + pack];
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            float accum0 = 0.0f;
+            float accum1 = 0.0f;
+            for (int i = 0; i < remaining; ++i) {
+                const float w = float((q >> (8 * i)) & 255u);
+                accum0 += xv0[i] * w;
+                accum1 += xv1[i] * w;
+            }
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    for (int row = 0; row < ROWS; ++row) {
+        result0[row] = simd_sum(result0[row]);
+        result1[row] = simd_sum(result1[row]);
+        if (lane == 0 && output + row < (uint)OUT) {
+            y[output + row] = T(result0[row]);
+            y[OUT + output + row] = T(result1[row]);
+        }
+    }
+)metal";
+
 // Exact two-row affine-Q6 projection adapted from MLX qmv_fast. Q6 stores four
 // values in three bytes and scales selected activation lanes before applying
 // byte masks; preserving that representation also preserves accumulation order.
@@ -140,6 +225,119 @@ inline constexpr std::string_view q6_branch2 = R"metal(
                 accum1 += float(w[wi + 1] & 0xf0) * xv1[xi + 2];
                 accum1 += float(w[wi + 2] & 0x03) * (xv1[xi + 2] * 256.0f);
                 accum1 += float(w[wi + 2] & 0xfc) * xv1[xi + 3];
+            }
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    for (int row = 0; row < ROWS; ++row) {
+        result0[row] = simd_sum(result0[row]);
+        result1[row] = simd_sum(result1[row]);
+        if (lane == 0 && output + row < (uint)OUT) {
+            y[output + row] = T(result0[row]);
+            y[OUT + output + row] = T(result1[row]);
+        }
+    }
+)metal";
+
+// Exact two-row affine-Q6 counterpart of MLX qmv_impl for non-fast K.
+inline constexpr std::string_view q6_branch2_general = R"metal(
+    const uint lane = thread_index_in_simdgroup;
+    constexpr int ROWS = 4;
+    constexpr int VALUES = 4;
+    constexpr int BLOCK = VALUES * 32;
+    const uint output = threadgroup_position_in_grid.x * 8 +
+        simdgroup_index_in_threadgroup * ROWS;
+    if (output >= (uint)OUT) return;
+    const int row_bytes = IN * 3 / 4;
+    const int groups = IN / GROUP;
+    float result0[ROWS] = {0.0f};
+    float result1[ROWS] = {0.0f};
+    int kblock = 0;
+    for (; kblock < IN - BLOCK; kblock += BLOCK) {
+        const int k = kblock + int(lane) * VALUES;
+        const float a00 = float(x[k]);
+        const float a01 = float(x[k + 1]);
+        const float a02 = float(x[k + 2]);
+        const float a03 = float(x[k + 3]);
+        const float a10 = float(x[IN + k]);
+        const float a11 = float(x[IN + k + 1]);
+        const float a12 = float(x[IN + k + 2]);
+        const float a13 = float(x[IN + k + 3]);
+        const float sum0 = a00 + a01 + a02 + a03;
+        const float sum1 = a10 + a11 + a12 + a13;
+        const float xv00 = a00, xv01 = a01 / 64.0f;
+        const float xv02 = a02 / 16.0f, xv03 = a03 / 4.0f;
+        const float xv10 = a10, xv11 = a11 / 64.0f;
+        const float xv12 = a12 / 16.0f, xv13 = a13 / 4.0f;
+        const int group = k / GROUP;
+        const int byte_offset = k * 3 / 4;
+        for (int row = 0; row < ROWS; ++row) {
+            const device uchar* w = (const device uchar*)weight +
+                (size_t)(output + row) * row_bytes + byte_offset;
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            const float accum0 = float(w[0] & 0x3f) * xv00 +
+                float(w[0] & 0xc0) * xv01 +
+                float(w[1] & 0x0f) * (xv01 * 256.0f) +
+                float(w[1] & 0xf0) * xv02 +
+                float(w[2] & 0x03) * (xv02 * 256.0f) +
+                float(w[2] & 0xfc) * xv03;
+            const float accum1 = float(w[0] & 0x3f) * xv10 +
+                float(w[0] & 0xc0) * xv11 +
+                float(w[1] & 0x0f) * (xv11 * 256.0f) +
+                float(w[1] & 0xf0) * xv12 +
+                float(w[2] & 0x03) * (xv12 * 256.0f) +
+                float(w[2] & 0xfc) * xv13;
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    const int k = kblock + int(lane) * VALUES;
+    const int remaining = clamp(IN - k, 0, VALUES);
+    if (remaining > 0) {
+        float raw0[VALUES] = {0.0f};
+        float raw1[VALUES] = {0.0f};
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int i = 0; i < remaining; ++i) {
+            raw0[i] = float(x[k + i]);
+            raw1[i] = float(x[IN + k + i]);
+            sum0 += raw0[i];
+            sum1 += raw1[i];
+        }
+        float xv0[VALUES]{raw0[0], raw0[1] / 64.0f,
+                          raw0[2] / 16.0f, raw0[3] / 4.0f};
+        float xv1[VALUES]{raw1[0], raw1[1] / 64.0f,
+                          raw1[2] / 16.0f, raw1[3] / 4.0f};
+        const int group = k / GROUP;
+        const int byte_offset = k * 3 / 4;
+        for (int row = 0; row < ROWS; ++row) {
+            const device uchar* w = (const device uchar*)weight +
+                (size_t)(output + row) * row_bytes + byte_offset;
+            float accum0 = 0.0f;
+            float accum1 = 0.0f;
+            if (remaining > 0) {
+                accum0 += float(w[0] & 0x3f) * xv0[0];
+                accum1 += float(w[0] & 0x3f) * xv1[0];
+            }
+            if (remaining > 1) {
+                accum0 += float(w[0] & 0xc0) * xv0[1] +
+                    float(w[1] & 0x0f) * (xv0[1] * 256.0f);
+                accum1 += float(w[0] & 0xc0) * xv1[1] +
+                    float(w[1] & 0x0f) * (xv1[1] * 256.0f);
+            }
+            if (remaining > 2) {
+                accum0 += float(w[1] & 0xf0) * xv0[2] +
+                    float(w[2] & 0x03) * (xv0[2] * 256.0f);
+                accum1 += float(w[1] & 0xf0) * xv1[2] +
+                    float(w[2] & 0x03) * (xv1[2] * 256.0f);
+            }
+            if (remaining > 3) {
+                accum0 += float(w[2] & 0xfc) * xv0[3];
+                accum1 += float(w[2] & 0xfc) * xv1[3];
             }
             const float scale = float(scales[(size_t)(output + row) * groups + group]);
             const float bias = float(biases[(size_t)(output + row) * groups + group]);
