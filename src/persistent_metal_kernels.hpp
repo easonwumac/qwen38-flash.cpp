@@ -112,6 +112,66 @@ inline float vq_d8_group_dot_cached(const device uchar* codes,
     return value;
 }
 
+inline float vq_d8_group_dot_s8(const device uchar* codes, const device char* codebook,
+                                const device uchar* codebook_scales,
+                                const device bfloat* x, uint group) {
+    const uint first_sub = group * 8u;
+    const uint block_bit = (first_sub & 31u) * 14u;
+    const uint first_word = (first_sub >> 5) * 14u + (block_bit >> 5);
+    const uint cached_shift = block_bit & 31u;
+    uint packed_words[4];
+    for (uint word = 0; word < 4u; ++word)
+        packed_words[word] = load_u32_unaligned(codes, first_word + word);
+    float value = 0.0f;
+    for (uint local = 0; local < 8u; ++local) {
+        const uint bit = cached_shift + local * 14u;
+        const uint word = bit >> 5;
+        const uint shift = bit & 31u;
+        ulong packed = ulong(packed_words[word] >> shift);
+        if (shift + 14u > 32u)
+            packed |= ulong(packed_words[word + 1u]) << (32u - shift);
+        const uint code = uint(packed & 0x3fffu);
+        const uint xb = group * 64u + local * 8u;
+        const uint cb = code * 8u;
+        for (uint element = 0; element < 8u; ++element)
+            value += float(x[xb + element]) * float(codebook[cb + element]) *
+                float(load_f16_unaligned(codebook_scales, element));
+    }
+    return value;
+}
+
+inline float vq_d8_group_dot_u8(
+    const device uchar* codes, const device uchar* codebook,
+    const device uchar* codebook_scales, const device uchar* codebook_biases,
+    const device bfloat* x, uint group) {
+    const uint first_sub = group * 8u;
+    const uint block_bit = (first_sub & 31u) * 14u;
+    const uint first_word = (first_sub >> 5) * 14u + (block_bit >> 5);
+    const uint cached_shift = block_bit & 31u;
+    uint packed_words[4];
+    for (uint word = 0; word < 4u; ++word)
+        packed_words[word] = load_u32_unaligned(codes, first_word + word);
+    float value = 0.0f;
+    for (uint local = 0; local < 8u; ++local) {
+        const uint bit = cached_shift + local * 14u;
+        const uint word = bit >> 5;
+        const uint shift = bit & 31u;
+        ulong packed = ulong(packed_words[word] >> shift);
+        if (shift + 14u > 32u)
+            packed |= ulong(packed_words[word + 1u]) << (32u - shift);
+        const uint code = uint(packed & 0x3fffu);
+        const uint xb = group * 64u + local * 8u;
+        const uint cb = code * 8u;
+        for (uint element = 0; element < 8u; ++element) {
+            const float weight = float(codebook[cb + element]) *
+                float(load_f16_unaligned(codebook_scales, element)) +
+                float(load_f16_unaligned(codebook_biases, element));
+            value += float(x[xb + element]) * weight;
+        }
+    }
+    return value;
+}
+
 inline float vq_d2_group_dot(const device uchar* codes, const device uchar* codebook,
                              const device bfloat* x, uint group) {
     float value = 0.0f;
@@ -350,16 +410,18 @@ kernel void vq_d2_down_reduce(
 
 kernel void vq_d8_all_gate_up(
     const device bfloat* x [[buffer(0)]],
-    const device uchar* rgc [[buffer(1)]], const device uchar* rgcb [[buffer(2)]],
-    const device uchar* rgs [[buffer(3)]], const device uchar* ruc [[buffer(4)]],
-    const device uchar* rucb [[buffer(5)]], const device uchar* rus [[buffer(6)]],
-    const device uint* experts [[buffer(7)]], device bfloat* routed [[buffer(8)]],
-    const device uchar* sgw [[buffer(9)]], const device uchar* sgs [[buffer(10)]],
-    const device uchar* sgb [[buffer(11)]], const device uchar* suw [[buffer(12)]],
-    const device uchar* sus [[buffer(13)]], const device uchar* sub [[buffer(14)]],
-    device bfloat* shared [[buffer(15)]], const device uchar* srw [[buffer(16)]],
-    const device uchar* srs [[buffer(17)]], const device uchar* srb [[buffer(18)]],
-    device bfloat* router [[buffer(19)]], uint group_id [[threadgroup_position_in_grid]],
+    const device uchar* rgc [[buffer(1)]], const device char* rgcb [[buffer(2)]],
+    const device uchar* rgcbs [[buffer(3)]], const device uchar* rgs [[buffer(4)]],
+    const device uchar* ruc [[buffer(5)]], const device uchar* rucb [[buffer(6)]],
+    const device uchar* rucbs [[buffer(7)]], const device uchar* rucbb [[buffer(8)]],
+    const device uchar* rus [[buffer(9)]], const device uint* experts [[buffer(10)]],
+    device bfloat* routed [[buffer(11)]], const device uchar* sgw [[buffer(12)]],
+    const device uchar* sgs [[buffer(13)]], const device uchar* sgb [[buffer(14)]],
+    const device uchar* suw [[buffer(15)]], const device uchar* sus [[buffer(16)]],
+    const device uchar* sub [[buffer(17)]], device bfloat* shared [[buffer(18)]],
+    const device uchar* srw [[buffer(19)]], const device uchar* srs [[buffer(20)]],
+    const device uchar* srb [[buffer(21)]], device bfloat* router [[buffer(22)]],
+    uint group_id [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     constexpr uint routed_rows = 640, hidden = 2560, hidden_groups = 40;
     const uint linear = group_id * 4u + simd;
@@ -372,9 +434,9 @@ kernel void vq_d8_all_gate_up(
         float gate = 0.0f, up = 0.0f;
         for (uint quant_group = lane; quant_group < hidden_groups; quant_group += 32u) {
             gate += float(load_f16_unaligned(rgs, matrix_row * hidden_groups + quant_group)) *
-                vq_d8_group_dot_cached(gate_row, rgcb, x, quant_group);
+                vq_d8_group_dot_s8(gate_row, rgcb, rgcbs, x, quant_group);
             up += float(load_f16_unaligned(rus, matrix_row * hidden_groups + quant_group)) *
-                vq_d8_group_dot_cached(up_row, rucb, x, quant_group);
+                vq_d8_group_dot_u8(up_row, rucb, rucbs, rucbb, x, quant_group);
         }
         gate = simd_sum(gate); up = simd_sum(up);
         if (lane == 0) {
@@ -483,12 +545,14 @@ kernel void vq_d2_all_gate_up(
 kernel void vq_d8_all_down(
     const device bfloat* routed_hidden [[buffer(0)]],
     const device uchar* codes [[buffer(1)]], const device uchar* codebook [[buffer(2)]],
-    const device uchar* scales [[buffer(3)]], const device uint* experts [[buffer(4)]],
-    const device bfloat* route_weights [[buffer(5)]],
-    const device bfloat* shared_hidden [[buffer(6)]],
-    const device uchar* sw [[buffer(7)]], const device uchar* ss [[buffer(8)]],
-    const device uchar* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
-    device bfloat* output [[buffer(11)]], uint group_id [[threadgroup_position_in_grid]],
+    const device uchar* codebook_scales [[buffer(3)]],
+    const device uchar* codebook_biases [[buffer(4)]],
+    const device uchar* scales [[buffer(5)]], const device uint* experts [[buffer(6)]],
+    const device bfloat* route_weights [[buffer(7)]],
+    const device bfloat* shared_hidden [[buffer(8)]],
+    const device uchar* sw [[buffer(9)]], const device uchar* ss [[buffer(10)]],
+    const device uchar* sb [[buffer(11)]], const device bfloat* router [[buffer(12)]],
+    device bfloat* output [[buffer(13)]], uint group_id [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     constexpr uint rows = 2560, k = 640, groups = 10, words = 42;
     const uint row = group_id * 4u + simd;
@@ -506,7 +570,8 @@ kernel void vq_d8_all_down(
             const device bfloat* x = routed_hidden + slot * k;
             scaled_group =
                 float(load_f16_unaligned(scales, matrix_row * groups + quant_group)) *
-                vq_d8_group_dot_cached(code_row, codebook, x, quant_group);
+                vq_d8_group_dot_u8(
+                    code_row, codebook, codebook_scales, codebook_biases, x, quant_group);
         }
         for (uint wave_slot = 0; wave_slot < slots_per_wave; ++wave_slot) {
             const float ordered = lane < groups

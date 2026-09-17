@@ -67,3 +67,24 @@ and the backend-only timing modes. Do not integrate the ANE language head. The
 persistent path is now near the current MLX short-decode result, but it has not
 yet demonstrated a 40 tok/s result or enough multi-token parity to become the
 default VQ backend.
+
+## Compact-codebook follow-up
+
+The persistent d8 kernels subsequently adopted the same decode-only codebook
+policy as the production MLX path: signed centred INT8 for gate and affine U8
+for up/down, with per-dimension FP16 scale and bias. The original FP16
+codebooks remain the source of the derived buffers and continue to serve wide
+prefill. Derived persistent buffers add about 18 MiB across the 46 d8 layers.
+
+The real-weight d8 layer fell again from about 0.615 ms to 0.531 ms. Relative
+to the MLX production oracle it retained 0.999991 cosine and 0.001449 RMSE.
+Three 48-layer trunk runs measured 26.205/26.215/26.226 ms GPU and
+27.616/27.654/27.636 ms wall. Three 64-token greedy runs measured
+33.75/33.77/33.28 tok/s and all ended on token 2420. These used the same M5 Pro,
+group-2 command buffers, greedy sampling, MTP off, three warmup tokens, no
+prompt context, and no thermal controller as the earlier follow-up.
+
+This improves the warm persistent result by about 10.6% over its prior
+30.53 tok/s, but still misses the 40 tok/s target. The next gate is eliminating
+the embedding/trunk/head host round trips and measuring the remaining shared
+expert and GDN cost before adding another numerical approximation.

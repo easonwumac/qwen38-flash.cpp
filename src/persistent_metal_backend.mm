@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -85,6 +86,12 @@ public:
         MlxArray array;
         const void* data{nullptr};
         id<MTLBuffer> buffer{nil};
+    };
+
+    struct CompactCodebook {
+        id<MTLBuffer> values{nil};
+        id<MTLBuffer> scales{nil};
+        id<MTLBuffer> biases{nil};
     };
 
     struct GdnState {
@@ -178,6 +185,7 @@ public:
                         spec->packed_bits == 0;
                 }
             }
+            if (vq_routed_) prepare_compact_codebooks(manifest);
             queue_ = [device_ newCommandQueue];
             if (queue_ == nil) throw std::runtime_error("cannot create persistent Metal queue");
             allocate_scratch();
@@ -213,6 +221,109 @@ public:
         if (value == nil) throw std::bad_alloc();
         if (clear) std::memset(value.contents, 0, bytes);
         return value;
+    }
+
+    static float fp16_to_float(const std::uint16_t bits) {
+        return static_cast<float>(std::bit_cast<_Float16>(bits));
+    }
+
+    static std::uint16_t float_to_fp16(const float value) {
+        return std::bit_cast<std::uint16_t>(static_cast<_Float16>(value));
+    }
+
+    CompactCodebook make_compact_codebook(
+        const ModelManifest& manifest, const std::string& base, const bool centered) {
+        std::string tensor = base + ".codebook";
+        auto weight = manifest.weight_map().find(tensor);
+        if (weight == manifest.weight_map().end() &&
+            std::string_view(tensor).starts_with("language_model.")) {
+            tensor.erase(0, 15);
+            weight = manifest.weight_map().find(tensor);
+        }
+        if (weight == manifest.weight_map().end()) {
+            throw std::runtime_error("missing VQ codebook: " + base);
+        }
+        const TensorView view = shards_.at(weight->second)->file.tensor(weight->first);
+        if (view.dtype != "F16" || view.shape.size() != 2 || view.shape[1] != 8) {
+            throw std::runtime_error("invalid d8 VQ codebook: " + base);
+        }
+        const std::size_t rows = view.shape[0];
+        constexpr std::size_t dimensions = 8;
+        const auto* source = reinterpret_cast<const std::uint16_t*>(view.bytes.data());
+        std::array<float, dimensions> minimum;
+        std::array<float, dimensions> maximum;
+        minimum.fill(std::numeric_limits<float>::infinity());
+        maximum.fill(-std::numeric_limits<float>::infinity());
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t dimension = 0; dimension < dimensions; ++dimension) {
+                const float value = fp16_to_float(source[row * dimensions + dimension]);
+                minimum[dimension] = std::min(minimum[dimension], value);
+                maximum[dimension] = std::max(maximum[dimension], value);
+            }
+        }
+        std::array<float, dimensions> scales;
+        for (std::size_t dimension = 0; dimension < dimensions; ++dimension) {
+            scales[dimension] = (maximum[dimension] - minimum[dimension]) / 255.0F;
+            if (!(scales[dimension] > 0.0F)) scales[dimension] = 1.0F;
+        }
+        std::vector<std::uint8_t> quantized(rows * dimensions);
+        for (std::size_t index = 0; index < quantized.size(); ++index) {
+            const std::size_t dimension = index % dimensions;
+            const float value = fp16_to_float(source[index]);
+            const std::int32_t code = centered
+                ? std::clamp<std::int32_t>(
+                      static_cast<std::int32_t>(std::lround(value / scales[dimension])),
+                      -128, 127)
+                : std::clamp<std::int32_t>(static_cast<std::int32_t>(std::lround(
+                      (value - minimum[dimension]) / scales[dimension])), 0, 255);
+            quantized[index] = static_cast<std::uint8_t>(code);
+        }
+        std::array<std::uint16_t, dimensions> scale_bits;
+        std::array<std::uint16_t, dimensions> bias_bits;
+        for (std::size_t dimension = 0; dimension < dimensions; ++dimension) {
+            scale_bits[dimension] = float_to_fp16(scales[dimension]);
+            bias_bits[dimension] = float_to_fp16(minimum[dimension]);
+        }
+        CompactCodebook result;
+        result.values = [device_ newBufferWithBytes:quantized.data()
+                                              length:quantized.size()
+                                             options:MTLResourceStorageModeShared];
+        result.scales = [device_ newBufferWithBytes:scale_bits.data()
+                                              length:sizeof(scale_bits)
+                                             options:MTLResourceStorageModeShared];
+        result.biases = [device_ newBufferWithBytes:bias_bits.data()
+                                              length:sizeof(bias_bits)
+                                             options:MTLResourceStorageModeShared];
+        if (result.values == nil || result.scales == nil || result.biases == nil) {
+            throw std::bad_alloc();
+        }
+        return result;
+    }
+
+    void prepare_compact_codebooks(const ModelManifest& manifest) {
+        compact_codebooks_.reserve((config_.layer_count - 2) * 3);
+        for (std::size_t layer = 0; layer < config_.layer_count; ++layer) {
+            if (vq_d2_layers_[layer]) continue;
+            const std::string prefix = "language_model.model.layers." +
+                std::to_string(layer) + ".mlp.switch_mlp.";
+            compact_codebooks_.emplace(
+                prefix + "gate_proj", make_compact_codebook(
+                    manifest, prefix + "gate_proj", true));
+            compact_codebooks_.emplace(
+                prefix + "up_proj", make_compact_codebook(
+                    manifest, prefix + "up_proj", false));
+            compact_codebooks_.emplace(
+                prefix + "down_proj", make_compact_codebook(
+                    manifest, prefix + "down_proj", false));
+        }
+    }
+
+    void bind_compact_codebook(id<MTLComputeCommandEncoder> encoder,
+                               const std::string& base, const NSUInteger first) const {
+        const CompactCodebook& codebook = compact_codebooks_.at(base);
+        [encoder setBuffer:codebook.values offset:0 atIndex:first];
+        [encoder setBuffer:codebook.scales offset:0 atIndex:first + 1];
+        [encoder setBuffer:codebook.biases offset:0 atIndex:first + 2];
     }
 
     void prepare_shared_weights() {
@@ -580,35 +691,66 @@ public:
             [encoder endEncoding];
             if (vq_routed_) {
                 encoder = [command computeCommandEncoder];
-                [encoder setComputePipelineState:pipeline(
-                    vq_d2_layers_[layer_index] ?
-                        "vq_d2_all_gate_up" : "vq_d8_all_gate_up")];
                 [encoder setBuffer:mixed_ offset:0 atIndex:0];
-                bind_vq_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
-                bind_vq_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
-                [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
-                [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
-                bind_projection(encoder, mlp + ".shared_expert.gate_proj", 9);
-                bind_projection(encoder, mlp + ".shared_expert.up_proj", 12);
-                [encoder setBuffer:shared_hidden_ offset:0 atIndex:15];
-                bind_projection(encoder, mlp + ".shared_expert_gate", 16);
-                [encoder setBuffer:shared_scale_ offset:0 atIndex:19];
+                if (vq_d2_layers_[layer_index]) {
+                    [encoder setComputePipelineState:pipeline("vq_d2_all_gate_up")];
+                    bind_vq_projection(encoder, mlp + ".switch_mlp.gate_proj", 1);
+                    bind_vq_projection(encoder, mlp + ".switch_mlp.up_proj", 4);
+                    [encoder setBuffer:expert_ids_ offset:0 atIndex:7];
+                    [encoder setBuffer:routed_hidden_ offset:0 atIndex:8];
+                    bind_projection(encoder, mlp + ".shared_expert.gate_proj", 9);
+                    bind_projection(encoder, mlp + ".shared_expert.up_proj", 12);
+                    [encoder setBuffer:shared_hidden_ offset:0 atIndex:15];
+                    bind_projection(encoder, mlp + ".shared_expert_gate", 16);
+                    [encoder setBuffer:shared_scale_ offset:0 atIndex:19];
+                } else {
+                    [encoder setComputePipelineState:pipeline("vq_d8_all_gate_up")];
+                    const std::string gate = mlp + ".switch_mlp.gate_proj";
+                    const std::string up = mlp + ".switch_mlp.up_proj";
+                    bind(encoder, gate + ".codes", 1);
+                    const CompactCodebook& gate_codebook = compact_codebooks_.at(gate);
+                    [encoder setBuffer:gate_codebook.values offset:0 atIndex:2];
+                    [encoder setBuffer:gate_codebook.scales offset:0 atIndex:3];
+                    bind(encoder, gate + ".vq_scales", 4);
+                    bind(encoder, up + ".codes", 5);
+                    bind_compact_codebook(encoder, up, 6);
+                    bind(encoder, up + ".vq_scales", 9);
+                    [encoder setBuffer:expert_ids_ offset:0 atIndex:10];
+                    [encoder setBuffer:routed_hidden_ offset:0 atIndex:11];
+                    bind_projection(encoder, mlp + ".shared_expert.gate_proj", 12);
+                    bind_projection(encoder, mlp + ".shared_expert.up_proj", 15);
+                    [encoder setBuffer:shared_hidden_ offset:0 atIndex:18];
+                    bind_projection(encoder, mlp + ".shared_expert_gate", 19);
+                    [encoder setBuffer:shared_scale_ offset:0 atIndex:22];
+                }
                 [encoder dispatchThreadgroups:MTLSizeMake(1761, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [encoder endEncoding];
 
                 encoder = [command computeCommandEncoder];
-                [encoder setComputePipelineState:pipeline(
-                    vq_d2_layers_[layer_index] ?
-                        "vq_d2_all_down" : "vq_d8_all_down")];
                 [encoder setBuffer:routed_hidden_ offset:0 atIndex:0];
-                bind_vq_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
-                [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
-                [encoder setBuffer:route_weights_ offset:0 atIndex:5];
-                [encoder setBuffer:shared_hidden_ offset:0 atIndex:6];
-                bind_projection(encoder, mlp + ".shared_expert.down_proj", 7);
-                [encoder setBuffer:shared_scale_ offset:0 atIndex:10];
-                [encoder setBuffer:moe_output_ offset:0 atIndex:11];
+                if (vq_d2_layers_[layer_index]) {
+                    [encoder setComputePipelineState:pipeline("vq_d2_all_down")];
+                    bind_vq_projection(encoder, mlp + ".switch_mlp.down_proj", 1);
+                    [encoder setBuffer:expert_ids_ offset:0 atIndex:4];
+                    [encoder setBuffer:route_weights_ offset:0 atIndex:5];
+                    [encoder setBuffer:shared_hidden_ offset:0 atIndex:6];
+                    bind_projection(encoder, mlp + ".shared_expert.down_proj", 7);
+                    [encoder setBuffer:shared_scale_ offset:0 atIndex:10];
+                    [encoder setBuffer:moe_output_ offset:0 atIndex:11];
+                } else {
+                    [encoder setComputePipelineState:pipeline("vq_d8_all_down")];
+                    const std::string down = mlp + ".switch_mlp.down_proj";
+                    bind(encoder, down + ".codes", 1);
+                    bind_compact_codebook(encoder, down, 2);
+                    bind(encoder, down + ".vq_scales", 5);
+                    [encoder setBuffer:expert_ids_ offset:0 atIndex:6];
+                    [encoder setBuffer:route_weights_ offset:0 atIndex:7];
+                    [encoder setBuffer:shared_hidden_ offset:0 atIndex:8];
+                    bind_projection(encoder, mlp + ".shared_expert.down_proj", 9);
+                    [encoder setBuffer:shared_scale_ offset:0 atIndex:12];
+                    [encoder setBuffer:moe_output_ offset:0 atIndex:13];
+                }
                 [encoder dispatchThreadgroups:MTLSizeMake(640, 1, 1)
                         threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
                 [encoder endEncoding];
@@ -1274,6 +1416,7 @@ public:
     std::unordered_map<std::string, std::unique_ptr<Shard>> shards_;
     std::unordered_map<std::string, SharedTensor> shared_tensors_;
     std::unordered_map<std::string, std::string> weight_map_;
+    std::unordered_map<std::string, CompactCodebook> compact_codebooks_;
     ModelConfig config_;
     bool vq_routed_{false};
     std::array<bool, 48> vq_d2_layers_{};
