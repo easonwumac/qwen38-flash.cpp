@@ -36,6 +36,7 @@ void apply_automatic_runtime_config() {
         {"QWEN38_HC_EXACT_BRANCH_BATCH", "1"},
         {"QWEN38_VQ_BRANCH_BATCH", "1"},
         {"QWEN38_PAIR_WIDE_BATCH", "1"},
+        {"QWEN38_VQ_WIDE_BRANCH_BATCH", "1"},
         {"QWEN38_GDN_METAL_VERIFY_BF16_SUM", "1"},
         {"QWEN38_COMPACT_GDN_ROLLBACK", "1"},
         {"QWEN38_BATCH_KV_VERIFY", "1"},

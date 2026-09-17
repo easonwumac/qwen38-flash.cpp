@@ -637,6 +637,40 @@ The implementation order is deliberately narrow:
   saturates the useful GPU work, so pairing improves scheduling efficiency but
   does not scale throughput linearly. Conditions otherwise match the preceding
   VQ-2.1bpw greedy, thinking/MTP-off recurrent tests on M5 Pro 64 GiB.
+- Width four now keeps GDN, attention, and hyper-connections in exact pairs but
+  joins all four rows for one routed-VQ dispatch. A VQ-only width-four prototype
+  first reached 40.22 aggregate tok/s versus the old 34.00 control. Combining it
+  with the exact pair primitives reached 47.31 tok/s on the 64-step recurrent
+  test, +13.2% over pair-only 41.79 and +39.2% over the old width-four path.
+  All four trajectories matched serial, peak footprint remained 36.9 GiB, and
+  the strict four-branch probe reported zero maximum target-logit error with a
+  1.568x target speedup. The automatic runtime therefore retains native
+  width-four VQ while using exact pairs for the other blocks. Conditions:
+  Qwen3.8-Flash-Next-VQ-2.1bpw, exact top-10, greedy, thinking/MTP off for the
+  recurrent test, M5 Pro 64 GiB, no active thermal control, directional sample.
+- A custom one-thread GPU top-10 scan intended to replace MLX `argpartition`
+  reduced single-request decode from 31.25 to 11.61 tok/s and changed the token
+  trajectory. Serializing 5,120 comparisons per layer is much worse than the
+  generic parallel partition, and its tie policy was not numerically identical.
+  The kernel and switch were removed; router/top-k fusion requires a parallel
+  exact selection design rather than the persistent backend's scalar selector.
+- The existing persistent VQ backend already submits BF16 router, top-10,
+  routed/shared VQ, the 48-layer trunk, final mixer, and GPU head through native
+  Metal command buffers. Its 64-step greedy probe measured 28.51 ms median GPU,
+  31.99 ms median wall, and 31.90 tok/s, only about 4% above the adjacent MLX
+  single-request result. Component checks reached 0.999999 cosine on layer 0
+  and 0.999991 on attention layer 3, but four attention steps accumulated
+  0.0625 maximum absolute error. A full persistent-plus-MLX trajectory check
+  was safely stopped when available memory fell to 7.6 GiB. This path is not
+  promoted: command submission is not the main remaining cost, and the current
+  arithmetic is approximate.
+- Retained native-MTP cost curves show why more proposals alone do not solve
+  verification: on the same 64-token coding fixture, depths 2, 3, and 4 reached
+  45.11, 48.82, and 53.27 tok/s. With the Q4 drafter head, depth four reached
+  56.72 tok/s at 87.5% acceptance; median draft, verify, and commit time were
+  223, 857, and 11 ms. Target verification remains roughly four times the draft
+  cost, so wider trees must reuse target work or select one coherent path before
+  verification rather than merely produce more candidates.
 
 ## Promotion gates
 

@@ -1587,9 +1587,14 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
                   << " selected=" << inputs.size() * experts_per_token_ << '\n';
     }
     const char* vq_branch_batch = std::getenv("QWEN38_VQ_BRANCH_BATCH");
-    const bool vq_branch_batch_enabled = fused_vq_ && inputs.size() == 2 &&
-        vq_branch_batch != nullptr && std::string_view(vq_branch_batch) == "1";
+    const char* vq_wide_batch = std::getenv("QWEN38_VQ_WIDE_BRANCH_BATCH");
+    const bool vq_branch_batch_enabled = fused_vq_ &&
+        ((inputs.size() == 2 && vq_branch_batch != nullptr &&
+          std::string_view(vq_branch_batch) == "1") ||
+         (inputs.size() > 2 && inputs.size() <= 4 && vq_wide_batch != nullptr &&
+          std::string_view(vq_wide_batch) == "1"));
     if (vq_branch_batch_enabled) {
+        const int batch = checked_int(inputs.size(), "VQ branch batch");
         const int topk = checked_int(experts_per_token_, "VQ branch top-k");
         const char* device_router = std::getenv("QWEN38_DEVICE_ROUTER");
         const bool route_on_device = device_router != nullptr &&
@@ -1599,8 +1604,8 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
         if (route_on_device) {
             std::vector<MlxArray> expert_rows;
             std::vector<MlxArray> weight_rows;
-            expert_rows.reserve(2);
-            weight_rows.reserve(2);
+            expert_rows.reserve(inputs.size());
+            weight_rows.reserve(inputs.size());
             for (const MlxArray& input : inputs) {
                 MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
                 const bool use_selected_softmax =
@@ -1626,13 +1631,13 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
                     row_weights, route_order, -1)
                     .reshape(std::vector<int>{1, topk}).astype(MLX_FLOAT32));
             }
-            experts = MlxArray::concatenate(expert_rows[0], expert_rows[1], 0);
-            weights = MlxArray::concatenate(weight_rows[0], weight_rows[1], 0);
+            experts = MlxArray::concatenate_many(expert_rows, 0);
+            weights = MlxArray::concatenate_many(weight_rows, 0);
         } else {
             std::vector<std::int32_t> expert_values;
             std::vector<float> weight_values;
-            expert_values.reserve(2 * experts_per_token_);
-            weight_values.reserve(2 * experts_per_token_);
+            expert_values.reserve(inputs.size() * experts_per_token_);
+            weight_values.reserve(inputs.size() * experts_per_token_);
             for (const MlxArray& input : inputs) {
                 RouterSelection selection = route_decode(input);
                 for (const std::size_t expert : selection.experts) {
@@ -1641,18 +1646,17 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
                 weight_values.insert(
                     weight_values.end(), selection.weights.begin(), selection.weights.end());
             }
-            experts = MlxArray::from_int32(expert_values, std::vector<int>{2, topk});
-            weights = MlxArray::from_float32(weight_values, std::vector<int>{2, topk});
+            experts = MlxArray::from_int32(expert_values, std::vector<int>{batch, topk});
+            weights = MlxArray::from_float32(weight_values, std::vector<int>{batch, topk});
         }
         MlxArray routed = forward_vq_routed_batch(
-            concatenate_sequence_rows(inputs), experts, weights, 2);
+            concatenate_sequence_rows(inputs), experts, weights, batch);
         std::vector<MlxArray> shared;
-        shared.reserve(2);
-        shared.push_back(forward_shared(inputs[0]));
-        shared.push_back(forward_shared(inputs[1]));
+        shared.reserve(inputs.size());
+        for (const MlxArray& input : inputs) shared.push_back(forward_shared(input));
         std::vector<MlxArray> outputs;
-        outputs.reserve(2);
-        for (std::size_t row = 0; row < 2; ++row) {
+        outputs.reserve(inputs.size());
+        for (std::size_t row = 0; row < inputs.size(); ++row) {
             outputs.push_back(MlxArray::add(
                 slice_sequence_row(routed, row), shared[row]));
         }

@@ -238,8 +238,14 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
         throw std::runtime_error("multi-request decode requires 1 to 64 matching rows");
     }
     const char* pair_wide_batch = std::getenv("QWEN38_PAIR_WIDE_BATCH");
-    if (streams.size() > 2 && pair_wide_batch != nullptr &&
-        std::string_view(pair_wide_batch) == "1") {
+    const bool pair_wide_batch_enabled = streams.size() > 2 &&
+        pair_wide_batch != nullptr && std::string_view(pair_wide_batch) == "1";
+    const char* vq_wide_batch = std::getenv("QWEN38_VQ_WIDE_BRANCH_BATCH");
+    const bool vq_wide_batch_enabled = streams.size() > 2 && streams.size() <= 4 &&
+        vq_wide_batch != nullptr && std::string_view(vq_wide_batch) == "1";
+    const bool native_width4_enabled = streams.size() == 4 &&
+        pair_wide_batch_enabled && vq_wide_batch_enabled;
+    if (pair_wide_batch_enabled && !native_width4_enabled) {
         std::vector<MlxArray> result;
         result.reserve(streams.size());
         std::size_t row = 0;
@@ -277,8 +283,11 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     const char* hc_branch_batch = std::getenv("QWEN38_HC_EXACT_BRANCH_BATCH");
     const bool hc_branch_batch_enabled = streams.size() == 2 &&
         hc_branch_batch != nullptr && std::string_view(hc_branch_batch) == "1";
+    const bool hc_width4_enabled = native_width4_enabled &&
+        hc_branch_batch != nullptr && std::string_view(hc_branch_batch) == "1";
     if (streams.size() == 1 ||
-        (linear_attention_ != nullptr && !gdn_branch_batch_enabled)) {
+        (linear_attention_ != nullptr && !gdn_branch_batch_enabled &&
+         !vq_wide_batch_enabled)) {
         std::vector<MlxArray> result;
         result.reserve(streams.size());
         for (std::size_t row = 0; row < streams.size(); ++row) {
@@ -307,7 +316,7 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
             : MlxArray::add(
                   streams[row],
                   MlxArray::zeros(std::vector<int>{1}, streams[row].dtype())));
-        if (!hc_branch_batch_enabled) {
+        if (!hc_branch_batch_enabled && !hc_width4_enabled) {
             HyperConnectionRead attention =
                 attention_hyper_connection_.read(prepared_streams.back());
             attention_mixed.push_back(std::move(attention.mixed));
@@ -320,6 +329,16 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
         for (HyperConnectionRead& row : attention) {
             attention_mixed.push_back(std::move(row.mixed));
             attention_injections.push_back(std::move(row.injection));
+        }
+    } else if (hc_width4_enabled) {
+        for (std::size_t offset = 0; offset < streams.size(); offset += 2) {
+            std::vector<HyperConnectionRead> attention =
+                attention_hyper_connection_.read_branch2(
+                    std::span<const MlxArray>(prepared_streams.data() + offset, 2));
+            for (HyperConnectionRead& row : attention) {
+                attention_mixed.push_back(std::move(row.mixed));
+                attention_injections.push_back(std::move(row.injection));
+            }
         }
     }
 
@@ -336,6 +355,32 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
             &states[1]->full_attention};
         attention_outputs = full_attention_->forward_decode_multi(
             attention_mixed, attention_states);
+    } else if (native_width4_enabled) {
+        attention_outputs.reserve(streams.size());
+        for (std::size_t offset = 0; offset < streams.size(); offset += 2) {
+            std::array<MlxArray, 2> pair_inputs{
+                attention_mixed[offset].share(), attention_mixed[offset + 1].share()};
+            std::vector<MlxArray> pair;
+            if (linear_attention_ != nullptr) {
+                std::array<GatedDeltaNetState*, 2> pair_states{
+                    &states[offset]->linear_attention,
+                    &states[offset + 1]->linear_attention};
+                pair = linear_attention_->forward_decode_multi(pair_inputs, pair_states);
+            } else {
+                std::array<SelfAttentionState*, 2> pair_states{
+                    &states[offset]->full_attention,
+                    &states[offset + 1]->full_attention};
+                pair = full_attention_->forward_decode_multi(pair_inputs, pair_states);
+            }
+            attention_outputs.push_back(std::move(pair[0]));
+            attention_outputs.push_back(std::move(pair[1]));
+        }
+    } else if (linear_attention_ != nullptr) {
+        attention_outputs.reserve(streams.size());
+        for (std::size_t row = 0; row < streams.size(); ++row) {
+            attention_outputs.push_back(linear_attention_->forward_decode(
+                attention_mixed[row], states[row]->linear_attention));
+        }
     } else {
         attention_outputs.reserve(streams.size());
         for (std::size_t row = 0; row < streams.size(); ++row) {
@@ -360,6 +405,16 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
         for (HyperConnectionRead& row : mlp) {
             mlp_mixed.push_back(std::move(row.mixed));
             mlp_injections.push_back(std::move(row.injection));
+        }
+    } else if (hc_width4_enabled) {
+        for (std::size_t offset = 0; offset < streams.size(); offset += 2) {
+            std::vector<HyperConnectionRead> mlp =
+                mlp_hyper_connection_.read_branch2(
+                    std::span<const MlxArray>(post_attention.data() + offset, 2));
+            for (HyperConnectionRead& row : mlp) {
+                mlp_mixed.push_back(std::move(row.mixed));
+                mlp_injections.push_back(std::move(row.injection));
+            }
         }
     } else {
         for (const MlxArray& row : post_attention) {
