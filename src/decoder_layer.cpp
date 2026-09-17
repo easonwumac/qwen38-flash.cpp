@@ -1,6 +1,7 @@
 #include "qwen38/decoder_layer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -235,6 +236,35 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     if (streams.empty() || streams.size() != tokens.size() ||
         streams.size() != states.size() || streams.size() > 64) {
         throw std::runtime_error("multi-request decode requires 1 to 64 matching rows");
+    }
+    const char* pair_wide_batch = std::getenv("QWEN38_PAIR_WIDE_BATCH");
+    if (streams.size() > 2 && pair_wide_batch != nullptr &&
+        std::string_view(pair_wide_batch) == "1") {
+        std::vector<MlxArray> result;
+        result.reserve(streams.size());
+        std::size_t row = 0;
+        for (; row + 1 < streams.size(); row += 2) {
+            std::vector<MlxArray> pair_streams;
+            pair_streams.reserve(2);
+            pair_streams.push_back(std::move(streams[row]));
+            pair_streams.push_back(std::move(streams[row + 1]));
+            const std::array<std::uint32_t, 2> pair_tokens{
+                tokens[row], tokens[row + 1]};
+            const std::array<DecoderLayerState*, 2> pair_states{
+                states[row], states[row + 1]};
+            std::vector<MlxArray> pair = forward_decode_multi(
+                std::move(pair_streams), pair_tokens, pair_states);
+            result.push_back(std::move(pair[0]));
+            result.push_back(std::move(pair[1]));
+        }
+        if (row < streams.size()) {
+            if (states[row] == nullptr) {
+                throw std::runtime_error("multi-request decode state is null");
+            }
+            result.push_back(forward_decode(
+                streams[row], tokens[row], *states[row]));
+        }
+        return result;
     }
     const char* gdn_branch_batch = std::getenv("QWEN38_GDN_BRANCH_BATCH");
     const bool gdn_branch_batch_enabled = linear_attention_ != nullptr &&

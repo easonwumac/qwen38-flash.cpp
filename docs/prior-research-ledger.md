@@ -627,6 +627,16 @@ The implementation order is deliberately narrow:
   47.36 ms for the existing path and 47.56 ms for the batched router, roughly a
   0.4% regression. Router reads are not the remaining width-two bottleneck; the
   prototype and switch were removed.
+- Wider independent-request batches now decompose into the retained exact
+  two-row primitive plus a serial odd tail. Before this change widths above two
+  bypassed all exact sibling paths. On the 64-step four-request recurrent test,
+  pairing preserved every token and raised aggregate throughput from 34.00 to
+  41.96 tok/s (+23.4%) at the same 36.9 GiB peak footprint. A 32-step width-three
+  test also preserved every token and reached 38.98 aggregate tok/s. Width four
+  does not exceed the roughly 42 tok/s width-two plateau: one pair already
+  saturates the useful GPU work, so pairing improves scheduling efficiency but
+  does not scale throughput linearly. Conditions otherwise match the preceding
+  VQ-2.1bpw greedy, thinking/MTP-off recurrent tests on M5 Pro 64 GiB.
 
 ## Promotion gates
 
