@@ -73,11 +73,34 @@ std::shared_ptr<MlxMetalKernel> hc_down_injection_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> hc_down_injection_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{
+            "xn0", "xn1", "weight", "scales", "biases", "ipart0", "ipart1"};
+        const char* outputs[]{"activation", "inject"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_read_down_injection_branch2",
+            inputs,
+            outputs,
+            hc_metal::down_injection_branch2);
+    }();
+    return kernel;
+}
+
 std::shared_ptr<MlxMetalKernel> hc_up_kernel() {
     static const auto kernel = [] {
         const char* inputs[]{"xn", "activation", "weight", "scales", "biases"};
         return std::make_shared<MlxMetalKernel>(
             "qwen38_hc_read_up", inputs, "mixed", hc_metal::up);
+    }();
+    return kernel;
+}
+
+std::shared_ptr<MlxMetalKernel> hc_up_branch2_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"xn0", "xn1", "activation", "weight", "scales", "biases"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_hc_read_up_branch2", inputs, "mixed", hc_metal::up_branch2);
     }();
     return kernel;
 }
@@ -474,15 +497,120 @@ std::vector<HyperConnectionRead> HyperConnection::read_branch2(
     if (input_streams.size() != 2) {
         throw std::runtime_error("exact HC sibling read requires two quantized rows");
     }
-    // The automatic server uses the fused dense-injection numeric policy.
-    // Its reduction order is different from the quantized projection below,
-    // so retain the exact single-row path until a matching two-row fused
-    // kernel exists. Other sibling components can still share their weights.
-    if (fused_injection_ready_) {
+    const int fused_bits = down_.quantized ? down_.bits : bits_;
+    const int values_per_word = 32 / fused_bits;
+    const std::vector<int> down_shape = down_.weight.shape();
+    const std::vector<int> up_shape = up_.weight.shape();
+    const char* fused_flag = std::getenv("QWEN38_HC_FUSED");
+    const bool fused_supported = fused_flag != nullptr &&
+        std::string_view(fused_flag) == "1" &&
+        (input_streams[0].dtype() == MLX_BFLOAT16 ||
+         input_streams[0].dtype() == MLX_FLOAT16) &&
+        down_.quantized && up_.quantized && down_.bits == up_.bits &&
+        fused_bits > 0 && 32 % fused_bits == 0 &&
+        hidden_size_ % 256 == 0 && group_size_ % values_per_word == 0 &&
+        down_shape.size() == 2 && up_shape.size() == 2 &&
+        down_shape[1] * values_per_word ==
+            checked_dimension(stream_count_ * hidden_size_, "stream_width") &&
+        up_shape[0] == checked_dimension(stream_count_ * hidden_size_, "stream_width") &&
+        up_shape[1] * values_per_word == down_shape[0] &&
+        down_shape[1] % 256 == 0 && down_shape[0] % values_per_word == 0;
+    if (fused_supported && (!with_injection_ || fused_injection_ready_)) {
+        const int streams = checked_dimension(stream_count_, "stream_count");
+        const int hidden = checked_dimension(hidden_size_, "hidden_size");
+        const int width = streams * hidden;
+        const std::vector<int> stream_shape{1, 1, width};
+        for (const MlxArray& stream : input_streams) {
+            if (stream.shape() != stream_shape) {
+                throw std::runtime_error("exact fused HC sibling rows require [1,1,width]");
+            }
+        }
+        if (!down_.quantized || !up_.quantized || down_shape.size() != 2 ||
+            down_shape[0] < 1) {
+            throw std::runtime_error("exact fused HC sibling weights are invalid");
+        }
+        const int rank = down_shape[0];
+        const int bits = down_.bits;
+        const std::array<float, 1> epsilon_value{rms_norm_epsilon_};
+        MlxArray epsilon = MlxArray::from_float32(
+            epsilon_value, std::array<int, 1>{1});
+        const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+            {.name = "T", .value = input_streams[0].dtype()},
+        }};
+        const std::array<MlxMetalIntTemplate, 5> int_templates{{
+            {.name = "HC", .value = streams},
+            {.name = "H", .value = hidden},
+            {.name = "R", .value = rank},
+            {.name = "GS", .value = group_size_},
+            {.name = "BITS", .value = bits},
+        }};
+        std::array<std::vector<MlxArray>, 2> normalized;
+        for (std::size_t row = 0; row < 2; ++row) {
+            if (with_injection_) {
+                const std::array<const MlxArray*, 4> normalize_inputs{
+                    &input_streams[row], &norm_weight_, &injection_dense_, &epsilon};
+                const std::array<MlxMetalOutputSpec, 2> normalize_outputs{{
+                    {.shape = {width}, .dtype = input_streams[row].dtype()},
+                    {.shape = {streams * streams}, .dtype = MLX_FLOAT32},
+                }};
+                normalized[row] = hc_normalize_injection_kernel()->apply(
+                    normalize_inputs, normalize_outputs,
+                    std::array<int, 3>{256 * streams, 1, 1},
+                    std::array<int, 3>{256, 1, 1}, dtype_templates, int_templates);
+            } else {
+                const std::array<const MlxArray*, 3> normalize_inputs{
+                    &input_streams[row], &norm_weight_, &epsilon};
+                const std::array<MlxMetalOutputSpec, 1> normalize_outputs{{
+                    {.shape = {width}, .dtype = input_streams[row].dtype()},
+                }};
+                normalized[row] = hc_normalize_kernel()->apply(
+                    normalize_inputs, normalize_outputs,
+                    std::array<int, 3>{256 * streams, 1, 1},
+                    std::array<int, 3>{256, 1, 1}, dtype_templates, int_templates);
+            }
+        }
+        const MlxArray& ipart0 = with_injection_ ? normalized[0][1] : normalized[0][0];
+        const MlxArray& ipart1 = with_injection_ ? normalized[1][1] : normalized[1][0];
+        const std::array<const MlxArray*, 7> down_inputs{
+            &normalized[0][0], &normalized[1][0], &down_.weight,
+            &down_.scales, &down_.biases, &ipart0, &ipart1};
+        const std::array<MlxMetalOutputSpec, 2> down_outputs{{
+            {.shape = {2, rank}, .dtype = input_streams[0].dtype()},
+            {.shape = {2, streams}, .dtype = input_streams[0].dtype()},
+        }};
+        std::vector<MlxArray> down = hc_down_injection_branch2_kernel()->apply(
+            down_inputs, down_outputs,
+            std::array<int, 3>{256, rank + (with_injection_ ? streams : 0), 1},
+            std::array<int, 3>{256, 1, 1}, dtype_templates, int_templates);
+        const std::array<const MlxArray*, 6> up_inputs{
+            &normalized[0][0], &normalized[1][0], &down[0],
+            &up_.weight, &up_.scales, &up_.biases};
+        const std::array<MlxMetalOutputSpec, 1> up_outputs{{
+            {.shape = {2, hidden}, .dtype = input_streams[0].dtype()},
+        }};
+        MlxArray mixed = std::move(hc_up_branch2_kernel()->apply(
+            up_inputs, up_outputs,
+            std::array<int, 3>{32, hidden, 1},
+            std::array<int, 3>{32, 8, 1}, dtype_templates, int_templates).front());
+        const std::vector<int> strides2{1, 1};
         std::vector<HyperConnectionRead> result;
         result.reserve(2);
-        result.push_back(read(input_streams[0]));
-        result.push_back(read(input_streams[1]));
+        for (int row = 0; row < 2; ++row) {
+            MlxArray mixed_row = mixed.slice(
+                std::vector<int>{row, 0}, std::vector<int>{row + 1, hidden}, strides2)
+                .reshape(std::vector<int>{1, 1, hidden});
+            MlxArray injection_row = with_injection_
+                ? down[1].slice(
+                      std::vector<int>{row, 0},
+                      std::vector<int>{row + 1, streams}, strides2)
+                      .reshape(std::vector<int>{1, 1, streams, 1})
+                : MlxArray{};
+            result.push_back({
+                .mixed = std::move(mixed_row),
+                .injection = std::move(injection_row),
+                .has_injection = with_injection_,
+            });
+        }
         return result;
     }
     const int streams = checked_dimension(stream_count_, "stream_count");

@@ -185,6 +185,88 @@ inline constexpr std::string_view down_injection = R"metal(
     }
 )metal";
 
+// Exact two-row counterpart of down_injection. Each quantized weight is read
+// once while both branch accumulators retain the single-row association and
+// reduction order.
+inline constexpr std::string_view down_injection_branch2 = R"metal(
+    uint tid = thread_index_in_threadgroup;
+    uint lane = thread_index_in_simdgroup;
+    uint sg = simdgroup_index_in_threadgroup;
+    uint row = threadgroup_position_in_grid.y;
+    threadgroup float partial0[8];
+    threadgroup float partial1[8];
+    const int K = HC * H;
+    const int values_per_word = 32 / BITS;
+    const int packed_k = K / values_per_word;
+    const int groups_k = K / GS;
+    if (row < uint(R)) {
+        const int slice = packed_k / 8;
+        const int iterations = slice / 32;
+        uint mask = (1u << BITS) - 1u;
+        size_t weight_base = size_t(row) * size_t(packed_k);
+        size_t group_base = size_t(row) * size_t(groups_k);
+        int packed_start = int(sg) * slice + int(lane);
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        for (int i = 0; i < iterations; ++i) {
+            int packed_index = packed_start + 32 * i;
+            uint32_t packed = weight[weight_base + size_t(packed_index)];
+            int k_base = packed_index * values_per_word;
+            int group = k_base / GS;
+            float scale = float(scales[group_base + size_t(group)]);
+            float bias = float(biases[group_base + size_t(group)]);
+            for (int ki = 0; ki < values_per_word; ki += 4) {
+                int k = k_base + ki;
+                uint32_t q = packed >> (ki * BITS);
+                float w0 = float((q >> (0 * BITS)) & mask) * scale + bias;
+                float w1 = float((q >> (1 * BITS)) & mask) * scale + bias;
+                float w2 = float((q >> (2 * BITS)) & mask) * scale + bias;
+                float w3 = float((q >> (3 * BITS)) & mask) * scale + bias;
+                a0 += float(xn0[k + 0]) * w0;
+                a1 += float(xn0[k + 1]) * w1;
+                a2 += float(xn0[k + 2]) * w2;
+                a3 += float(xn0[k + 3]) * w3;
+                b0 += float(xn1[k + 0]) * w0;
+                b1 += float(xn1[k + 1]) * w1;
+                b2 += float(xn1[k + 2]) * w2;
+                b3 += float(xn1[k + 3]) * w3;
+            }
+        }
+        float accumulated0 = simd_sum((a0 + a1) + (a2 + a3));
+        float accumulated1 = simd_sum((b0 + b1) + (b2 + b3));
+        if (lane == 0) {
+            partial0[sg] = accumulated0;
+            partial1[sg] = accumulated1;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float total0 = 0.0f, total1 = 0.0f;
+            for (int group = 0; group < 8; ++group) {
+                total0 += partial0[group];
+                total1 += partial1[group];
+            }
+            T value0 = T(total0 / float(HC));
+            T value1 = T(total1 / float(HC));
+            T sigmoid0 = T(1.0f / (1.0f + metal::exp(-float(value0))));
+            T sigmoid1 = T(1.0f / (1.0f + metal::exp(-float(value1))));
+            activation[row] = value0 * sigmoid0;
+            activation[R + row] = value1 * sigmoid1;
+        }
+    } else if (tid == 0) {
+        int c = int(row) - R;
+        float total0 = 0.0f, total1 = 0.0f;
+        for (int h = 0; h < HC; ++h) {
+            total0 += ipart0[h * HC + c];
+            total1 += ipart1[h * HC + c];
+        }
+        T value0 = T(total0), value1 = T(total1);
+        T sigmoid0 = T(1.0f / (1.0f + metal::exp(-float(value0))));
+        T sigmoid1 = T(1.0f / (1.0f + metal::exp(-float(value1))));
+        inject[c] = sigmoid0 * T(2.0f);
+        inject[HC + c] = sigmoid1 * T(2.0f);
+    }
+)metal";
+
 inline constexpr std::string_view up = R"metal(
     uint lane = thread_index_in_simdgroup;
     uint column = thread_position_in_grid.y;
@@ -223,6 +305,60 @@ inline constexpr std::string_view up = R"metal(
         stream_sum += float(T(float(gate) * float(xn[row])));
     }
     if (lane == 0) mixed[column] = T(float(T(stream_sum)) / float(HC));
+)metal";
+
+inline constexpr std::string_view up_branch2 = R"metal(
+    uint lane = thread_index_in_simdgroup;
+    uint column = thread_position_in_grid.y;
+    const int values_per_word = 32 / BITS;
+    const int packed_r = R / values_per_word;
+    const int groups_r = R / GS;
+    const int iterations = (packed_r + 31) / 32;
+    uint mask = (1u << BITS) - 1u;
+    float stream_sum0 = 0.0f, stream_sum1 = 0.0f;
+    for (int h = 0; h < HC; ++h) {
+        size_t row = size_t(h) * size_t(H) + size_t(column);
+        size_t weight_base = row * size_t(packed_r);
+        size_t group_base = row * size_t(groups_r);
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        for (int i = 0; i < iterations; ++i) {
+            int packed_index = int(lane) + 32 * i;
+            if (packed_index < packed_r) {
+                uint32_t packed = weight[weight_base + size_t(packed_index)];
+                int r_base = packed_index * values_per_word;
+                int group = r_base / GS;
+                float scale = float(scales[group_base + size_t(group)]);
+                float bias = float(biases[group_base + size_t(group)]);
+                for (int ri = 0; ri < values_per_word; ri += 4) {
+                    int r = r_base + ri;
+                    uint32_t q = packed >> (ri * BITS);
+                    float w0 = float((q >> (0 * BITS)) & mask) * scale + bias;
+                    float w1 = float((q >> (1 * BITS)) & mask) * scale + bias;
+                    float w2 = float((q >> (2 * BITS)) & mask) * scale + bias;
+                    float w3 = float((q >> (3 * BITS)) & mask) * scale + bias;
+                    a0 += float(activation[r + 0]) * w0;
+                    a1 += float(activation[r + 1]) * w1;
+                    a2 += float(activation[r + 2]) * w2;
+                    a3 += float(activation[r + 3]) * w3;
+                    b0 += float(activation[R + r + 0]) * w0;
+                    b1 += float(activation[R + r + 1]) * w1;
+                    b2 += float(activation[R + r + 2]) * w2;
+                    b3 += float(activation[R + r + 3]) * w3;
+                }
+            }
+        }
+        T value0 = T(simd_sum((a0 + a1) + (a2 + a3)));
+        T value1 = T(simd_sum((b0 + b1) + (b2 + b3)));
+        T gate0 = T(1.0f / (1.0f + metal::exp(-float(value0))));
+        T gate1 = T(1.0f / (1.0f + metal::exp(-float(value1))));
+        stream_sum0 += float(T(float(gate0) * float(xn0[row])));
+        stream_sum1 += float(T(float(gate1) * float(xn1[row])));
+    }
+    if (lane == 0) {
+        mixed[column] = T(float(T(stream_sum0)) / float(HC));
+        mixed[H + column] = T(float(T(stream_sum1)) / float(HC));
+    }
 )metal";
 
 } // namespace qwen38::hc_metal
