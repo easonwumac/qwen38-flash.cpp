@@ -179,19 +179,10 @@ DraftChain draft_lazy_chain(
         if (collect_calibration) chain.final_mixed.push_back(std::move(final_mixed));
         draft_arrays.push_back(step.logits.argmax_all().reshape(scalar_shape));
         if (collect_top2 && (collect_all_top2 || index + 1 == draft_depth)) {
-            const std::vector<int> logits_shape = step.logits.shape();
-            if (logits_shape.empty() || logits_shape.back() < 2) {
+            if (step.logits.size() < 2) {
                 throw std::runtime_error("MTP top-2 oracle requires a vocabulary axis");
             }
-            std::vector<int> start(logits_shape.size(), 0);
-            std::vector<int> stop = logits_shape;
-            std::vector<int> strides(logits_shape.size(), 1);
-            start.back() = logits_shape.back() - 2;
-            top2_arrays.push_back(
-                step.logits.argpartition_axis(-2, -1)
-                    .slice(start, stop, strides)
-                    .reshape(std::vector<int>{2})
-                    .astype(MLX_FLOAT32));
+            top2_arrays.push_back(step.logits.top2_indices_all());
             top2_positions.push_back(index);
         }
         token = draft_arrays.back().share();

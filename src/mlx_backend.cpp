@@ -59,6 +59,81 @@ public:
     [[nodiscard]] mlx_stream get() const { return default_gpu_stream(); }
 };
 
+std::shared_ptr<MlxMetalKernel> top2_indices_kernel() {
+    static const auto kernel = [] {
+        const char* inputs[]{"values"};
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_top2_indices", inputs, "indices", R"metal(
+                uint tid = thread_index_in_threadgroup;
+                threadgroup float best_values[256];
+                threadgroup float second_values[256];
+                threadgroup uint best_ids[256];
+                threadgroup uint second_ids[256];
+                float best_value = -INFINITY;
+                float second_value = -INFINITY;
+                uint best_id = 0xffffffffu;
+                uint second_id = 0xffffffffu;
+                for (uint id = tid; id < uint(N); id += 256u) {
+                    const float value = float(values[id]);
+                    if (value > best_value || (value == best_value && id < best_id)) {
+                        second_value = best_value;
+                        second_id = best_id;
+                        best_value = value;
+                        best_id = id;
+                    } else if (id != best_id &&
+                               (value > second_value ||
+                                (value == second_value && id < second_id))) {
+                        second_value = value;
+                        second_id = id;
+                    }
+                }
+                best_values[tid] = best_value;
+                second_values[tid] = second_value;
+                best_ids[tid] = best_id;
+                second_ids[tid] = second_id;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint stride = 128u; stride != 0u; stride >>= 1u) {
+                    if (tid < stride) {
+                        float bv = best_values[tid];
+                        float sv = second_values[tid];
+                        uint bi = best_ids[tid];
+                        uint si = second_ids[tid];
+                        const uint other = tid + stride;
+                        const float candidates[2] = {
+                            best_values[other], second_values[other]};
+                        const uint candidate_ids[2] = {
+                            best_ids[other], second_ids[other]};
+                        for (uint item = 0; item < 2u; ++item) {
+                            const float value = candidates[item];
+                            const uint id = candidate_ids[item];
+                            if (id == 0xffffffffu) continue;
+                            if (value > bv || (value == bv && id < bi)) {
+                                sv = bv;
+                                si = bi;
+                                bv = value;
+                                bi = id;
+                            } else if (id != bi &&
+                                       (value > sv || (value == sv && id < si))) {
+                                sv = value;
+                                si = id;
+                            }
+                        }
+                        best_values[tid] = bv;
+                        second_values[tid] = sv;
+                        best_ids[tid] = bi;
+                        second_ids[tid] = si;
+                    }
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                if (tid == 0u) {
+                    indices[0] = float(best_ids[0]);
+                    indices[1] = float(second_ids[0]);
+                }
+            )metal");
+    }();
+    return kernel;
+}
+
 } // namespace
 
 MlxArray::MlxArray() noexcept : value_(mlx_array_new()) {}
@@ -824,6 +899,27 @@ MlxArray MlxArray::argmax_all() const {
     const Stream stream;
     check(mlx_argmax(&result.value_, value_, false, stream.get()), "argmax");
     return result;
+}
+
+MlxArray MlxArray::top2_indices_all() const {
+    if (size() < 2 || size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("top-2 reduction requires 2..INT_MAX values");
+    }
+    const std::array<MlxMetalOutputSpec, 1> outputs{{
+        {.shape = {2}, .dtype = MLX_FLOAT32},
+    }};
+    const std::array<int, 3> grid{256, 1, 1};
+    const std::array<int, 3> threadgroup{256, 1, 1};
+    const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
+        {.name = "T", .value = dtype()},
+    }};
+    const std::array<MlxMetalIntTemplate, 1> int_templates{{
+        {.name = "N", .value = static_cast<int>(size())},
+    }};
+    const MlxArray* inputs[]{this};
+    std::vector<MlxArray> result = top2_indices_kernel()->apply(
+        inputs, outputs, grid, threadgroup, dtype_templates, int_templates);
+    return std::move(result.front());
 }
 
 MlxArray MlxArray::dequantize(

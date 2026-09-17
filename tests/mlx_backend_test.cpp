@@ -22,6 +22,31 @@
 #include <vector>
 
 int main() {
+    {
+        std::vector<float> logits(4099, -1000.0F);
+        logits[17] = 9.0F;
+        logits[2048] = 11.0F;
+        logits[3072] = 11.0F;
+        const auto values = qwen38::MlxArray::from_float32(
+            logits, std::array<int, 1>{static_cast<int>(logits.size())});
+        if (values.top2_indices_all().to_float32() !=
+            std::vector<float>({2048.0F, 3072.0F})) {
+            std::cerr << "fused top-2 reduction mismatch\n";
+            return 1;
+        }
+        bool rejected = false;
+        try {
+            const auto singleton = qwen38::MlxArray::from_float32(
+                std::array<float, 1>{1.0F}, std::array<int, 1>{1});
+            static_cast<void>(singleton.top2_indices_all());
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            std::cerr << "fused top-2 reduction accepted a singleton\n";
+            return 1;
+        }
+    }
     for (const int blocks : {32, 1024, 16384}) {
         std::vector<float> values(4 * 16 * blocks);
         for (std::size_t i = 0; i < values.size(); ++i)

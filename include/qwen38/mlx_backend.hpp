@@ -152,6 +152,11 @@ public:
         int axis);
     [[nodiscard]] MlxArray argpartition_axis(int kth, int axis) const;
     [[nodiscard]] MlxArray argsort_axis(int axis) const;
+    // Returns the indices of the largest and second-largest finite values in
+    // a flat array. Ties are resolved by the lower vocabulary index. The
+    // result is FP32 so callers can materialize both ids with one small host
+    // transfer without invoking MLX's full-vocabulary argpartition.
+    [[nodiscard]] MlxArray top2_indices_all() const;
     [[nodiscard]] static MlxArray floor_divide(
         const MlxArray& left,
         const MlxArray& right);
