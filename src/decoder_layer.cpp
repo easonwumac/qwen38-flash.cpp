@@ -236,7 +236,12 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
         streams.size() != states.size() || streams.size() > 64) {
         throw std::runtime_error("multi-request decode requires 1 to 64 matching rows");
     }
-    if (streams.size() == 1 || linear_attention_ != nullptr) {
+    const char* gdn_branch_batch = std::getenv("QWEN38_GDN_BRANCH_BATCH");
+    const bool gdn_branch_batch_enabled = linear_attention_ != nullptr &&
+        streams.size() == 2 && gdn_branch_batch != nullptr &&
+        std::string_view(gdn_branch_batch) == "1";
+    if (streams.size() == 1 ||
+        (linear_attention_ != nullptr && !gdn_branch_batch_enabled)) {
         std::vector<MlxArray> result;
         result.reserve(streams.size());
         for (std::size_t row = 0; row < streams.size(); ++row) {
@@ -248,6 +253,44 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
         return result;
     }
 
+    std::vector<MlxArray> prepared_streams;
+    std::vector<MlxArray> attention_mixed;
+    std::vector<MlxArray> attention_injections;
+    prepared_streams.reserve(streams.size());
+    attention_mixed.reserve(streams.size());
+    attention_injections.reserve(streams.size());
+    for (std::size_t row = 0; row < streams.size(); ++row) {
+        if (states[row] == nullptr) {
+            throw std::runtime_error("multi-request decode state is null");
+        }
+        prepared_streams.push_back(ple_ != nullptr
+            ? MlxArray::add(
+                  streams[row],
+                  ple_->forward_decode(streams[row], tokens[row], states[row]->ple))
+            : MlxArray::add(
+                  streams[row],
+                  MlxArray::zeros(std::vector<int>{1}, streams[row].dtype())));
+        HyperConnectionRead attention =
+            attention_hyper_connection_.read(prepared_streams.back());
+        attention_mixed.push_back(std::move(attention.mixed));
+        attention_injections.push_back(std::move(attention.injection));
+    }
+
+    std::vector<MlxArray> attention_outputs;
+    if (gdn_branch_batch_enabled) {
+        std::array<GatedDeltaNetState*, 2> linear_states{
+            &states[0]->linear_attention,
+            &states[1]->linear_attention};
+        attention_outputs = linear_attention_->forward_decode_multi(
+            attention_mixed, linear_states);
+    } else {
+        attention_outputs.reserve(streams.size());
+        for (std::size_t row = 0; row < streams.size(); ++row) {
+            attention_outputs.push_back(full_attention_->forward_decode(
+                attention_mixed[row], states[row]->full_attention));
+        }
+    }
+
     std::vector<MlxArray> post_attention;
     std::vector<MlxArray> mlp_mixed;
     std::vector<MlxArray> mlp_injections;
@@ -255,21 +298,8 @@ std::vector<MlxArray> DecoderLayer::forward_decode_multi(
     mlp_mixed.reserve(streams.size());
     mlp_injections.reserve(streams.size());
     for (std::size_t row = 0; row < streams.size(); ++row) {
-        if (states[row] == nullptr) {
-            throw std::runtime_error("multi-request decode state is null");
-        }
-        MlxArray stream = ple_ != nullptr
-            ? MlxArray::add(
-                  streams[row],
-                  ple_->forward_decode(streams[row], tokens[row], states[row]->ple))
-            : MlxArray::add(
-                  streams[row],
-                  MlxArray::zeros(std::vector<int>{1}, streams[row].dtype()));
-        HyperConnectionRead attention = attention_hyper_connection_.read(stream);
-        MlxArray attention_output = full_attention_->forward_decode(
-            attention.mixed, states[row]->full_attention);
         post_attention.push_back(attention_hyper_connection_.write(
-            stream, attention_output, attention.injection));
+            prepared_streams[row], attention_outputs[row], attention_injections[row]));
         HyperConnectionRead mlp = mlp_hyper_connection_.read(post_attention.back());
         mlp_mixed.push_back(std::move(mlp.mixed));
         mlp_injections.push_back(std::move(mlp.injection));

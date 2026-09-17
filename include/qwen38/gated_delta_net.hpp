@@ -4,9 +4,10 @@
 
 #include <cstddef>
 #include <optional>
-#include <vector>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace qwen38 {
 
@@ -49,6 +50,9 @@ public:
     [[nodiscard]] MlxArray forward_decode(
         const MlxArray& input,
         GatedDeltaNetState& state) const;
+    [[nodiscard]] std::vector<MlxArray> forward_decode_multi(
+        std::span<const MlxArray> inputs,
+        std::span<GatedDeltaNetState* const> states) const;
     [[nodiscard]] MlxArray forward_verify(
         const MlxArray& input,
         const GatedDeltaNetState& origin,
@@ -73,6 +77,9 @@ private:
         const MlxArray& input,
         const QuantizedProjection& projection) const;
     [[nodiscard]] MlxArray project_prefill(
+        const MlxArray& input,
+        const QuantizedProjection& projection) const;
+    [[nodiscard]] MlxArray project_branch2(
         const MlxArray& input,
         const QuantizedProjection& projection) const;
 

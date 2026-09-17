@@ -529,6 +529,21 @@ The implementation order is deliberately narrow:
   than the reads already served by GPU caches. All three execution kernels
   were removed; the opt-in overlap diagnostic remains to test future models or
   wider siblings without repeating the implementation blindly.
+- The 36 GDN layers formerly serialized every sibling. An opt-in exact
+  two-row affine-Q8 kernel now keeps MLX `qmv_fast`'s eight-value qdot,
+  K-block accumulation, and SIMD reduction order while reusing each Q8 weight
+  for both rows. Three guarded true-top-2 sibling samples reduced the full
+  two-branch target pass from 111.30--112.16 to 95.46--96.82 ms
+  (1.150--1.172x), with zero maximum logit error and a 39.4--39.5 GiB peak
+  footprint. MLX's ordinary two-row QMM was
+  similarly fast but changed logits by as much as 0.984, so it is not a parity
+  substitute. A shared-state two-branch recurrence prototype remained flat at
+  95.89 ms and was removed. This is a valid verifier primitive, not yet a tree
+  speedup: relative to an approximately 56 ms single branch, the second target
+  branch still adds roughly 39 ms, too much for unconditional top-2 expansion.
+  Conditions: VQ-2.1bpw target, native Q4 MTP head, greedy depth-one siblings,
+  M5 Pro 64 GiB, no active thermal control, directional warm samples rather
+  than an end-to-end tree benchmark.
 
 ## Promotion gates
 

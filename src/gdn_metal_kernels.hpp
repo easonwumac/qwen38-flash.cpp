@@ -14,6 +14,67 @@ inline constexpr std::string_view header = R"metal(
 using namespace metal;
 )metal";
 
+// Exact two-row affine-Q8 projection adapted from MLX qmv_fast (Copyright
+// Apple Inc., MIT). Each SIMD group owns four output rows and reuses each
+// packed weight/scalar for two sibling activations while preserving MLX's
+// eight-value qdot, K-block accumulation, and SIMD reduction order per row.
+inline constexpr std::string_view q8_branch2 = R"metal(
+    const uint lane = thread_index_in_simdgroup;
+    constexpr int ROWS = 4;
+    constexpr int VALUES = 8;
+    constexpr int BLOCK = VALUES * 32;
+    const uint output = threadgroup_position_in_grid.x * 8 +
+        simdgroup_index_in_threadgroup * ROWS;
+    if (output >= (uint)OUT) return;
+    const int packed = IN / 4;
+    const int groups = IN / GROUP;
+    float result0[ROWS] = {0.0f};
+    float result1[ROWS] = {0.0f};
+    for (int kblock = 0; kblock < IN; kblock += BLOCK) {
+        const int k = kblock + int(lane) * VALUES;
+        float xv0[VALUES];
+        float xv1[VALUES];
+        float sum0 = 0.0f;
+        float sum1 = 0.0f;
+        for (int i = 0; i < VALUES; ++i) {
+            xv0[i] = float(x[k + i]);
+            xv1[i] = float(x[IN + k + i]);
+            sum0 += xv0[i];
+            sum1 += xv1[i];
+        }
+        const int group = k / GROUP;
+        const int pack = k / 4;
+        for (int row = 0; row < ROWS; ++row) {
+            const uint q0 = weight[(size_t)(output + row) * packed + pack];
+            const uint q1 = weight[(size_t)(output + row) * packed + pack + 1];
+            const float scale = float(scales[(size_t)(output + row) * groups + group]);
+            const float bias = float(biases[(size_t)(output + row) * groups + group]);
+            float accum0 = 0.0f;
+            float accum1 = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                const float w = float((q0 >> (8 * i)) & 255u);
+                accum0 += xv0[i] * w;
+                accum1 += xv1[i] * w;
+            }
+            for (int i = 0; i < 4; ++i) {
+                const float w = float((q1 >> (8 * i)) & 255u);
+                accum0 += xv0[i + 4] * w;
+                accum1 += xv1[i + 4] * w;
+            }
+            result0[row] += scale * accum0 + sum0 * bias;
+            result1[row] += scale * accum1 + sum1 * bias;
+        }
+    }
+    for (int row = 0; row < ROWS; ++row) {
+        result0[row] = simd_sum(result0[row]);
+        result1[row] = simd_sum(result1[row]);
+        if (lane == 0 && output + row < (uint)OUT) {
+            y[output + row] = T(result0[row]);
+            y[OUT + output + row] = T(result1[row]);
+        }
+    }
+)metal";
+
 inline constexpr std::string_view prework_header = R"metal(
 inline float qwen38_log1p(float x) {
     float plus_one = 1.0f + x;

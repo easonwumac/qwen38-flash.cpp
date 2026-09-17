@@ -9,6 +9,7 @@
 #include <iostream>
 #include <ranges>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -208,6 +209,11 @@ int main(int argc, char** argv) {
         for (std::size_t row = 0; row < branch_tokens.size(); ++row) {
             target_branch_error = std::max(target_branch_error, maximum_absolute_error(
                 target_sequential.steps[row].logits, target_batched.steps[row].logits));
+        }
+        const char* gdn_branch_batch = std::getenv("QWEN38_GDN_BRANCH_BATCH");
+        if (gdn_branch_batch != nullptr && std::string_view(gdn_branch_batch) == "1" &&
+            target_branch_error != 0.0) {
+            throw std::runtime_error("GDN sibling batching changed target logits");
         }
         const double branch_sequential_ms = sequential.milliseconds;
         const double branch_batched_ms = batched.milliseconds;
