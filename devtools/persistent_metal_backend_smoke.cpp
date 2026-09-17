@@ -250,6 +250,33 @@ void benchmark_trunk(qwen38::PersistentMetalBackend& backend,
               << '\n';
 }
 
+void benchmark_greedy(qwen38::PersistentMetalBackend& backend) {
+    std::uint32_t token = 9419;
+    for (int warmup = 0; warmup < 3; ++warmup) {
+        token = backend.greedy_decode(token, warmup == 0).token;
+    }
+    std::vector<double> gpu_samples, wall_samples;
+    gpu_samples.reserve(64);
+    wall_samples.reserve(64);
+    const auto started = std::chrono::steady_clock::now();
+    for (int sample = 0; sample < 64; ++sample) {
+        const auto measured = backend.greedy_decode(token, false);
+        token = measured.token;
+        gpu_samples.push_back(measured.gpu_ms);
+        wall_samples.push_back(measured.wall_ms);
+    }
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    std::ranges::sort(gpu_samples);
+    std::ranges::sort(wall_samples);
+    std::cout << "benchmark_greedy_gpu_median_ms "
+              << gpu_samples[gpu_samples.size() / 2]
+              << " benchmark_greedy_wall_median_ms "
+              << wall_samples[wall_samples.size() / 2]
+              << " benchmark_greedy_tok_s " << 64000.0 / elapsed_ms
+              << " final_token " << token << '\n';
+}
+
 void trace_trunk_layers(qwen38::PersistentMetalBackend& backend,
                         qwen38::MlxTensorStore& tensors,
                         const std::vector<float>& input_f32,
@@ -341,8 +368,24 @@ void check_head(qwen38::PersistentMetalBackend& backend,
         static_cast<int>(quantization.bits));
     const std::uint32_t expected = logits.argmax_all().item_uint32();
     const auto actual = backend.greedy_head(input_bf16);
+    for (int warmup = 0; warmup < 5; ++warmup) {
+        static_cast<void>(backend.greedy_head(input_bf16));
+    }
+    std::vector<double> gpu_samples;
+    std::vector<double> wall_samples;
+    gpu_samples.reserve(21);
+    wall_samples.reserve(21);
+    for (int sample = 0; sample < 21; ++sample) {
+        const auto measured = backend.greedy_head(input_bf16);
+        gpu_samples.push_back(measured.gpu_ms);
+        wall_samples.push_back(measured.wall_ms);
+    }
+    std::ranges::sort(gpu_samples);
+    std::ranges::sort(wall_samples);
     std::cout << "head_token " << actual.token << " mlx_token " << expected
-              << " head_logit " << actual.logit << '\n';
+              << " head_logit " << actual.logit
+              << " head_gpu_ms " << gpu_samples[gpu_samples.size() / 2]
+              << " head_wall_ms " << wall_samples[wall_samples.size() / 2] << '\n';
     if (actual.token != expected || !std::isfinite(actual.logit)) {
         throw std::runtime_error("persistent head parity failed");
     }
@@ -496,7 +539,12 @@ int main(int argc, char** argv) {
         if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_TRUNK");
             bench != nullptr && std::string_view(bench) == "1") {
             benchmark_trunk(*backend, input_bf16);
-            return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
+        }
+        if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_GREEDY");
+            bench != nullptr && std::string_view(bench) == "1") {
+            benchmark_greedy(*backend);
+            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
         }
         qwen38::MlxTensorStore tensors(manifest);
         std::size_t first_layer = 0;
@@ -510,7 +558,7 @@ int main(int argc, char** argv) {
             check_ple(*backend, tensors, input_f32, input_bf16);
             check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
             check_head(*backend, tensors, input_f32, input_bf16);
-            return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
         }
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
@@ -524,7 +572,7 @@ int main(int argc, char** argv) {
             q8_import != nullptr && std::string_view(q8_import) == "1") {
             check_q8_state_import(*backend, tensors, input_f32, input_bf16);
         }
-        return inventory.pipeline_count == 52 && inventory.shard_count != 0 ? 0 : 1;
+        return inventory.pipeline_count == 53 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

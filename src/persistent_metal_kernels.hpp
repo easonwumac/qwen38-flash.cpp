@@ -81,6 +81,37 @@ inline float vq_d8_group_dot(const device uchar* codes, const device uchar* code
     return value;
 }
 
+// A d8/group-64 quant group is exactly eight packed 14-bit codes (112 bits).
+// Cache the four covering words once instead of reloading overlapping words
+// for each code.  Code extraction and accumulation order are unchanged.
+inline float vq_d8_group_dot_cached(const device uchar* codes,
+                                    const device uchar* codebook,
+                                    const device bfloat* x, uint group) {
+    const uint first_sub = group * 8u;
+    const uint block_bit = (first_sub & 31u) * 14u;
+    const uint first_word = (first_sub >> 5) * 14u + (block_bit >> 5);
+    const uint cached_shift = block_bit & 31u;
+    uint packed_words[4];
+    for (uint word = 0; word < 4u; ++word)
+        packed_words[word] = load_u32_unaligned(codes, first_word + word);
+    float value = 0.0f;
+    for (uint local = 0; local < 8u; ++local) {
+        const uint bit = cached_shift + local * 14u;
+        const uint word = bit >> 5;
+        const uint shift = bit & 31u;
+        ulong packed = ulong(packed_words[word] >> shift);
+        if (shift + 14u > 32u)
+            packed |= ulong(packed_words[word + 1u]) << (32u - shift);
+        const uint code = uint(packed & 0x3fffu);
+        const uint xb = group * 64u + local * 8u;
+        const uint cb = code * 8u;
+        for (uint element = 0; element < 8u; ++element)
+            value += float(x[xb + element]) *
+                float(load_f16_unaligned(codebook, cb + element));
+    }
+    return value;
+}
+
 inline float vq_d2_group_dot(const device uchar* codes, const device uchar* codebook,
                              const device bfloat* x, uint group) {
     float value = 0.0f;
@@ -341,9 +372,9 @@ kernel void vq_d8_all_gate_up(
         float gate = 0.0f, up = 0.0f;
         for (uint quant_group = lane; quant_group < hidden_groups; quant_group += 32u) {
             gate += float(load_f16_unaligned(rgs, matrix_row * hidden_groups + quant_group)) *
-                vq_d8_group_dot(gate_row, rgcb, x, quant_group);
+                vq_d8_group_dot_cached(gate_row, rgcb, x, quant_group);
             up += float(load_f16_unaligned(rus, matrix_row * hidden_groups + quant_group)) *
-                vq_d8_group_dot(up_row, rucb, x, quant_group);
+                vq_d8_group_dot_cached(up_row, rucb, x, quant_group);
         }
         gate = simd_sum(gate); up = simd_sum(up);
         if (lane == 0) {
@@ -463,18 +494,32 @@ kernel void vq_d8_all_down(
     const uint row = group_id * 4u + simd;
     if (row >= rows) return;
     bfloat routed_total = bfloat(0.0f);
-    for (uint slot = 0; slot < 10u; ++slot) {
-        const ulong matrix_row = ulong(experts[slot]) * rows + row;
-        const device uchar* code_row = codes + matrix_row * words * 4u;
-        const device bfloat* x = routed_hidden + slot * k;
-        float value = 0.0f;
-        if (lane < groups) {
-            value = float(load_f16_unaligned(scales, matrix_row * groups + lane)) *
-                vq_d8_group_dot(code_row, codebook, x, lane);
+    constexpr uint slots_per_wave = 3u;
+    for (uint slot_base = 0; slot_base < 10u; slot_base += slots_per_wave) {
+        const uint local_slot = lane / groups;
+        const uint quant_group = lane - local_slot * groups;
+        const uint slot = slot_base + local_slot;
+        float scaled_group = 0.0f;
+        if (local_slot < slots_per_wave && slot < 10u) {
+            const ulong matrix_row = ulong(experts[slot]) * rows + row;
+            const device uchar* code_row = codes + matrix_row * words * 4u;
+            const device bfloat* x = routed_hidden + slot * k;
+            scaled_group =
+                float(load_f16_unaligned(scales, matrix_row * groups + quant_group)) *
+                vq_d8_group_dot_cached(code_row, codebook, x, quant_group);
         }
-        value = simd_sum(value);
-        if (lane == 0) routed_total = bfloat(float(routed_total) +
-            float(bfloat(float(route_weights[slot]) * float(bfloat(value)))));
+        for (uint wave_slot = 0; wave_slot < slots_per_wave; ++wave_slot) {
+            const float ordered = lane < groups
+                ? simd_shuffle(scaled_group, ushort(wave_slot * groups + lane))
+                : 0.0f;
+            const float value = simd_sum(ordered);
+            const uint reduced_slot = slot_base + wave_slot;
+            if (lane == 0 && reduced_slot < 10u) {
+                routed_total = bfloat(float(routed_total) +
+                    float(bfloat(float(route_weights[reduced_slot]) *
+                        float(bfloat(value)))));
+            }
+        }
     }
     float shared_dot = 0.0f;
     for (uint base = lane * 8u; base < k; base += 256u) {
@@ -1883,6 +1928,67 @@ kernel void lm_head_q8(
     }
     dot = simd_sum(dot);
     if (lane == 0) logits[row] = dot;
+}
+
+kernel void head_top2_reduce(
+    const device float* logits [[buffer(0)]], device float* candidate_values [[buffer(1)]],
+    device uint* candidate_ids [[buffer(2)]], constant uint& rows [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float best_values[256];
+    threadgroup float second_values[256];
+    threadgroup uint best_ids[256];
+    threadgroup uint second_ids[256];
+    float best_value = -INFINITY, second_value = -INFINITY;
+    uint best_id = 0xffffffffu, second_id = 0xffffffffu;
+    const uint begin = group * 1024u + tid * 4u;
+    for (uint offset = 0; offset < 4u; ++offset) {
+        const uint id = begin + offset;
+        if (id >= rows) continue;
+        const float value = logits[id];
+        if (value > best_value || (value == best_value && id < best_id)) {
+            second_value = best_value; second_id = best_id;
+            best_value = value; best_id = id;
+        } else if (id != best_id &&
+                   (value > second_value || (value == second_value && id < second_id))) {
+            second_value = value; second_id = id;
+        }
+    }
+    best_values[tid] = best_value;
+    second_values[tid] = second_value;
+    best_ids[tid] = best_id;
+    second_ids[tid] = second_id;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128u; stride != 0u; stride >>= 1u) {
+        if (tid < stride) {
+            float bv = best_values[tid], sv = second_values[tid];
+            uint bi = best_ids[tid], si = second_ids[tid];
+            const uint other = tid + stride;
+            const float values[2] = {best_values[other], second_values[other]};
+            const uint ids[2] = {best_ids[other], second_ids[other]};
+            for (uint item = 0; item < 2u; ++item) {
+                const float value = values[item];
+                const uint id = ids[item];
+                if (id == 0xffffffffu) continue;
+                if (value > bv || (value == bv && id < bi)) {
+                    sv = bv; si = bi;
+                    bv = value; bi = id;
+                } else if (id != bi &&
+                           (value > sv || (value == sv && id < si))) {
+                    sv = value; si = id;
+                }
+            }
+            best_values[tid] = bv; second_values[tid] = sv;
+            best_ids[tid] = bi; second_ids[tid] = si;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        const uint output = group * 2u;
+        candidate_values[output] = best_values[0];
+        candidate_values[output + 1u] = second_values[0];
+        candidate_ids[output] = best_ids[0];
+        candidate_ids[output + 1u] = second_ids[0];
+    }
 }
 )metal";
 

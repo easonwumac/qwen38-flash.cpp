@@ -26,7 +26,7 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 52> pipeline_names{
+constexpr std::array<const char*, 53> pipeline_names{
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "q8_shared_gate_up", "q8_shared_down_merge",
     "fused_all_gate_up", "fused_all_down",
@@ -42,6 +42,7 @@ constexpr std::array<const char*, 52> pipeline_names{
     "hc_up_mix", "hc_up_mix_q8", "healing_left", "healing_right_write",
     "ple_fused_update", "embedding_q4_stream", "embedding_q8_stream",
     "hc_down_only", "hc_down_only_q8", "lm_head_q4", "lm_head_q8",
+    "head_top2_reduce",
 };
 
 bool has_expected_attention_split(const ModelConfig& config) noexcept {
@@ -285,6 +286,9 @@ public:
         ple_stream_ = make_buffer(10240 * sizeof(std::uint16_t));
         ple_convolution_ = make_buffer(9ULL * 10240 * sizeof(std::uint16_t));
         head_logits_ = make_buffer(config_.vocabulary_size * sizeof(float), false);
+        const std::size_t head_groups = (config_.vocabulary_size + 1023) / 1024;
+        head_candidate_values_ = make_buffer(head_groups * 2 * sizeof(float), false);
+        head_candidate_ids_ = make_buffer(head_groups * 2 * sizeof(std::uint32_t), false);
     }
 
     id<MTLComputePipelineState> pipeline(const char* name) const {
@@ -1170,27 +1174,49 @@ public:
         [encoder dispatchThreadgroups:MTLSizeMake((rows + 3) / 4, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [encoder endEncoding];
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("head_top2_reduce")];
+        [encoder setBuffer:head_logits_ offset:0 atIndex:0];
+        [encoder setBuffer:head_candidate_values_ offset:0 atIndex:1];
+        [encoder setBuffer:head_candidate_ids_ offset:0 atIndex:2];
+        [encoder setBytes:&rows length:sizeof(rows) atIndex:3];
+        const std::uint32_t head_groups = (rows + 1023) / 1024;
+        [encoder dispatchThreadgroups:MTLSizeMake(head_groups, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
         [command commit];
         [command waitUntilCompleted];
         if (command.status != MTLCommandBufferStatusCompleted) {
             throw std::runtime_error(command.error.localizedDescription.UTF8String);
         }
-        const auto* logits = static_cast<const float*>(head_logits_.contents);
-        std::uint32_t best = 0;
-        std::uint32_t second = 1;
-        if (logits[second] > logits[best]) std::swap(best, second);
-        for (std::uint32_t index = 2; index < rows; ++index) {
-            if (logits[index] > logits[best]) {
+        const auto* values = static_cast<const float*>(head_candidate_values_.contents);
+        const auto* ids = static_cast<const std::uint32_t*>(head_candidate_ids_.contents);
+        std::uint32_t best = ids[0];
+        std::uint32_t second = ids[1];
+        float best_value = values[0];
+        float second_value = values[1];
+        const auto better = [](const float lhs_value, const std::uint32_t lhs_id,
+                               const float rhs_value, const std::uint32_t rhs_id) {
+            return lhs_value > rhs_value ||
+                (lhs_value == rhs_value && lhs_id < rhs_id);
+        };
+        for (std::uint32_t index = 2; index < head_groups * 2; ++index) {
+            const float value = values[index];
+            const std::uint32_t id = ids[index];
+            if (better(value, id, best_value, best)) {
                 second = best;
-                best = index;
-            } else if (logits[index] > logits[second]) {
-                second = index;
+                second_value = best_value;
+                best = id;
+                best_value = value;
+            } else if (id != best && better(value, id, second_value, second)) {
+                second = id;
+                second_value = value;
             }
         }
         return {
             .token = best,
             .alternative_token = second,
-            .logit = logits[best],
+            .logit = best_value,
             .gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0,
             .wall_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count(),
@@ -1271,7 +1297,7 @@ public:
     id<MTLBuffer> temp_ids_a_{nil}, temp_ids_b_{nil}, q8_dummy_{nil};
     id<MTLBuffer> ple_embedding_{nil}, ple_projected_{nil}, ple_stream_{nil};
     id<MTLBuffer> ple_convolution_{nil};
-    id<MTLBuffer> head_logits_{nil};
+    id<MTLBuffer> head_logits_{nil}, head_candidate_values_{nil}, head_candidate_ids_{nil};
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
