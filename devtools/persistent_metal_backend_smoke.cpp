@@ -520,6 +520,10 @@ int main(int argc, char** argv) {
         if (argc != 2) {
             throw std::runtime_error("usage: qwen38-persistent-metal-backend-smoke MODEL");
         }
+        if (std::getenv("QWEN38_MEMORY_GUARD") == nullptr) {
+            throw std::runtime_error(
+                "persistent full-model tests must run through devtools/memory_guard.py");
+        }
         const qwen38::ModelManifest manifest = qwen38::ModelManifest::load(argv[1]);
         auto backend = qwen38::PersistentMetalBackend::create(manifest);
         if (!backend) throw std::runtime_error("model is not eligible for persistent Metal");
