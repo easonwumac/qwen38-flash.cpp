@@ -1,0 +1,161 @@
+# Results guide
+
+This is the compact index of retained `qwen38-flash.cpp` measurements. It
+separates production results, historical controls, specialized upper bounds,
+and rejected models. Exact prompts, hashes, distributions, and sampling rules
+remain in the linked source documents.
+
+## How to read the numbers
+
+- **PP tok/s** is prompt processing. **Decode tok/s** is generated tokens per
+  second. They are different phases and must not be combined.
+- **Single-stream** measures one request. **Aggregate** measures multiple
+  independent requests and is not per-user latency.
+- **Target-only** executes the authoritative model once per token. **MTP** is
+  speculative and depends strongly on draft acceptance.
+- A small IFBench pilot is a development gate, not a substitute for all 300
+  prompts. HumanEval scores are comparable only when the prompt/stopping
+  protocol is identical.
+- `GiB footprint` and `GB MLX peak` come from different accounting tools. They
+  are preserved as measured and should not be directly equated.
+
+Common hardware unless a source row says otherwise: Apple M5 Pro MacBook Pro,
+18 CPU cores, 64 GiB unified memory, macOS 26.5, AC power, and no active thermal
+controller.
+
+## Current production target: VQ 2.1bpw
+
+Model: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`, native packed-14 routed
+VQ, exact top-10 routing, Q8 dense backbone, checkpoint PLE, optional native Q6
+MTP sidecar, MLX 0.32.2.
+
+| Area | Protocol | Result |
+|---|---|---:|
+| Prefill | 7,091 repository tokens, same-process cold/warm | 455.45 / **519.91 PP tok/s** |
+| Prefill | 14,173 repeated repository tokens, cold/warm | 446.3 / **479.1 PP tok/s** |
+| Decode | fixed-input 64 steps, three starts | 30.55 / 30.72 / 30.59; **30.59 median** |
+| Native MTP | 64 outputs, coding fixture, 49/56 accepted | **57.94 tok/s median** |
+| 32K context | 32,024 prompt tokens, Q8 KV, MTP off | **22.68 tok/s**, 39.5 GiB |
+| IFBench | first 30, native MTP, greedy/no-thinking | **18/30 strict and loose**, 35.28 aggregate tok/s |
+| IFBench control | same first 30, target-only | **14/30 strict and loose**, 28.55 aggregate tok/s |
+| Thinking pilot | first 10, sampled xhigh bounded thinking | **8/10 strict and loose**, 28.60 aggregate tok/s |
+| Exact B=2 probe | two 64-step independent streams | **41.35 vs 30.61 aggregate tok/s (1.351x)** |
+| HTTP B=2 gate | concurrent IFBench keys 20/70 | **25.46 vs 23.76 aggregate tok/s**, byte-identical |
+
+Qualified VQ workloads peak around 36.3--39.5 GiB. The current target has not
+been requalified at 128K and no VQ 128K performance is claimed.
+
+Sources: [README current evaluation](../README.md#current-vq-evaluation),
+[public quality evaluation](public-quality-evaluation.md#vq-21bpw-native-quality-gate),
+and [prior-research ledger](prior-research-ledger.md).
+
+## Cross-model comparison
+
+These rows answer different questions and are not one universal leaderboard.
+
+| Short name | Tested artifact or lineage |
+|---|---|
+| VQ 2.1bpw | `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`, revision `64b0fb0f98a552d91fb9abd5531d547b2e78c8a8` |
+| REAP-288 Q4 | `sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit` lineage plus the project's verified Q8/Q4 MTP and SSD-PLE assets |
+| Qwen3.8-27B Q4 | `mlx-community/Qwen3.8-27B-4bit` through the external `mlx-vlm` control runner |
+| Niwaki 99B | `neopolita/Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx` |
+| Niwaki 113B | `neopolita/Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx` |
+
+| Checkpoint | Single-stream decode | Best MTP / special decode | Quality evidence | Memory evidence | Decision |
+|---|---:|---:|---|---:|---|
+| VQ 2.1bpw | **30.59** | **57.94** native MTP | IFBench 18/30 MTP; thinking pilot 8/10 | 36.3--39.5 GiB | Current target |
+| REAP-288 Q4 | **41.06** | **71.06** automatic MTP | IFBench full 300: 34.67% strict; EvalPlus HumanEval 90.85% | 38.3--40.8 GiB | Historical reference |
+| Qwen3.8-27B Q4 | **17.21** on EvalPlus run | 50.22 aggregate in four-request smoke | Thinking IFBench subset 70%; EvalPlus HumanEval 91.46% | 17.29 GB MLX | Quality/control runner |
+| Niwaki 99B Q3/Q4 | **41.60** at retained 128K needle | **70.08** external MTP at 16K | Ten-case/broad gates insufficient for promotion | 39.30 GiB at retained 128K | Research only |
+| Niwaki 113B 3-bit | 37.76--40.07 in pilots | No qualified MTP | 0/3 corrected bounded-thinking gates | 26.6--41.3 GiB | Rejected |
+
+The 27B row is much smaller and strong on the public quality controls, but its
+single-stream decode was roughly half the historical Flash-Next REAP result.
+The current VQ checkpoint saves weight storage, not necessarily runtime
+footprint: its VQ codebooks, dense backbone, state, and Metal resources still
+place the qualified server near 40 GiB.
+
+## Quality lookup
+
+| Benchmark and protocol | VQ 2.1bpw | REAP-288 Q4 | Qwen3.8-27B Q4 | Niwaki 113B |
+|---|---:|---:|---:|---:|
+| IFBench greedy/no-thinking, first 30 | 60.00% with native MTP; 46.67% target-only | 50.00% in historical concurrent control | Not run under this exact 30-row protocol | Not run |
+| IFBench bounded thinking, first 10 | **80%** pilot | 50% on stratified 10 | **70%** on stratified 10 | Not run |
+| IFBench bounded thinking, corrected 3-case | Not the retained VQ gate | **2/3** | Not run | **0/3** |
+| IFBench full 300, greedy/no-thinking | Not run | **34.67% strict / 39.67% loose** | Published model-card result is not locally protocol-equivalent | Not run |
+| HumanEval raw completion, 164 | Not run | **81.10%** target-only Q8 PLE | **80.49%** | Not run |
+| EvalPlus no-thinking chat, 164 | Not run | **149/164 (90.85%)** | **150/164 (91.46%)** | Not run |
+
+The VQ 8/10 thinking pilot demonstrates a promising protocol, not that the VQ
+checkpoint has completed or matched the full published IFBench benchmark.
+See [public-quality-evaluation.md](public-quality-evaluation.md) for exact
+prompts, stopping rules, failure analysis, and official-score limitations.
+
+## Long-context and capacity lookup
+
+| Model | Context | Result | Status |
+|---|---:|---:|---|
+| VQ 2.1bpw | 32,024 | 22.68 decode tok/s; 39.5 GiB | Qualified VQ row |
+| Niwaki 99B | 16K | 946.24 PP / 36.36 decode tok/s | Directional rank-64-map run |
+| Niwaki 99B | 65K | 757.55 PP / 31.07 decode tok/s | Directional rank-64-map run |
+| Niwaki 99B | 128K | 671.82 PP / 29.38 decode tok/s | Research frontier; broad quality still blocks promotion |
+| Niwaki 99B | 128K | 610.74 PP / 41.60 decode tok/s | Retained persistent-Metal needle run |
+| REAP-288 | 128K | 550.92 median PP / 20.56 median decode tok/s | Three cold retrieval runs |
+| REAP-288 | 192K | 281.17 PP / 4.19 decode tok/s | Needle recovered; only 0.25 GiB over safety floor |
+| REAP-288 | 262K | no valid completion | Not claimed |
+
+The two Niwaki 128K rows use different runtime/numeric paths and are both kept
+because one represents the low-rank MLX research frontier and the other the
+persistent-Metal decode frontier. They must not be merged into a synthetic
+single result.
+
+## Throughput, caching, and specialized extremes
+
+| Feature | Retained result | Interpretation |
+|---|---:|---|
+| REAP four-request continuous decode | 45.70 aggregate vs 41.5--41.7 serial | Exact outputs; aggregate throughput, not 45 tok/s per request |
+| REAP rolling 12-request IFBench | 39.20 vs 38.35 aggregate | Only +2.23% decode; refill prefill limited end-to-end gain |
+| Exact routed-MoE four-slot gate | 45.02 vs 38.74 aggregate (**1.162x**) | 12/12 byte-identical |
+| Generated-turn RAM prefix reuse | 5,584.72 ms to 157.45 ms | About **35x** prompt reuse for the matched prefix |
+| Prompt-copy speculation | first run **113.44 tok/s**; later 92.54/87.47 | Verbatim grounded re-emission only; all 110 copy proposals accepted |
+| Mixed lifecycle soak | 256 valid + 64 malformed + SSE disconnect | Ready/idle at end; no monotonic footprint growth |
+
+## Compression and architecture experiments
+
+| Experiment | Best observed effect | Decision |
+|---|---:|---|
+| Packed Q4/g16 KV at 65K, isolated layer | 0.669 vs 0.784 ms Q8; 48 vs 68 MiB | Not promoted: 3.716% relative L2 vs 0.455% Q8 |
+| Cross-layer QSA candidate reuse | 65.6--100% recall even with an 8x pool | Rejected: insufficient exact recall |
+| Raw-margin MTP scheduling | apparent 2.1--3.7% mixed-prompt movement | Rejected: confounded by equal movement in an unchanged arm |
+| Q4 dense GDN copies | up to 35.30 tok/s from about 33.6 | Rejected: changed trajectory or exceeded memory ceiling |
+| Lossless UInt16 VQ indices | about 1% isolated gain | Rejected: about 2 GiB extra residency and no material benefit |
+
+See [DeepSeek transfer probes](deepseek-v41-transfer-probes.md) for the packed
+KV/QSA details and [prior-research ledger](prior-research-ledger.md) for the full
+accepted/rejected experiment history.
+
+## Product targets
+
+| Goal | Current evidence | Status |
+|---|---:|---|
+| PP >= 600 tok/s | VQ 519.91 warm | Open |
+| Target-only decode >= 40 tok/s | VQ 30.59 median | Open |
+| MTP decode >= 60 tok/s | VQ 57.94 retained fixture | Close; workload dependent |
+| Peak footprint <= 40 GiB | VQ 36.3--39.5 GiB qualified rows | Met |
+| Stable automatic configuration | one normal serving path | Met |
+| Public quality comparable with 27B | partial VQ IFBench only | Open |
+
+## Document map
+
+- [README current VQ evaluation](../README.md#current-vq-evaluation): full current
+  performance table and implementation notes.
+- [README historical reference evaluation](../README.md#historical-reference-evaluation):
+  REAP, 27B, Niwaki, long-context, concurrency, and soak rows.
+- [Public quality evaluation](public-quality-evaluation.md): complete local
+  quality protocol and comparison details.
+- [Benchmark contract](benchmark-contract.md): what a reproducible claim must
+  contain.
+- [Prior-research ledger](prior-research-ledger.md): exhaustive optimization
+  history and negative results.
+- [Model capabilities](model-capabilities.md): supported tensors and checkpoint
+  compatibility.

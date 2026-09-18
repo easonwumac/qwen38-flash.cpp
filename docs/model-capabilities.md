@@ -1,9 +1,10 @@
 # Model capability contract
 
-The v1 serving contract is validated on REAP-288 Q4. Other Qwen3.8 Flash Next
-checkpoints must be classified from configuration and tensor metadata before any
-weights are executed. A shared architecture name is not sufficient evidence of
-runtime compatibility.
+The production serving contract is validated on VQ-2.1bpw. REAP-288 and
+Niwaki remain implemented historical/research layouts, not automatic fallback
+models. Every Qwen3.8 Flash Next checkpoint must be classified from configuration
+and tensor metadata before any weights are executed; a shared architecture name
+is not sufficient evidence of runtime compatibility.
 
 ## Capability record
 
@@ -26,17 +27,18 @@ compatibility key and benchmark metadata.
 
 ## Known layouts
 
-| Capability | REAP-288 v1 | Niwaki 99B | Niwaki 113B |
-|---|---:|---:|---:|
-| Layers | 48 | 48 | 48 |
-| Routed experts | 288 | 512 | 512 |
-| Top-k | 10 | 10 | 10 |
-| Routed layers | 48 | 24 | 32 |
-| Expert intermediate | 640 | 448 | 448 |
-| Routed precision | affine Q4/g64 | Q3/g64 | Q3/g64 |
-| Backbone | Q4 | Q4 | Q4 |
-| PLE | external retained table | Q2/g128 | Q2/g128 |
-| MTP | optional matching L47 sidecar | not claimed | not claimed |
+| Capability | VQ-2.1bpw | REAP-288 v1 | Niwaki 99B | Niwaki 113B |
+|---|---:|---:|---:|---:|
+| Layers | 48 | 48 | 48 | 48 |
+| Routed experts | 512 | 288 | 512 | 512 |
+| Top-k | 10 | 10 | 10 | 10 |
+| Routed layers | 48 | 48 | 24 | 32 |
+| Expert intermediate | 640 | 640 | 448 | 448 |
+| Routed precision | packed-14 VQ, d2/d8 | affine Q4/g64 | Q3/g64 | Q3/g64 |
+| Backbone | Q8 | Q4 | Q4 | Q4 |
+| PLE | native VQ d8/K256 | external retained table | native Q2/g128 or external table | native Q2/g128 or external table |
+| MTP | optional native Q6 | optional matching L47 sidecar | compatible external drafter tested | no qualified sidecar |
+| Project status | production target | historical reference | research only | rejected by quality gate |
 
 The Niwaki dimensions and quality/size claims come from the checkpoint authors'
 model cards. They remain external claims until reproduced by this project:
@@ -44,43 +46,41 @@ model cards. They remain external claims until reproduced by this project:
 - <https://huggingface.co/neopolita/Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx>
 - <https://huggingface.co/neopolita/Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx>
 
-## Current incompatibilities
+## Compatibility boundaries
 
-The manifest parser already reads many dimensions dynamically, and generic MLX
-quantized matmul can represent several bit widths. Production acceleration is
+The manifest parser reads the required dimensions dynamically, and generic MLX
+quantized matmul represents several bit widths. Production acceleration remains
 more constrained:
 
-- fixed expert regions and several caches assume 288 experts;
-- the fused routed-MoE Metal kernels assume hidden 2560, intermediate 640,
-  top-10, and Q4/g64;
-- compact-qmeta kernels and sidecars encode the REAP projection geometry;
-- the decoder currently constructs routed-plus-shared MoE tensors on every
-  layer, so a shared-only layer cannot be inferred by missing tensors;
+- each fused Metal kernel is gated by the exact VQ, REAP, or Niwaki tensor
+  geometry it implements;
+- compact-qmeta kernels and sidecars encode one projection family and cannot be
+  reused merely because hidden sizes match;
+- shared-only layers, healing maps, and paired PLE are Niwaki-specific and must
+  remain outside the VQ automatic path;
 - PP route/reduce has an optimized hidden-2560/top-10 path;
-- PLE loading assumes the v1 n-gram storage contract and has not validated
-  Niwaki's Q2/g128 paired representation or healing metadata;
 - an REAP-288 MTP companion must never be attached to a differently pruned
   target merely because hidden sizes match.
 
-Consequently, neither Niwaki checkpoint is supported today. The loader must
-reject it with a capability-specific explanation before model allocation rather
-than reaching a missing-tensor error or an incompatible Metal kernel.
+Niwaki checkpoints have completed research bring-up and performance probes, but
+their quality gates did not justify promotion. They must not be advertised as
+production alternatives or selected automatically. Unknown layouts must fail
+with a capability-specific explanation before an incompatible kernel runs.
 
-## Promotion sequence
+## Promotion sequence for another checkpoint
 
-1. Obtain an explicitly authorized local checkpoint or metadata-only fixture.
-2. Add a manifest-only fixture that proves the full capability record and all
+1. Add a manifest-only fixture that proves the full capability record and all
    fail-closed diagnostics without loading weights.
-3. Implement shared-only decoder layers and dynamic per-layer tensor inventory.
-4. Route Q3/g64 expert projections through a correctness-first generic MLX path;
+2. Route new expert projections through a correctness-first generic MLX path;
    optimized REAP Q4 kernels must remain gated by their exact predicates.
-5. Implement and independently verify Q2/g128 PLE lookup, paired storage and
-   healing-map semantics against the checkpoint's own loader.
-6. Pass component oracles, tokenizer/chat parity, full first-token parity,
+3. Implement and independently verify its PLE, attention, healing, and MTP
+   semantics against the checkpoint's own reference loader.
+4. Pass component oracles, tokenizer/chat parity, full first-token parity,
    serial generation, tool calls, cancellation and long-context retrieval.
-7. Measure cold/warm PP, decode distribution, footprint and page behavior under
-   the same benchmark contract. Only then add a named optimized profile.
+5. Measure cold/warm PP, decode distribution, footprint and page behavior under
+   the same benchmark contract. Only then consider it for the single automatic
+   production path.
 
-Niwaki support must not change the REAP-288 API semantics, stable defaults, cache
-format, or release claims. A generic fallback is acceptable for correctness
-bring-up but is not a performance promotion.
+Research-model support must not change VQ API semantics, stable defaults, cache
+formats, or release claims. A generic fallback is acceptable for correctness
+bring-up but is not a performance or product promotion.

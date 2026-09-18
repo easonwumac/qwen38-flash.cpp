@@ -11,6 +11,76 @@ Metal paths from the supplied assets; there are no tuning profiles to choose.
 When the checkpoint's optional native Q6 MTP sidecar is present, the same
 automatic configuration enables it; otherwise the target runs without MTP.
 
+## Why this project
+
+- **A complete local server, not a model wrapper:** C++20 owns the 48-layer
+  forward pass, tokenizer, streaming HTTP API, speculative verification,
+  continuous batching, prefix state, cancellation, and observability.
+- **Flash-Next-specific execution:** packed VQ MoE, QSA, Gated DeltaNet,
+  Hyper-Connection, PLE n-gram lookup, native MTP, and full rollback state are
+  implemented as one runtime rather than approximated with a dense fallback.
+- **Useful within 64 GB unified memory:** the current VQ target stays around
+  36--40 GiB in the qualified workloads while retaining the complete model
+  topology and exact top-10 routing.
+- **One automatic configuration:** normal serving does not require users to
+  choose a speed, memory, long-context, or MTP profile.
+- **Evidence before claims:** quality, long-context retrieval, memory, batching,
+  and failed optimizations are retained with their protocols and limitations.
+
+## Results at a glance
+
+Current production target: `Qwen3.8-Flash-Next-VQ-2.1bpw`. These are not all
+the same workload, so each headline includes its scope.
+
+| Capability | Best qualified VQ result | What it means |
+|---|---:|---|
+| Warm prompt processing | **519.91 PP tok/s** | 7,091-token repository prompt, MTP/cache off |
+| Target-only decode | **30.59 tok/s** median | fixed-input 64-step steady decode |
+| Native MTP decode | **57.94 tok/s** median | 64-token high-acceptance coding fixture; 49/56 drafts accepted |
+| Non-thinking IFBench | **18/30 (60.00%)** | native MTP, official strict and loose scoring |
+| Bounded-thinking IFBench pilot | **8/10 (80%)** | sampled xhigh pilot; not the full 300 prompts |
+| 32K context | **22.68 decode tok/s** | Q8 KV, needle/output preserved, 39.5 GiB peak |
+| Memory envelope | **36.3--39.5 GiB** | qualified VQ rows above; workload dependent |
+| Two independent decode streams | **1.351x aggregate** | exact 64-step model probe, 41.35 vs 30.61 tok/s |
+
+The project targets 600 PP tok/s, 40 target-only decode tok/s, and 60 MTP
+tok/s under 40 GiB. The memory target is met, native MTP approaches 60 on a
+favorable workload, and the two single-request speed targets remain open.
+
+## Tested model scorecard
+
+All rows used the Apple M5 Pro 64 GiB validation machine unless noted. A value
+is an observed result under the named protocol, not a model-wide guarantee.
+
+| Model / checkpoint | Strongest retained speed result | Retained quality result | Peak / status |
+|---|---|---|---|
+| **VQ 2.1bpw** (current target) | 519.91 warm PP; 30.59 target-only; 57.94 native MTP tok/s | IFBench 18/30 non-thinking MTP; 8/10 bounded-thinking pilot | 36.3--39.5 GiB; **supported** |
+| **REAP-288 Q4** (historical) | 757.18 warm 8K PP; 41.06 serial; 71.06 automatic MTP tok/s | IFBench full 300: 34.67% strict / 39.67% loose; EvalPlus HumanEval 149/164 | 38.3--40.8 GiB; reference only |
+| **Qwen3.8-27B Q4** (control) | 17.21 serial tok/s; four-request 64-token smoke 50.22 aggregate | IFBench thinking subset 7/10; EvalPlus HumanEval 150/164 | 17.29 GB MLX peak; external control |
+| **Niwaki 99B Q3/Q4** (research) | 128K needle: 610.74 PP / 41.60 decode; external-MTP 16K: 70.08 tok/s | Broad quality was not sufficient for promotion | 39.30 GiB at retained 128K run; research only |
+| **Niwaki 113B 3-bit** (rejected) | 37.76--40.07 tok/s in corrected three-case pilots | 0/3 bounded-thinking gates; stock control also failed to close thinking | 26.6--41.3 GiB by runtime; rejected |
+
+Specialized extremes are intentionally excluded from the main speed column:
+exact prompt-copy reached 113.44 tok/s on verbatim re-emission, and the longest
+successful capacity run reached 192K at only 4.19 decode tok/s. Neither is an
+ordinary chat-speed claim.
+
+## Results and evidence map
+
+- [Results guide](docs/results-guide.md): quickest cross-model lookup for speed,
+  quality, context, memory, batching, extremes, and open targets.
+- [Public quality evaluation](docs/public-quality-evaluation.md): IFBench,
+  HumanEval/EvalPlus, 27B controls, prompts, sampling, and comparability limits.
+- [Benchmark contract](docs/benchmark-contract.md): fixed workloads, release
+  gates, hashes, distributions, hardware, and reporting requirements.
+- [Prior-research ledger](docs/prior-research-ledger.md): accepted and rejected
+  optimizations, including negative results that should not be repeated.
+- [DeepSeek V4.1 transfer probes](docs/deepseek-v41-transfer-probes.md): Q4 KV,
+  confidence scheduling, cross-layer QSA, bounded replay, and why they were or
+  were not promoted.
+- [Model capability matrix](docs/model-capabilities.md): tensor/layout support
+  and checkpoint compatibility, separate from benchmark performance.
+
 ## Current target model
 
 - Package: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`
@@ -227,7 +297,7 @@ experiments remain in the [benchmark contract](docs/benchmark-contract.md) and
 ## Known limits
 
 - VQ currently reaches 519.91 warm PP tok/s on the retained repository prompt
-  and 30.33 tok/s on the short decode fixture. The 600 PP and 40 decode goals
+  and 30.59 tok/s on the short decode fixture. The 600 PP and 40 decode goals
   remain open.
 - VQ has not yet been requalified at 128K. Historical REAP/Niwaki long-context
   results must not be presented as VQ performance.
