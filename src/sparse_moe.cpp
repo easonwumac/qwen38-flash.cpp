@@ -169,6 +169,20 @@ std::shared_ptr<MlxMetalKernel> vq_down_reduce_kernel() {
     return kernel;
 }
 
+std::shared_ptr<MlxMetalKernel> vq_down_reduce_add_shared_kernel() {
+    static const std::shared_ptr<MlxMetalKernel> kernel = [] {
+        const char* inputs[]{
+            "x", "codes", "codebook", "cb_scales", "cb_biases", "scales",
+            "experts", "route_weights", "shared"};
+        const std::string source =
+            "#define QWEN38_VQ_ADD_SHARED 1\n" + std::string(vq_metal::down_reduce);
+        return std::make_shared<MlxMetalKernel>(
+            "qwen38_vq_down_reduce_add_shared", inputs, "y",
+            source, vq_metal::header);
+    }();
+    return kernel;
+}
+
 std::shared_ptr<MlxMetalKernel> vq_gemmseg_d8_kernel() {
     static const std::shared_ptr<MlxMetalKernel> kernel = [] {
         const char* inputs[]{
@@ -2363,19 +2377,33 @@ MlxArray SparseMoe::forward_prefill_impl(
         }};
         const int down_groups = (rows * expert_down_.output_dimension + 7) / 8;
         const std::array<int, 3> down_grid{down_groups * 256, 1, 1};
+        const char* fused_merge_env = std::getenv("QWEN38_VQ_FUSED_SHARED_MERGE");
+        const bool fused_merge = fused_merge_env != nullptr &&
+            std::string_view(fused_merge_env) == "1";
+        MlxArray shared;
+        if (fused_merge) shared = forward_shared(input);
         const MlxArray* down_inputs[]{
             &hidden, &expert_down_.weight, &down_codebook,
             &down_cb_scales, &down_cb_biases, &expert_down_.scales,
             &experts, &weights};
-        MlxArray routed = std::move(vq_down_reduce_kernel()->apply(
-            down_inputs, down_outputs, down_grid, threadgroup,
-            dtype_templates, down_templates).front());
+        const MlxArray* fused_down_inputs[]{
+            &hidden, &expert_down_.weight, &down_codebook,
+            &down_cb_scales, &down_cb_biases, &expert_down_.scales,
+            &experts, &weights, &shared};
+        MlxArray routed = std::move((fused_merge
+            ? vq_down_reduce_add_shared_kernel()->apply(
+                fused_down_inputs, down_outputs, down_grid, threadgroup,
+                dtype_templates, down_templates)
+            : vq_down_reduce_kernel()->apply(
+                down_inputs, down_outputs, down_grid, threadgroup,
+                dtype_templates, down_templates)).front());
         if (timings != nullptr) {
             routed.eval();
             timings->down_reduce_ms = elapsed_ms(down_started);
         }
+        if (fused_merge) return routed;
         const auto shared_started = Clock::now();
-        MlxArray shared = forward_shared(input);
+        shared = forward_shared(input);
         if (timings != nullptr) {
             shared.eval();
             timings->shared_expert_ms = elapsed_ms(shared_started);

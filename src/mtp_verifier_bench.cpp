@@ -84,6 +84,40 @@ int main(int argc, char** argv) {
             return qwen38::verify_mtp_target_layer_major_reference(model, current, drafts, origin);
         };
 
+        if (std::getenv("QWEN38_BENCH_VQ_FUSED_SHARED_MERGE") != nullptr) {
+            static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "1", 1));
+            static_cast<void>(setenv("QWEN38_VQ_FUSED_SHARED_MERGE", "0", 1));
+            static_cast<void>(measure(layer_major));
+            static_cast<void>(setenv("QWEN38_VQ_FUSED_SHARED_MERGE", "1", 1));
+            static_cast<void>(measure(layer_major));
+            static_cast<void>(setenv("QWEN38_VQ_FUSED_SHARED_MERGE", "0", 1));
+            static_cast<void>(measure(layer_major));
+            const Sample control_a = measure(layer_major);
+            static_cast<void>(setenv("QWEN38_VQ_FUSED_SHARED_MERGE", "1", 1));
+            const Sample candidate_a = measure(layer_major);
+            const Sample candidate_b = measure(layer_major);
+            static_cast<void>(setenv("QWEN38_VQ_FUSED_SHARED_MERGE", "0", 1));
+            const Sample control_b = measure(layer_major);
+            if (control_a.tokens != candidate_a.tokens ||
+                control_a.tokens != candidate_b.tokens ||
+                control_a.tokens != control_b.tokens) {
+                throw std::runtime_error(
+                    "fused shared merge changed verifier tokens: control=" +
+                    format_tokens(control_a.tokens) + " candidate=" +
+                    format_tokens(candidate_a.tokens));
+            }
+            const double control_ms =
+                (control_a.milliseconds + control_b.milliseconds) / 2.0;
+            const double candidate_ms =
+                (candidate_a.milliseconds + candidate_b.milliseconds) / 2.0;
+            std::cout << "{\"depth\":" << depth << ",\"rows\":" << depth + 1
+                      << ",\"control_ms\":" << control_ms
+                      << ",\"candidate_ms\":" << candidate_ms
+                      << ",\"speedup\":" << control_ms / candidate_ms
+                      << ",\"token_parity\":true}\n";
+            return EXIT_SUCCESS;
+        }
+
         static_cast<void>(measure(serial));
         static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "0", 1));
         static_cast<void>(measure(layer_major));
@@ -96,9 +130,13 @@ int main(int argc, char** argv) {
         static_cast<void>(setenv("QWEN38_BATCH_VERIFY_HEAD", "0", 1));
         const Sample control_b = measure(layer_major);
         const Sample serial_b = measure(serial);
-        if (serial_a.tokens != control_a.tokens || serial_a.tokens != control_b.tokens ||
-            serial_a.tokens != candidate_a.tokens || serial_a.tokens != candidate_b.tokens ||
-            serial_a.tokens != serial_b.tokens) {
+        const bool token_parity =
+            serial_a.tokens == control_a.tokens && serial_a.tokens == control_b.tokens &&
+            serial_a.tokens == candidate_a.tokens && serial_a.tokens == candidate_b.tokens &&
+            serial_a.tokens == serial_b.tokens;
+        const bool allow_token_drift =
+            std::getenv("QWEN38_ALLOW_VERIFIER_TOKEN_DRIFT") != nullptr;
+        if (!token_parity && !allow_token_drift) {
             throw std::runtime_error(
                 "interleaved verifier benchmark lost token parity: serial_a=" +
                 format_tokens(serial_a.tokens) + " control_a=" +
@@ -148,7 +186,7 @@ int main(int argc, char** argv) {
             std::cout << layer_ms[layer];
         }
         std::cout << "]}"
-                  << ",\"parity\":true}\n";
+                  << ",\"parity\":" << (token_parity ? "true" : "false") << "}\n";
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "qwen38-mtp-verifier-bench: " << error.what() << '\n';

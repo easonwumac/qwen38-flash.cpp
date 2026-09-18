@@ -652,7 +652,15 @@ inline constexpr std::string_view down_reduce = R"metal(
                 }
             }
         }
-        if (lane == 0) y[(size_t)batch * OUT + row] = (T)routed;
+        if (lane == 0) {
+            const size_t output_index = (size_t)batch * OUT + row;
+            const T routed_value = (T)routed;
+#ifdef QWEN38_VQ_ADD_SHARED
+            y[output_index] = (T)((float)routed_value + (float)shared[output_index]);
+#else
+            y[output_index] = routed_value;
+#endif
+        }
         return;
     }
     float routed = 0.0f;
@@ -727,7 +735,15 @@ inline constexpr std::string_view down_reduce = R"metal(
             routed += route_weights[batch * SLOTS + slot] * (float)((T)acc);
         }
     }
-    if (lane == 0) y[(size_t)batch * OUT + row] = (T)routed;
+    if (lane == 0) {
+        const size_t output_index = (size_t)batch * OUT + row;
+        const T routed_value = (T)routed;
+#ifdef QWEN38_VQ_ADD_SHARED
+        y[output_index] = (T)((float)routed_value + (float)shared[output_index]);
+#else
+        y[output_index] = routed_value;
+#endif
+    }
 )metal";
 
 } // namespace qwen38::vq_metal
