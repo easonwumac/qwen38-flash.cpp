@@ -204,6 +204,105 @@ inline constexpr std::string_view packed_attention_q8 = R"metal(
     }
 )metal";
 
+// Affine Q4 K/V research variant. Eight channels share one packed uint word;
+// scale and bias retain the Q8 path's 64-channel grouping. This lets the
+// guarded layer probe measure direct selected-row consumption without first
+// materializing a full BF16 cache.
+inline constexpr std::string_view packed_attention_q4 = R"metal(
+    constexpr uint TILE = uint(TILE_SIZE);
+    constexpr uint DIMS_PER_LANE = D / 32;
+    constexpr uint QUERY_HEADS_PER_KV = HQ / HK;
+    constexpr uint PACKED_D = D / 8;
+    constexpr uint GROUPS = D / QGROUP;
+    const uint total_count = uint(total);
+    const uint tid = thread_position_in_threadgroup.x;
+    const uint lane = thread_index_in_simdgroup;
+    const uint simd = simdgroup_index_in_threadgroup;
+    const uint row = threadgroup_position_in_grid.y;
+    const uint kv_head = threadgroup_position_in_grid.z;
+    const bool active = simd < QUERY_HEADS_PER_KV;
+    const uint query_head = kv_head * QUERY_HEADS_PER_KV + simd;
+    const uint query_base = (query_head * uint(R) + row) * uint(D);
+    float q[DIMS_PER_LANE];
+    float acc[DIMS_PER_LANE];
+    for (uint component = 0; component < DIMS_PER_LANE; ++component) {
+        q[component] = active
+            ? float(query[query_base + lane * DIMS_PER_LANE + component]) : 0.0f;
+        acc[component] = 0.0f;
+    }
+    float running_max = -metal::numeric_limits<float>::infinity();
+    float running_sum = 0.0f;
+
+    threadgroup T shared_k[TILE * D];
+    threadgroup T shared_v[TILE * D];
+    for (uint tile_start = 0; tile_start < uint(S); tile_start += TILE) {
+        constexpr uint TILE_WORDS = TILE * PACKED_D;
+        for (uint offset = tid; offset < 2 * TILE_WORDS; offset += uint(TG)) {
+            const bool load_value = offset >= TILE_WORDS;
+            const uint local = load_value ? offset - TILE_WORDS : offset;
+            const uint slot = local / PACKED_D;
+            const uint packed_channel = local % PACKED_D;
+            const uint selected_slot = tile_start + slot;
+            const bool selected_valid = selected_slot < uint(S) &&
+                valid[row * uint(S) + selected_slot];
+            uint quantized = 0;
+            float s = 0.0f;
+            float b = 0.0f;
+            if (selected_valid) {
+                const uint token = uint(indices[row * uint(S) + selected_slot]);
+                const size_t vector = size_t(kv_head) * size_t(total_count) + token;
+                const size_t word_index = vector * PACKED_D + packed_channel;
+                quantized = load_value ? vw[word_index] : kw[word_index];
+                const size_t group_index =
+                    vector * GROUPS + packed_channel / (uint(QGROUP) / 8);
+                s = float(load_value ? vs[group_index] : ks[group_index]);
+                b = float(load_value ? vb[group_index] : kb[group_index]);
+            }
+            const uint shared_base = slot * uint(D) + packed_channel * 8;
+            for (uint component = 0; component < 8; ++component) {
+                T loaded = selected_valid
+                    ? T(float((quantized >> (component * 4)) & 15u) * s + b)
+                    : T(0);
+                if (load_value) shared_v[shared_base + component] = loaded;
+                else shared_k[shared_base + component] = loaded;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const uint tile_count = min(TILE, uint(S) - tile_start);
+        for (uint slot = 0; slot < tile_count; ++slot) {
+            const uint selected_slot = tile_start + slot;
+            if (!active || !valid[row * uint(S) + selected_slot]) continue;
+            float partial = 0.0f;
+            const uint shared_base = slot * uint(D) + lane * DIMS_PER_LANE;
+            for (uint component = 0; component < DIMS_PER_LANE; ++component) {
+                partial += q[component] * float(shared_k[shared_base + component]);
+            }
+            const float score = simd_sum(partial) * float(scale);
+            const float next_max = max(running_max, score);
+            const float alpha = isfinite(running_max)
+                ? metal::exp(running_max - next_max) : 0.0f;
+            const float probability = metal::exp(score - next_max);
+            running_sum = running_sum * alpha + probability;
+            for (uint component = 0; component < DIMS_PER_LANE; ++component) {
+                acc[component] = acc[component] * alpha +
+                    probability * float(shared_v[shared_base + component]);
+            }
+            running_max = next_max;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (active) {
+        const float inverse_sum = running_sum > 0.0f ? 1.0f / running_sum : 0.0f;
+        const uint output_base = (row * uint(HQ) + query_head) * uint(D);
+        for (uint component = 0; component < DIMS_PER_LANE; ++component) {
+            output[output_base + lane * DIMS_PER_LANE + component] =
+                T(acc[component] * inverse_sum);
+        }
+    }
+)metal";
+
 inline constexpr std::string_view sample_queries = R"metal(
     const uint index = thread_position_in_grid.x;
     if (index >= uint(H * GROUPS * D)) return;
