@@ -134,6 +134,33 @@ See [DeepSeek transfer probes](deepseek-v41-transfer-probes.md) for the packed
 KV/QSA details and [prior-research ledger](prior-research-ledger.md) for the full
 accepted/rejected experiment history.
 
+## VQ expert pruning
+
+Both conservative VQ pruning paths were already tested with routing masks before
+top-k. Mask tests keep all 512 physical experts resident, so they establish
+model behavior but not RAM savings.
+
+| Test | Unpruned VQ | Public REAP-384 map | VQ-aware REAP-448 v1 | VQ-aware REAP-448 v2 |
+|---|---:|---:|---:|---:|
+| IFBench first 30, non-thinking strict | 14/30 | 13/30 | **15/30** | not rerun |
+| IFBench first 30, non-thinking loose | 14/30 | 14/30 | **15/30** | not rerun |
+| IFBench bounded-thinking keys 0,10,...,90 | **8/10** | 7/10 | 5/10 | 6/10 |
+| EvalPlus HumanEval chat, 164 | **145/164** | 140/164 | skipped after thinking gate | skipped |
+| Fixed-input decode | about 30.33--30.61 tok/s | about 30.45 | **30.61** | not rerun |
+| Physical saving | none in mask test | theoretical 7.783 GiB checkpoint reduction | theoretical 3.892 GiB checkpoint reduction | same geometry |
+
+REAP-448 v1 used 16,526 effective calibration tokens from held-out IFBench
+keys 100--299. V2 added 13,103 generated reasoning/final tokens and changed 517
+removed layer-expert choices, but recovered only one of the three lost thinking
+cases. Both had zero request errors. The larger 448 pool performing worse than
+the public 384 map on thinking shows that calibration coverage, not retained
+expert count alone, controls the loss.
+
+Decision: do not repeat uniform 448 or export either map. Revisit only with a
+substantially broader independent agentic/coding/reasoning calibration corpus
+and layer-sensitive budgets. Pruning does not address target-only decode while
+top-10 activated experts remain unchanged.
+
 ## Product targets
 
 | Goal | Current evidence | Status |

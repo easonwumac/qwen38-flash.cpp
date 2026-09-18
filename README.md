@@ -65,6 +65,12 @@ exact prompt-copy reached 113.44 tok/s on verbatim re-emission, and the longest
 successful capacity run reached 192K at only 4.19 decode tok/s. Neither is an
 ordinary chat-speed claim.
 
+VQ expert pruning has also already been tested. A public REAP-384 mask reduced
+EvalPlus HumanEval from 145/164 to 140/164. Two independently calibrated
+VQ-aware REAP-448 maps reduced the bounded-thinking gate from 8/10 to 5/10 and
+6/10 while leaving fixed decode at 30.61 tok/s. No physical pruned checkpoint
+was exported; both directions are rejected in the [results guide](docs/results-guide.md#vq-expert-pruning).
+
 ## Results and evidence map
 
 - [Results guide](docs/results-guide.md): quickest cross-model lookup for speed,
