@@ -140,14 +140,14 @@ Both conservative VQ pruning paths were already tested with routing masks before
 top-k. Mask tests keep all 512 physical experts resident, so they establish
 model behavior but not RAM savings.
 
-| Test | Unpruned VQ | Public REAP-384 map | VQ-aware REAP-448 v1 | VQ-aware REAP-448 v2 |
-|---|---:|---:|---:|---:|
-| IFBench first 30, non-thinking strict | 14/30 | 13/30 | **15/30** | not rerun |
-| IFBench first 30, non-thinking loose | 14/30 | 14/30 | **15/30** | not rerun |
-| IFBench bounded-thinking keys 0,10,...,90 | **8/10** | 7/10 | 5/10 | 6/10 |
-| EvalPlus HumanEval chat, 164 | **145/164** | 140/164 | skipped after thinking gate | skipped |
-| Fixed-input decode | about 30.33--30.61 tok/s | about 30.45 | **30.61** | not rerun |
-| Physical saving | none in mask test | theoretical 7.783 GiB checkpoint reduction | theoretical 3.892 GiB checkpoint reduction | same geometry |
+| Test | Unpruned VQ | Public REAP-384 map | VQ-aware REAP-448 v1 | VQ-aware REAP-448 v2 | VQ-aware HOPE-384 |
+|---|---:|---:|---:|---:|---:|
+| IFBench first 30, non-thinking strict | **14/30** | 13/30 | **15/30** | not rerun | 12/30 |
+| IFBench first 30, non-thinking loose | **14/30** | **14/30** | **15/30** | not rerun | 12/30 |
+| IFBench bounded-thinking keys 0,10,...,90 | **8/10** | 7/10 | 5/10 | 6/10 | skipped after first-30 gate |
+| EvalPlus HumanEval chat, 164 | **145/164** | 140/164 | skipped after thinking gate | skipped | skipped after first-30 gate |
+| Decode evidence | about 30.33--30.61 fixed-input tok/s | about 30.45 fixed-input | **30.61 fixed-input** | not rerun | 28.85 aggregate IFBench decode |
+| Physical saving | none in mask test | theoretical 7.783 GiB checkpoint reduction | theoretical 3.892 GiB checkpoint reduction | same geometry | none; exporter rejected |
 
 REAP-448 v1 used 16,526 effective calibration tokens from held-out IFBench
 keys 100--299. V2 added 13,103 generated reasoning/final tokens and changed 517
@@ -156,10 +156,16 @@ cases. Both had zero request errors. The larger 448 pool performing worse than
 the public 384 map on thinking shows that calibration coverage, not retained
 expert count alone, controls the loss.
 
-Decision: do not repeat uniform 448 or export either map. Revisit only with a
-substantially broader independent agentic/coding/reasoning calibration corpus
-and layer-sensitive budgets. Pruning does not address target-only decode while
-top-10 activated experts remain unchanged.
+The later HOPE experiment used 41,900 independent calibration tokens and
+conditional pairwise expert contributions. HOPE-384 alone passed the 3-case
+gate, but fell to 12/30 on the expanded first-30 set. HOPE-448 and HOPE-288
+already failed the 3-case gate at 2/3. The runtime masks retained every weight,
+and unchanged top-10 work produced no useful speed signal.
+
+Decision: do not repeat these uniform pruning runs or export any map. Revisit
+only with a substantially broader independent agentic/coding/reasoning
+calibration corpus and layer-sensitive budgets. Pruning does not address
+target-only decode while top-10 activated experts remain unchanged.
 
 ## Product targets
 
