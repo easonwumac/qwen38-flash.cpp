@@ -648,6 +648,13 @@ The implementation order is deliberately narrow:
   width-four VQ while using exact pairs for the other blocks. Conditions:
   Qwen3.8-Flash-Next-VQ-2.1bpw, exact top-10, greedy, thinking/MTP off for the
   recurrent test, M5 Pro 64 GiB, no active thermal control, directional sample.
+  A rolling HTTP check on the deliberately imbalanced IFBench keys 13, 20, 70,
+  and 100 kept all four response files byte-identical, raised aggregate decode
+  from 27.29 to 28.04 tok/s (+2.8%), and reduced evaluation wall time from
+  14.13 to 13.12 seconds (-7.2%) at the same 36.8 GiB peak. The smaller product
+  gain is expected because three requests finish far earlier than key 70, so
+  the server spends little time at width four. Protocol: concurrency four,
+  rolling refill, greedy, thinking/MTP/prefix cache off, max 512 tokens.
 - A custom one-thread GPU top-10 scan intended to replace MLX `argpartition`
   reduced single-request decode from 31.25 to 11.61 tok/s and changed the token
   trajectory. Serializing 5,120 comparisons per layer is much worse than the
