@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-19 — VQ v2 compatibility
+
+- Support the upstream mixed d8/packed-14 and d4/packed-8 checkpoint in segmented
+  prefill; extend exact-order slot-packed down reduction to d4.
+- Preserve checkpoint FP16 codebooks for v2. v1 retains its existing numeric
+  policy. Reject d4/mixed weights in the opt-in legacy persistent backend before
+  creating its GPU resources.
+- Clean Release build and 8/8 CTest pass with both model tokenizers. Add nine
+  segmented CPU-oracle cases and 24 exact slot-packed/scalar comparisons.
+- Stage the pinned v2 assets independently, verify all 141 large-file hashes,
+  and regenerate the optional Q4 draft head from v2's Q8 target head.
+- Full-model qualification is in progress; **v1 remains the
+  qualified daily model and its scores are not v2 results**.
+
+Details: [VQ v2 upgrade](docs/vq-v2-upgrade-2026-09-19.md).
+
 ## 2026-09-19 — Daily-use closeout
 
 - Adopt the existing VQ 2.1bpw automatic configuration for daily use. Native Q6

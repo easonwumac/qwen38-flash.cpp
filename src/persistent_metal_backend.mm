@@ -1683,6 +1683,34 @@ std::unique_ptr<PersistentMetalBackend> PersistentMetalBackend::create(
         "language_model.model.layers.2.mlp.switch_mlp.gate_proj") != nullptr;
     const char* enable_vq = std::getenv("QWEN38_PERSISTENT_VQ");
     if (vq && (enable_vq == nullptr || std::string_view(enable_vq) != "1")) return nullptr;
+    if (vq) {
+        // These experimental pipelines implement homogeneous d2 or d8 layers,
+        // not v2's d4/mixed projections. Reject before allocating GPU resources;
+        // an old environment override must not reinterpret packed-8 as packed-14.
+        for (std::size_t layer = 0; layer < manifest.config().layer_count; ++layer) {
+            const std::string base = "language_model.model.layers." +
+                std::to_string(layer) + ".mlp.switch_mlp.";
+            const auto* gate = manifest.vector_quantization_for(base + "gate_proj");
+            const auto* up = manifest.vector_quantization_for(base + "up_proj");
+            const auto* down = manifest.vector_quantization_for(base + "down_proj");
+            const auto matches = [&](const VectorQuantizationSpec* spec) {
+                return gate != nullptr && spec != nullptr &&
+                    spec->vector_dimension == gate->vector_dimension &&
+                    spec->packed_bits == gate->packed_bits &&
+                    spec->codebook_size == gate->codebook_size && spec->group_size == 64;
+            };
+            const bool legacy_geometry = gate != nullptr &&
+                ((gate->vector_dimension == 2 && gate->packed_bits == 0 &&
+                  gate->codebook_size == 256) ||
+                 (gate->vector_dimension == 8 && gate->packed_bits == 14 &&
+                  gate->codebook_size == 16384));
+            if (!legacy_geometry || !matches(gate) || !matches(up) || !matches(down)) {
+                throw std::runtime_error(
+                    "persistent Metal VQ does not support d4/mixed geometry; "
+                    "unset QWEN38_PERSISTENT_VQ to use the automatic MLX/Metal path");
+            }
+        }
+    }
     return std::unique_ptr<PersistentMetalBackend>(
         new PersistentMetalBackend(std::make_unique<Impl>(manifest, shared_weights)));
 }

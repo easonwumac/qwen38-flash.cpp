@@ -40,6 +40,12 @@ compatibility key and benchmark metadata.
 | MTP | optional native Q6 | optional matching L47 sidecar | compatible external drafter tested | no qualified sidecar |
 | Project status | production target | historical reference | research only | rejected by quality gate |
 
+VQ v2 also supports d4/K256 packed-8 and mixed d8 gate/up + d4 down in the
+automatic MLX/Metal path. It keeps the table's dimensions, expert count, routing,
+backbone and PLE, but has a separate, pending qualification record. The opt-in
+legacy persistent backend rejects its mixed geometry.
+[Exact revision and upgrade checks](vq-v2-upgrade-2026-09-19.md).
+
 The Niwaki dimensions and quality/size claims come from the checkpoint authors'
 model cards. They remain external claims until reproduced by this project:
 

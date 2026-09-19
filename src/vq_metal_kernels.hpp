@@ -9,8 +9,8 @@ inline constexpr std::string_view header = R"metal(
 using namespace metal;
 )metal";
 
-// Segmented-tile VQ GEMM for the Flash-Next d2/K256 direct-U8 and d8/K16384
-// packed-14 down projections. Each sorted route writes its FP16 result in sorted
+// Segmented-tile VQ GEMM for Flash-Next d2/K256 direct-U8, d4/K256 packed-8,
+// and d8/K16384 packed-14 projections. Each route writes its FP16 result in sorted
 // order; a compact follow-up kernel applies route weights and restores rows.
 // The design is adapted from VQLab's checkpoint-bundled VQ runtime, distributed
 // under the Qwen Community License 1.0; see NOTICE and
@@ -84,6 +84,12 @@ inline constexpr std::string_view gemmseg_d8 = R"metal(
                 weight_tile[column + 5][weight_row] = (half)(scale * (float)high.y);
                 weight_tile[column + 6][weight_row] = (half)(scale * (float)high.z);
                 weight_tile[column + 7][weight_row] = (half)(scale * (float)high.w);
+            } else if constexpr (D == 4) {
+                const half4 value = codebook4[code];
+                weight_tile[column][weight_row] = (half)(scale * (float)value.x);
+                weight_tile[column + 1][weight_row] = (half)(scale * (float)value.y);
+                weight_tile[column + 2][weight_row] = (half)(scale * (float)value.z);
+                weight_tile[column + 3][weight_row] = (half)(scale * (float)value.w);
             } else {
                 const device half2* codebook2 = (const device half2*)codebook;
                 const half2 value = codebook2[code];
@@ -244,6 +250,12 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
                 weight_tile[column + 5][weight_row] = (half)(gate_scale * (float)high.y);
                 weight_tile[column + 6][weight_row] = (half)(gate_scale * (float)high.z);
                 weight_tile[column + 7][weight_row] = (half)(gate_scale * (float)high.w);
+            } else if constexpr (D == 4) {
+                const half4 value = gate_codebook4[code];
+                weight_tile[column][weight_row] = (half)(gate_scale * (float)value.x);
+                weight_tile[column + 1][weight_row] = (half)(gate_scale * (float)value.y);
+                weight_tile[column + 2][weight_row] = (half)(gate_scale * (float)value.z);
+                weight_tile[column + 3][weight_row] = (half)(gate_scale * (float)value.w);
             } else {
                 const device half2* codebook2 = (const device half2*)gate_codebook;
                 const half2 value = codebook2[code];
@@ -302,6 +314,12 @@ inline constexpr std::string_view gemmseg_gate_up_d8 = R"metal(
                 weight_tile[column + 5][weight_row] = (half)(up_scale * (float)high.y);
                 weight_tile[column + 6][weight_row] = (half)(up_scale * (float)high.z);
                 weight_tile[column + 7][weight_row] = (half)(up_scale * (float)high.w);
+            } else if constexpr (D == 4) {
+                const half4 value = up_codebook4[code];
+                weight_tile[column][weight_row] = (half)(up_scale * (float)value.x);
+                weight_tile[column + 1][weight_row] = (half)(up_scale * (float)value.y);
+                weight_tile[column + 2][weight_row] = (half)(up_scale * (float)value.z);
+                weight_tile[column + 3][weight_row] = (half)(up_scale * (float)value.w);
             } else {
                 const device half2* codebook2 = (const device half2*)up_codebook;
                 const half2 value = codebook2[code];
@@ -586,12 +604,14 @@ inline constexpr std::string_view down_reduce = R"metal(
     const uint groups = IN / GROUP;
     const uint spg = GROUP / D;
     const uint nsub = IN / D;
-    // The packed d8 down projection has ten independent routed experts but
+    // The packed d8/d4 down projection has ten independent routed experts but
     // only ten quant groups per expert. Spread three slots across the SIMD
     // group so 30 lanes perform useful codebook work, then shuffle each
     // slot's groups back to lanes 0..9 before the original simd_sum. This
     // preserves the reduction and route-weight order exactly.
-    if constexpr (BITS == 14 && D == 8 && GROUP == 64 && SLOTS == 10) {
+#ifndef QWEN38_VQ_TEST_SCALAR_DOWN
+    if constexpr (((BITS == 14 && D == 8) || (BITS == 8 && D == 4)) &&
+                  GROUP == 64 && IN == 640 && SLOTS == 10) {
         float routed = 0.0f;
         constexpr uint slots_per_wave = 3;
         for (uint slot_base = 0; slot_base < SLOTS; slot_base += slots_per_wave) {
@@ -620,7 +640,7 @@ inline constexpr std::string_view down_reduce = R"metal(
                     ulong value = (ulong)(packed_words[word] >> shift);
                     if (shift + BITS > 32)
                         value |= (ulong)packed_words[word + 1] << (32 - shift);
-                    const uint code = (uint)(value & 0x3ffful);
+                    const uint code = (uint)(value & ((1ul << BITS) - 1ul));
                     const uint xb = (batch * SLOTS + slot) * IN +
                         (group * spg + local) * D;
                     const uint cb = code * D;
@@ -663,6 +683,7 @@ inline constexpr std::string_view down_reduce = R"metal(
         }
         return;
     }
+#endif
     float routed = 0.0f;
     for (uint slot = 0; slot < SLOTS; ++slot) {
         const uint expert = (uint)experts[batch * SLOTS + slot];

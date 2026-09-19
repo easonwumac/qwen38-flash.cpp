@@ -8,6 +8,12 @@
 #include <vector>
 
 void run_quantization_geometry_tests() {
+    QWEN38_CHECK(qwen38::supports_segmented_vq(2, 0));
+    QWEN38_CHECK(qwen38::supports_segmented_vq(4, 8));
+    QWEN38_CHECK(qwen38::supports_segmented_vq(8, 14));
+    QWEN38_CHECK(!qwen38::supports_segmented_vq(4, 14));
+    QWEN38_CHECK(!qwen38::supports_segmented_vq(8, 8));
+    QWEN38_CHECK(!qwen38::supports_segmented_vq(3, 8));
     const std::array<int, 2> q4_weight{2560, 320};
     const std::array<int, 2> q3_weight{2560, 240};
     const std::array<int, 2> q8_weight{2560, 640};
@@ -68,4 +74,12 @@ void run_quantization_geometry_tests() {
         rejected_short = true;
     }
     QWEN38_CHECK(rejected_short);
+
+    // V2 down uses 160 byte-aligned codes per row, without the v1 padded tail.
+    std::vector<std::uint32_t> packed8(qwen38::packed_vq_word_count(160, 8));
+    for (std::size_t i = 0; i < 160; ++i)
+        packed8[i / 4] |= static_cast<std::uint32_t>((i * 17 + 255) % 256) << ((i % 4) * 8);
+    QWEN38_CHECK(packed8.size() == 40);
+    for (std::size_t i = 0; i < 160; ++i)
+        QWEN38_CHECK(qwen38::unpack_vq_code(packed8, i, 8) == (i * 17 + 255) % 256);
 }

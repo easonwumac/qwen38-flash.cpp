@@ -2039,13 +2039,11 @@ MlxArray SparseMoe::forward_prefill_impl(
         }
 
         const bool segmented_geometry =
-            (expert_gate_.vector_dimension == 8 && expert_gate_.packed_bits == 14) ||
-            (expert_gate_.vector_dimension == 2 && expert_gate_.packed_bits == 0);
+            supports_segmented_vq(expert_gate_.vector_dimension, expert_gate_.packed_bits) &&
+            supports_segmented_vq(expert_down_.vector_dimension, expert_down_.packed_bits);
         const bool use_gemmseg = rows >= 128 && segmented_geometry &&
             expert_up_.vector_dimension == expert_gate_.vector_dimension &&
             expert_up_.packed_bits == expert_gate_.packed_bits &&
-            expert_down_.vector_dimension == expert_gate_.vector_dimension &&
-            expert_down_.packed_bits == expert_gate_.packed_bits &&
             expert_gate_.group_size == 64 && expert_up_.group_size == 64 &&
             expert_down_.group_size == 64 &&
             expert_gate_.input_dimension == expert_up_.input_dimension &&

@@ -7,6 +7,15 @@
 
 namespace qwen38 {
 
+// Geometries with complete weight-tile reconstruction in the segmented kernels.
+// Gate/up must match each other, but down can use a different supported geometry.
+[[nodiscard]] constexpr bool supports_segmented_vq(
+    const int dimension, const int packed_bits) noexcept {
+    return (dimension == 2 && packed_bits == 0) ||
+        (dimension == 4 && packed_bits == 8) ||
+        (dimension == 8 && packed_bits == 14);
+}
+
 [[nodiscard]] int infer_affine_quantization_bits(
     std::span<const int> packed_weight_shape,
     std::span<const int> scale_shape,

@@ -10,6 +10,10 @@ this is the best retained tested configuration, not a proven hardware limit.
 [Closeout and verification](docs/daily-use-2026-09-19.md) ·
 [Changelog](CHANGELOG.md) · [All model comparisons](docs/results-guide.md)
 
+The newer mixed-d4/d8 **VQ v2 checkpoint is supported but not yet qualified**.
+The scorecard below is still v1; do not transfer its scores to v2.
+[Upgrade status and checks](docs/vq-v2-upgrade-2026-09-19.md)
+
 ## What this delivers
 
 - Packed-VQ expert execution without expanding the whole model into dense weights.
