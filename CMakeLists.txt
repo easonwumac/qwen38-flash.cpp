@@ -298,6 +298,9 @@ if(QWEN38_MLXC_INCLUDE_DIR OR QWEN38_MLX_LIBRARY_DIR)
             target_compile_options(qwen38_inference PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
         endif()
         target_link_libraries(qwen38-server PRIVATE qwen38_inference)
+        add_executable(qwen38-runtime-ab-probe devtools/runtime_ab_probe.cpp)
+        target_link_libraries(qwen38-runtime-ab-probe PRIVATE qwen38_inference)
+        set_target_properties(qwen38-runtime-ab-probe PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
         add_executable(qwen38-mtp-cache-probe devtools/mtp_cache_probe.cpp)
         target_link_libraries(qwen38-mtp-cache-probe PRIVATE qwen38_inference)
         set_target_properties(qwen38-mtp-cache-probe PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
@@ -329,6 +332,7 @@ if(QWEN38_BUILD_TESTS)
         tests/mtp_depth_policy_test.cpp
         tests/mtp_lifecycle_test.cpp
         tests/ngram_test.cpp
+        tests/qsa_checkpoint_test.cpp
         tests/quantization_geometry_test.cpp
         tests/runtime_test.cpp
         tests/safetensors_test.cpp

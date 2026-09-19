@@ -130,6 +130,15 @@ int main(int argc, char** argv) {
         std::vector<qwen38::MoeVerifyTimings> verify_timings;
         std::vector<qwen38::MoeDecodeTimings> decode_timings;
         std::vector<float> values;
+        const char* raw_toggle = std::getenv("QWEN38_MOE_BENCH_TOGGLE");
+        const std::string toggle_name = raw_toggle == nullptr ? "" : raw_toggle;
+        const char* toggle = raw_toggle == nullptr ? nullptr : toggle_name.c_str();
+        if (toggle != nullptr && (!toggle_name.starts_with("QWEN38_") ||
+                toggle_name.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos)) {
+            throw std::runtime_error("benchmark toggle must be a QWEN38_ runtime switch");
+        }
+        std::vector<float> reference_values;
+        std::vector<double> control_times, candidate_times;
         int iterations = profile_components || profile_verify || profile_decode ? 21 : 6;
         if (const char* raw_iterations = std::getenv("QWEN38_MOE_SMOKE_ITERATIONS")) {
             const unsigned long parsed = std::stoul(raw_iterations);
@@ -139,7 +148,12 @@ int main(int argc, char** argv) {
             }
             iterations = static_cast<int>(parsed);
         }
+        if (toggle != nullptr && iterations < 8) {
+            throw std::runtime_error("interleaved A/B requires at least eight iterations");
+        }
         for (int iteration = 0; iteration < iterations; ++iteration) {
+            const bool candidate = iteration % 4 == 1 || iteration % 4 == 2;
+            if (toggle != nullptr) static_cast<void>(::setenv(toggle, candidate ? "1" : "0", 1));
             const auto started = std::chrono::steady_clock::now();
             qwen38::MoePrefillTimings components;
             qwen38::MoeVerifyTimings verify_components;
@@ -156,6 +170,19 @@ int main(int argc, char** argv) {
             values = output.astype(MLX_FLOAT32).to_float32();
             timings.push_back(std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count());
+            if (toggle != nullptr) {
+                if (iteration == 0) reference_values = values;
+                if (values.size() != reference_values.size() || !std::equal(
+                        values.begin(), values.end(), reference_values.begin(),
+                        [](const float a, const float b) {
+                            return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+                        })) {
+                    throw std::runtime_error("interleaved MoE A/B changed output bits");
+                }
+                if (iteration >= 4) {
+                    (candidate ? candidate_times : control_times).push_back(timings.back());
+                }
+            }
             if (profile_components) component_timings.push_back(components);
             if (profile_verify) verify_timings.push_back(verify_components);
             if (profile_decode) decode_timings.push_back(decode_components);
@@ -255,6 +282,21 @@ int main(int argc, char** argv) {
                   << ",\"prefill_tps\":"
                   << 1000.0 * static_cast<double>(rows) / warm[warm.size() / 2]
                   << ",\"open_shards\":" << tensors.open_shard_count();
+        if (toggle != nullptr) {
+            const auto print_times = [](const std::vector<double>& samples) {
+                std::cout << '[';
+                for (std::size_t i = 0; i < samples.size(); ++i) {
+                    if (i != 0) std::cout << ',';
+                    std::cout << samples[i];
+                }
+                std::cout << ']';
+            };
+            std::cout << ",\"ab\":{\"exact_bits\":true,\"warmups_per_variant\":2,\"control_ms\":";
+            print_times(control_times);
+            std::cout << ",\"candidate_ms\":";
+            print_times(candidate_times);
+            std::cout << '}';
+        }
         if (rows > 1 && std::getenv("QWEN38_MOE_ROW_PARITY") != nullptr) {
             std::cout << ",\"row_parity_max_abs\":" << row_parity_max_abs;
         }

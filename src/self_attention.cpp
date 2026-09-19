@@ -4,6 +4,7 @@
 #endif
 
 #include "qwen38/quantization_geometry.hpp"
+#include "qwen38/qsa_checkpoint.hpp"
 
 #include "gdn_metal_kernels.hpp"
 #include "qsa_metal_kernels.hpp"
@@ -1167,13 +1168,10 @@ void SelfAttention::copy_qsa_checkpoint(
     if (token_count == 0) return;
     const int index_dimension = dimension(indexer_head_dimension_, "indexer dimension");
     const std::vector<int> strides{1, 1, 1};
-    if (complete.qsa_raw_start > token_count) {
-        throw std::runtime_error("QSA checkpoint predates the retained raw window");
-    }
-    const std::size_t window = qsa_raw_window();
-    const std::size_t checkpoint_start = window == 0
-        ? complete.qsa_raw_start
-        : std::max(complete.qsa_raw_start, token_count > window ? token_count - window : 0);
+    const auto plan = plan_qsa_checkpoint(
+        complete.token_count, complete.qsa_pooled_count, complete.qsa_raw_start,
+        token_count, indexer_compress_ratio_, qsa_raw_window());
+    const std::size_t checkpoint_start = plan.raw_start;
     checkpoint.qsa_raw_keys = complete.qsa_raw_keys.slice(
         std::vector<int>{0, coordinate(
             checkpoint_start - complete.qsa_raw_start, "QSA checkpoint raw start"), 0},
@@ -1181,18 +1179,16 @@ void SelfAttention::copy_qsa_checkpoint(
             token_count - complete.qsa_raw_start, "QSA checkpoint"), index_dimension},
         strides);
     checkpoint.qsa_raw_start = checkpoint_start;
-    const std::size_t complete_blocks = token_count / indexer_compress_ratio_;
-    const std::size_t selection_limit = indexer_budget_ / indexer_compress_ratio_;
-    const std::size_t blocks = complete_blocks > selection_limit
-        ? std::min(complete_blocks, complete.qsa_pooled_count)
-        : 0;
+    const std::size_t blocks = plan.pooled_blocks;
+    checkpoint.qsa_pooled_count = blocks;
     if (blocks != 0) {
         checkpoint.qsa_pooled_keys = complete.qsa_pooled_keys.slice(
             std::vector<int>{0, 0, 0},
             std::vector<int>{1, dimension(blocks, "QSA checkpoint blocks"),
                              index_dimension},
             strides);
-        checkpoint.qsa_pooled_count = blocks;
+    } else {
+        checkpoint.qsa_pooled_keys = MlxArray{};
     }
 }
 

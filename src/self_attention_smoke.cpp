@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -55,9 +56,19 @@ qwen38::SelfAttentionState snapshot(const qwen38::SelfAttentionState& state) {
     result.position_base = state.position_base;
     result.qsa_pooled_count = state.qsa_pooled_count;
     result.qsa_raw_start = state.qsa_raw_start;
+    result.kv_q8 = state.kv_q8;
+    result.kv_q8_cold_tokens = state.kv_q8_cold_tokens;
+    if (state.kv_q8) {
+        result.key_weights = state.key_weights.share();
+        result.key_scales = state.key_scales.share();
+        result.key_biases = state.key_biases.share();
+        result.value_weights = state.value_weights.share();
+        result.value_scales = state.value_scales.share();
+        result.value_biases = state.value_biases.share();
+    }
     if (state.token_count != 0) {
-        result.keys = state.keys.share();
-        result.values = state.values.share();
+        if (state.keys.get().ctx != nullptr) result.keys = state.keys.share();
+        if (state.values.get().ctx != nullptr) result.values = state.values.share();
         result.qsa_raw_keys = state.qsa_raw_keys.share();
     }
     if (state.qsa_pooled_count != 0) {
@@ -79,6 +90,115 @@ double cosine(const std::vector<float>& left, const std::vector<float>& right) {
         right_norm += static_cast<double>(right[index]) * right[index];
     }
     return dot / std::sqrt(left_norm * right_norm);
+}
+
+void check_equal(const qwen38::MlxArray& left, const qwen38::MlxArray& right,
+                 const char* what) {
+    const auto a = left.astype(MLX_FLOAT32).to_float32();
+    const auto b = right.astype(MLX_FLOAT32).to_float32();
+    if (left.shape() != right.shape() || a.size() != b.size() || !std::equal(
+            a.begin(), a.end(), b.begin(), [](const float x, const float y) {
+                return std::bit_cast<std::uint32_t>(x) == std::bit_cast<std::uint32_t>(y);
+            })) {
+        throw std::runtime_error(std::string("QSA rollback parity failed: ") + what);
+    }
+}
+
+void check_qsa_state(const qwen38::SelfAttentionState& bounded,
+                     const qwen38::SelfAttentionState& reference,
+                     const std::size_t ratio) {
+    if (bounded.token_count != reference.token_count ||
+        bounded.qsa_pooled_count != reference.qsa_pooled_count ||
+        bounded.qsa_raw_start < reference.qsa_raw_start ||
+        bounded.qsa_raw_start > bounded.qsa_pooled_count * ratio) {
+        throw std::runtime_error("QSA rollback metadata parity failed");
+    }
+    if (bounded.qsa_pooled_count != 0) {
+        check_equal(bounded.qsa_pooled_keys, reference.qsa_pooled_keys, "pooled keys");
+    }
+    const auto shape = reference.qsa_raw_keys.shape();
+    const auto suffix = reference.qsa_raw_keys.slice(
+        std::vector<int>{0, static_cast<int>(bounded.qsa_raw_start - reference.qsa_raw_start), 0},
+        shape, std::vector<int>{1, 1, 1});
+    check_equal(bounded.qsa_raw_keys, suffix, "raw suffix");
+}
+
+int qsa_rollback_smoke(qwen38::MlxTensorStore& tensors, qwen38::SelfAttention& layer,
+                       const qwen38::MlxArray& input, const qwen38::MlxArray& next) {
+    if (std::getenv("QWEN38_MEMORY_GUARD") == nullptr) {
+        throw std::runtime_error("QSA rollback smoke requires memory_guard.py");
+    }
+    static_cast<void>(qwen38::MlxArray::set_cache_limit(64ULL * 1024ULL * 1024ULL));
+    static_cast<void>(::setenv("QWEN38_SDPA_PREFILL", "1", 1));
+    static_cast<void>(::setenv("QWEN38_SDPA_DECODE", "1", 1));
+    static_cast<void>(::setenv("QWEN38_BATCH_SDPA_VERIFY", "1", 1));
+    static_cast<void>(::setenv("QWEN38_BATCH_Q8_VERIFY", "1", 1));
+    const auto ratio = tensors.manifest().config().indexer_compress_ratio;
+    const auto configured_budget = tensors.manifest().config().indexer_budget;
+    const std::array<int, 3> repetitions{1, 5, 1};
+    auto batch = input.tile(repetitions);
+    std::size_t cases = 0;
+    std::size_t continuations = 0;
+    for (const bool q8 : {false, true}) {
+        static_cast<void>(::setenv("QWEN38_KV_CACHE", q8 ? "q8" : "bf16", 1));
+        static_cast<void>(::setenv("QWEN38_KV_Q8_MIN_TOKENS", "2049", 1));
+        static_cast<void>(::setenv("QWEN38_QSA_PACKED_MIN_TOKENS", "0", 1));
+        for (const auto budget : {std::size_t{512}, configured_budget}) {
+            static_cast<void>(::setenv("QWEN38_QSA_DECODE_BUDGET",
+                                      std::to_string(budget).c_str(), 1));
+            const std::array<std::size_t, 4> contexts = q8
+                ? std::array<std::size_t, 4>{2051, 2052, 2060, 2112}
+                : std::array<std::size_t, 4>{budget - 8, budget - 1, budget + 1, budget + 32};
+            for (const auto tokens : contexts) {
+                static_cast<void>(::setenv("QWEN38_QSA_RAW_WINDOW", "0", 1));
+                qwen38::SelfAttentionState origin;
+                for (std::size_t offset = 0; offset < tokens;) {
+                    const auto rows = std::min(std::size_t{256}, tokens - offset);
+                    auto prompt = input.tile(std::array<int, 3>{1, static_cast<int>(rows), 1});
+                    layer.forward_prefill(prompt, origin).eval();
+                    offset += rows;
+                }
+                // For post-frontier contexts also exercise an already pooled origin.
+                layer.forward_decode(next, origin).eval();
+                if (q8 && !origin.kv_q8) throw std::runtime_error("Q8 smoke not engaged");
+                auto reference_origin = snapshot(origin);
+                auto bounded_origin = snapshot(origin);
+                std::vector<qwen38::SelfAttentionState> reference, bounded;
+                auto expected = layer.forward_verify(batch, reference_origin, reference);
+                expected.eval();
+                static_cast<void>(::setenv("QWEN38_QSA_RAW_WINDOW", "64", 1));
+                auto actual = layer.forward_verify(batch, bounded_origin, bounded);
+                check_equal(actual, expected, "verifier output");
+                if (reference.size() != 5 || bounded.size() != 5) {
+                    throw std::runtime_error("QSA rollback checkpoint count mismatch");
+                }
+                // Zero accepted drafts still commits the current-token row. Include
+                // the untouched origin as well as every partial/full accepted prefix.
+                for (std::size_t accepted = 0; accepted <= 5; ++accepted) {
+                    auto control = snapshot(accepted == 0 ? reference_origin : reference[accepted - 1]);
+                    auto candidate = snapshot(accepted == 0 ? bounded_origin : bounded[accepted - 1]);
+                    check_qsa_state(candidate, control, ratio);
+                    for (int step = 0; step < 12; ++step) {
+                        const auto& token_input = step % 2 == 0 ? next : input;
+                        static_cast<void>(::setenv("QWEN38_QSA_RAW_WINDOW", "0", 1));
+                        auto control_output = layer.forward_decode(token_input, control);
+                        control_output.eval();
+                        static_cast<void>(::setenv("QWEN38_QSA_RAW_WINDOW", "64", 1));
+                        auto candidate_output = layer.forward_decode(token_input, candidate);
+                        check_equal(candidate_output, control_output, "continuation output");
+                        check_qsa_state(candidate, control, ratio);
+                        ++continuations;
+                    }
+                }
+                ++cases;
+                qwen38::MlxArray::clear_cache();
+            }
+        }
+    }
+    std::cout << "{\"qsa_rollback_cases\":" << cases
+              << ",\"continuation_steps\":" << continuations
+              << ",\"exact_output_and_qsa_state\":true}\n";
+    return EXIT_SUCCESS;
 }
 
 int qsa_smoke(
@@ -169,8 +289,8 @@ int qsa_smoke(
     for (std::size_t row = 0; row < ratio; ++row) {
         const std::size_t row_tokens = budget + row + 1;
         const std::size_t row_blocks = row_tokens / ratio;
-        const std::size_t expected_row_pooled =
-            row_blocks > budget / ratio ? row_blocks : 0;
+        const std::size_t expected_row_pooled = std::min(
+            row_blocks, checkpoints.back().qsa_pooled_count);
         if (checkpoints[row].token_count != budget + row + 1 ||
             checkpoints[row].qsa_raw_keys.shape()[1] !=
                 static_cast<int>(row_tokens - checkpoints[row].qsa_raw_start) ||
@@ -255,7 +375,7 @@ int qsa_smoke(
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
-        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY [--qsa]\n";
+        std::cerr << "Usage: " << argv[0] << " MODEL_DIRECTORY [--qsa|--qsa-rollback]\n";
         return EXIT_FAILURE;
     }
     try {
@@ -267,6 +387,9 @@ int main(int argc, char** argv) {
             "language_model.model.layers.3.self_attn",
             tensors.manifest().config());
         if (argc == 3) {
+            if (std::string_view(argv[2]) == "--qsa-rollback") {
+                return qsa_rollback_smoke(tensors, layer, first_input, second_input);
+            }
             if (std::string_view(argv[2]) != "--qsa") {
                 throw std::runtime_error("unknown self-attention smoke mode");
             }

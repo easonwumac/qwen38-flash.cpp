@@ -1,5 +1,19 @@
 # Public quality evaluation
 
+## September 19 protocol correction
+
+For self-contained code-generation prompts, score the **complete** sanitized
+program, including imports and helpers. Do not remove those definitions and
+reattach only a function body. `evaluate_humaneval.py --artifact` now implements
+this contract, verifies sandbox/interpreter startup, and rejects incomplete or
+duplicate task sets. EvalPlus 0.3.1 supplies sanitization; the tests in this
+mode are original HumanEval, **not HumanEval+**.
+
+The [VQ qualification report](vq-quality-preserving-2026-09-19.md#full-quality-qualification)
+contains the fresh target-only control, corrected MTP rollout and historical
+27B rescore. Earlier tables retain their original protocols and must not be
+silently merged into the new comparison.
+
 ## IFBench
 
 The first public quality gate uses the official single-turn IFBench OOD test

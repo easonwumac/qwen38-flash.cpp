@@ -23,6 +23,10 @@ Common hardware unless a source row says otherwise: Apple M5 Pro MacBook Pro,
 18 CPU cores, 64 GiB unified memory, macOS 26.5, AC power, and no active thermal
 controller.
 
+Latest follow-up: [September 19 qualification](vq-quality-preserving-2026-09-19.md)
+documents a QSA rollback correctness fix, full-program HumanEval scoring,
+and rejected PP/decode experiments. No new speed record is claimed by that fix.
+
 ## Current production target: VQ 2.1bpw
 
 Model: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`, native packed-14 routed
@@ -35,6 +39,7 @@ MTP sidecar, MLX 0.32.2.
 | Prefill | 14,173 repeated repository tokens, cold/warm | 446.3 / **479.1 PP tok/s** |
 | Decode | fixed-input 64 steps, three starts | 30.55 / 30.72 / 30.59; **30.59 median** |
 | Native MTP | 64 outputs, coding fixture, 49/56 accepted | **57.94 tok/s median** |
+| HumanEval original tests | 164 full-program chat tasks, greedy/no-thinking, max 768 | **146/164 MTP**, 46.93 aggregate decode tok/s; **147/164 target-only**; [protocol](vq-quality-preserving-2026-09-19.md#full-quality-qualification) |
 | 32K context | 32,024 prompt tokens, Q8 KV, MTP off | **22.68 tok/s**, 39.5 GiB |
 | IFBench | first 30, native MTP, greedy/no-thinking | **18/30 strict and loose**, 35.28 aggregate tok/s |
 | IFBench control | same first 30, target-only | **14/30 strict and loose**, 28.55 aggregate tok/s |
@@ -42,7 +47,7 @@ MTP sidecar, MLX 0.32.2.
 | Exact B=2 probe | two 64-step independent streams | **41.35 vs 30.61 aggregate tok/s (1.351x)** |
 | HTTP B=2 gate | concurrent IFBench keys 20/70 | **25.46 vs 23.76 aggregate tok/s**, byte-identical |
 
-Qualified VQ workloads peak around 36.3--39.5 GiB. The current target has not
+Qualified VQ workloads peak around 36.3--39.6 GiB. The current target has not
 been requalified at 128K and no VQ 128K performance is claimed.
 
 Sources: [README current evaluation](../README.md#current-vq-evaluation),
@@ -63,7 +68,7 @@ These rows answer different questions and are not one universal leaderboard.
 
 | Checkpoint | Single-stream decode | Best MTP / special decode | Quality evidence | Memory evidence | Decision |
 |---|---:|---:|---|---:|---|
-| VQ 2.1bpw | **30.59** | **57.94** native MTP | IFBench 18/30 MTP; thinking pilot 8/10 | 36.3--39.5 GiB | Current target |
+| VQ 2.1bpw | **30.59** | **57.94** native MTP fixture; **46.93** full HumanEval run | HumanEval 146/164 MTP; IFBench best-retained 18/30; thinking pilot 8/10 | 36.3--39.6 GiB | Current target |
 | REAP-288 Q4 | **41.06** | **71.06** automatic MTP | IFBench full 300: 34.67% strict; EvalPlus HumanEval 90.85% | 38.3--40.8 GiB | Historical reference |
 | Qwen3.8-27B Q4 | **17.21** on EvalPlus run | 50.22 aggregate in four-request smoke | Thinking IFBench subset 70%; EvalPlus HumanEval 91.46% | 17.29 GB MLX | Quality/control runner |
 | Niwaki 99B Q3/Q4 | **41.60** at retained 128K needle | **70.08** external MTP at 16K | Ten-case/broad gates insufficient for promotion | 39.30 GiB at retained 128K | Research only |
@@ -84,7 +89,8 @@ place the qualified server near 40 GiB.
 | IFBench bounded thinking, corrected 3-case | Not the retained VQ gate | **2/3** | Not run | **0/3** |
 | IFBench full 300, greedy/no-thinking | Not run | **34.67% strict / 39.67% loose** | Published model-card result is not locally protocol-equivalent | Not run |
 | HumanEval raw completion, 164 | Not run | **81.10%** target-only Q8 PLE | **80.49%** | Not run |
-| EvalPlus no-thinking chat, 164 | Not run | **149/164 (90.85%)** | **150/164 (91.46%)** | Not run |
+| HumanEval complete-program chat, original tests, 164 | **147/164 target-only; 146/164 native MTP** | Not rescored | **150/164 historical rescore** | Not run |
+| Historical EvalPlus no-thinking chat runner, 164 | See complete-program row | **149/164 (90.85%)** | **150/164 (91.46%)** | Not run |
 
 The VQ 8/10 thinking pilot demonstrates a promising protocol, not that the VQ
 checkpoint has completed or matched the full published IFBench benchmark.

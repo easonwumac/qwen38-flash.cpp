@@ -11,6 +11,17 @@ reference evidence, not measurements of this C++ runtime.
 
 ## Established reference points
 
+### September 19 VQ quality-preserving follow-up
+
+The [qualification report](vq-quality-preserving-2026-09-19.md) records a
+promoted QSA rollback-frontier fix and rejected register lookahead,
+producer/consumer prefill pipelining, compact-codebook vector loads, and
+elapsed-time MTP depth selection. The kernel candidates preserve layer bits
+but do not improve complete MoE latency; the depth policy regresses creative
+generation. Their prototypes were removed, not left as production switches.
+The fix preserves causal pools before retiring raw keys and is a correctness
+improvement, not a newly claimed PP/decode speed record.
+
 | Artifact | Controlled result | What it establishes | Limitation |
 |---|---:|---|---|
 | Historical P124 stock split-K prefill | 759--766 tok/s at 256 tokens; 930--937 at 512; 1107--1113 at 1024 | This originally motivated recovering the layer-major whole-prompt path | Historical worktree/result only: a September 1 same-model rerun on retained mlx-serve 26.8.10 reached 564.8 warm PP, so the old 759--1113 figures are not a currently reproducible product baseline |
@@ -278,7 +289,7 @@ directions. New code should build on them.
 | Serial verification of each draft | Re-reads the target for every proposal | Architecturally rejected; verification must stay batched |
 | Per-row evaluation inside a layer-major verifier | 125.12 ms versus 94.62 ms serial, or 0.756x | Rejected; S synchronization barriers per layer erase locality gains |
 | Naive concatenated proposal tree | GDN, PLE, QSA, KV, and MTP-head state are branch-dependent | Not a small optimization; only revisit as a true branch-local runtime |
-| Full target execution on ANE | Unsupported operators, conversion overhead, and memory movement dominate | Not on the critical path; ANE may be reconsidered only for a measured isolated subgraph |
+| Full target execution on ANE | Architectural feasibility concern, not a measured ANE benchmark: packed-14 VQ, dynamic routing and recurrent state do not directly map to the existing Core ML path; conversion and inter-engine synchronization must be included | No ANE backend or speed claim. Reconsider a measured fixed-shape subgraph; see the [ANE scope and official references](vq-quality-preserving-2026-09-19.md#ane-feasible-research-boundary-not-a-measured-optimization) |
 | More aggressive model quantization without a quality gate | It changes the requested quality target and does not remove dispatch/state costs | Not a substitute for runtime optimization |
 | BF16 QSA indexer score GEMM | A guarded 65,536-token one-layer smoke initially appeared faster, but counterposed runs measured 42.17 ms for FP32 and 44.29 ms for BF16 with dense/packed cosine 1.0 | Rejected and removed. The first result was thermal/order noise; lower precision did not reduce the dependency-matched critical path |
 | Fused Metal QSA ReLU/head reduction | Two counterposed one-layer 65,536-token smokes improved packed QSA from a 42.16 ms mean to 40.96 ms (about 2.9%) with cosine 1.0. The authoritative 65,560-token full-model run retained the `b344d80e...` first-token hash but reached only 446.66 PP tok/s at 39.8 GiB peak, below the retained 463.55--473.62 four-layer-qmeta path | Rejected and removed. Replacing two MLX graph nodes with a custom dispatch reduced the isolated operation but worsened complete lazy-graph scheduling; do not promote selection microbenchmarks without the full prefill gate |

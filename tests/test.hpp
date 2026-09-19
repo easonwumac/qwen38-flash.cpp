@@ -31,6 +31,7 @@ void run_model_manifest_tests();
 void run_mtp_depth_policy_tests();
 void run_mtp_lifecycle_tests();
 void run_ngram_tests();
+void run_qsa_checkpoint_tests();
 void run_quantization_geometry_tests();
 void run_runtime_tests();
 void run_safetensors_tests();

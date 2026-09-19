@@ -37,15 +37,17 @@ the same workload, so each headline includes its scope.
 | Warm prompt processing | **519.91 PP tok/s** | 7,091-token repository prompt, MTP/cache off |
 | Target-only decode | **30.59 tok/s** median | fixed-input 64-step steady decode |
 | Native MTP decode | **57.94 tok/s** median | 64-token high-acceptance coding fixture; 49/56 drafts accepted |
+| Full HumanEval coding run | **146/164 (89.02%); 46.93 aggregate decode tok/s** | native MTP, non-thinking, original tests, max 768; zero HTTP errors; [protocol](docs/vq-quality-preserving-2026-09-19.md#full-quality-qualification) |
 | Non-thinking IFBench | **18/30 (60.00%)** | native MTP, official strict and loose scoring |
 | Bounded-thinking IFBench pilot | **8/10 (80%)** | sampled xhigh pilot; not the full 300 prompts |
 | 32K context | **22.68 decode tok/s** | Q8 KV, needle/output preserved, 39.5 GiB peak |
-| Memory envelope | **36.3--39.5 GiB** | qualified VQ rows above; workload dependent |
+| Memory envelope | **36.3--39.6 GiB** | qualified VQ rows above; workload dependent |
 | Two independent decode streams | **1.351x aggregate** | exact 64-step model probe, 41.35 vs 30.61 tok/s |
 
 The project targets 600 PP tok/s, 40 target-only decode tok/s, and 60 MTP
-tok/s under 40 GiB. The memory target is met, native MTP approaches 60 on a
-favorable workload, and the two single-request speed targets remain open.
+tok/s under 40 GiB. Qualified workloads meet the memory target; this is not a
+guarantee at every context length. Native MTP approaches 60 on a favorable
+workload, and the two single-request speed targets remain open.
 
 ## Tested model scorecard
 
@@ -54,7 +56,7 @@ is an observed result under the named protocol, not a model-wide guarantee.
 
 | Model / checkpoint | Strongest retained speed result | Retained quality result | Peak / status |
 |---|---|---|---|
-| **VQ 2.1bpw** (current target) | 519.91 warm PP; 30.59 target-only; 57.94 native MTP tok/s | IFBench 18/30 non-thinking MTP; 8/10 bounded-thinking pilot | 36.3--39.5 GiB; **supported** |
+| **VQ 2.1bpw** (current target) | 519.91 warm PP; 30.59 target-only; 57.94 native MTP tok/s | HumanEval 146/164 MTP, 147/164 target-only; IFBench best-retained 18/30; thinking pilot 8/10 | 36.3--39.6 GiB; **supported** |
 | **REAP-288 Q4** (historical) | 757.18 warm 8K PP; 41.06 serial; 71.06 automatic MTP tok/s | IFBench full 300: 34.67% strict / 39.67% loose; EvalPlus HumanEval 149/164 | 38.3--40.8 GiB; reference only |
 | **Qwen3.8-27B Q4** (control) | 17.21 serial tok/s; four-request 64-token smoke 50.22 aggregate | IFBench thinking subset 7/10; EvalPlus HumanEval 150/164 | 17.29 GB MLX peak; external control |
 | **Niwaki 99B Q3/Q4** (research) | 128K needle: 610.74 PP / 41.60 decode; external-MTP 16K: 70.08 tok/s | Broad quality was not sufficient for promotion | 39.30 GiB at retained 128K run; research only |
@@ -73,6 +75,9 @@ was exported; both directions are rejected in the [results guide](docs/results-g
 
 ## Results and evidence map
 
+- [September 19 VQ qualification](docs/vq-quality-preserving-2026-09-19.md):
+  QSA rollback fix, full-program HumanEval protocol, rejected speed probes,
+  and the evidence boundary for possible ANE work.
 - [Results guide](docs/results-guide.md): quickest cross-model lookup for speed,
   quality, context, memory, batching, extremes, and open targets.
 - [Public quality evaluation](docs/public-quality-evaluation.md): IFBench,
@@ -143,6 +148,9 @@ fallback checkpoints, or dependencies of the VQ path.
 - **Exact QSA raw-state retirement:** index keys are discarded after their
   four-token block has been pooled, retaining only a 64-row construction window.
   This reduces long-context selector work without changing selected tokens.
+- **Rollback-safe QSA frontier:** speculative checkpoints retain all completed
+  causal pools and never retire raw keys needed to construct the next pool,
+  including the transition between full and sparse attention.
 - **Exact Qwen Sparse Attention:** raw and pooled indexer state, causal top-block
   selection, snapshots, verifier checkpoints, and rollback remain native to the
   engine.
