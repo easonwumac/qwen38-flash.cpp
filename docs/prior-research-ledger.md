@@ -727,3 +727,24 @@ source attribution in the file and in `NOTICE`.
 | Rejected persistent whole-token handoff fusion | A prototype kept embedding, the 48-layer trunk, and LM head in one direct command-buffer flow. Same-process 128-token interleaved timing was 30.3925 ms/token fused versus 30.3486 ms control; GPU time was 29.4241 versus 29.1328 ms | The retained backend already queues its command buffers effectively. Removing the remaining host containers/waits was neutral to slightly slower and did not address the VQ trunk cost | VQ-2.1bpw, target-only greedy decode, 128 tokens, Apple M5 Pro 64 GiB; prototype removed |
 | Rejected layer-sensitive HOPE-448 physical export | Masking only layers 0, 1, 11, 12, 24, 26, 27, and 28 to 448 experts scored 16/30 IFBench versus the 14/30 unpruned control, passed the 20/70/100 thinking gate 3/3, and reached 147/164 EvalPlus HumanEval versus the recorded 145/164 control. Decode was unchanged at 28.565 versus 28.555 aggregate tok/s. A physical export removed exactly 836,239,360 bytes, but reindexing changed the numerical trajectory: two of its first ten IFBench generations hit 4,096 tokens where the mask needed 320 and 388, raising first-ten output from 8,292 to 14,350 tokens (+73.1%) | Light non-uniform pruning can preserve benchmark accuracy, but this checkpoint's 0.779 GiB saving is not worth the unstable generation length introduced by physical expert reindexing. Top-10 active work also remains unchanged, so there is no decode-speed payoff | VQ-2.1bpw, MTP/prefix cache off, exact top-10 among survivors, greedy/non-thinking except the stated thinking gate, Apple M5 Pro 64 GiB. Runtime mask, per-layer loader, and exporter prototypes removed; the rejected local checkpoint was not promoted |
 | Rejected automatic MTP-free history-copy verification | A short repeated-pattern fixture proposed 8 tokens, accepted only 2, spent 128--136 ms in two verifier rounds, then correctly disabled itself. Three enabled warm runs had a 29.817 tok/s median versus 29.845 control, and their output hash differed from serial. A longer prompt crossed the QSA frontier and failed with `QSA raw window does not cover the pooling frontier` after a partial-accept round | Exact n-gram proposal generation is cheap, but the target verifier is not: low acceptance erases any batching gain, while the current batched verifier is not serial-bit-identical and its rollback checkpoint is unsafe across this QSA boundary. Keep the existing MTP-backed, explicit context-copy path rather than enabling target-only copy automatically | VQ-2.1bpw, MTP off, greedy, 96-token short fixture at 284 prompt tokens plus a longer 675-token diagnostic, Apple M5 Pro 64 GiB; prototype removed |
+
+## September 19 VQ throughput follow-up
+
+Three quality-preserving layout/storage candidates were tested and removed:
+shared-memory padding moved complete 2,048-row MoE latency only 0.3%; flattening
+QSA heads slowed complete 32K/128K decode attention 10.1%/12.2% and left PP
+flat; retaining widened FP32 pools saved 8.7% in the 32K synthetic attention
+probe but failed the paired 32,024-token full-model gate. Three measured
+requests per arm gave 21.87 versus 21.11 median decode tok/s, aggregate 20.79
+versus 20.86, all identical 29-token outputs, 39.611 GiB combined peak.
+Do not promote this storage change from the isolated result. See the
+[report and raw distributions](vq-throughput-round2-2026-09-19.md).
+
+Additional older VQ experiments, recovered from the local September 16 plan,
+are recorded here to prevent accidental repeats:
+
+| Previously rejected experiment | Evidence | Boundary for revisiting |
+|---|---|---|
+| Exact dual-SIMD gate/up tail split | Second SIMD computes groups 32–39, scratch restores original lanes 0–7 and the same reduction. Layer-3 output bits match, but 41-iteration gate/up samples are 0.787–0.791 ms control versus 0.825–0.831 candidate | Do not add another cross-SIMD scratch barrier for this geometry |
+| OTILE64 segmented GEMM | Exact layers 2/20/47 complete MoE medians 56.70/58.15/56.74 ms versus 55.96/56.48/55.74. Down-only widening later reached 495.61 full PP versus 505.90 control | Larger tiles alone do not improve occupancy enough |
+| Bounded BF16 expert materialization | Eight-expert blocks slow 64-row layer 2 from 13.672 to 48.184 ms. Large-row isolated reuse improves, but a 638-token full-model test falls 91.8 to 38.3 PP/s, changes output, and peaks at 39.0 GiB | Must improve full-model amortization and preserve numeric policy, not just repeated single-layer GEMM |

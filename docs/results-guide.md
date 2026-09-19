@@ -140,6 +140,11 @@ See [DeepSeek transfer probes](deepseek-v41-transfer-probes.md) for the packed
 KV/QSA details and [prior-research ledger](prior-research-ledger.md) for the full
 accepted/rejected experiment history.
 
+The [September 19 follow-up](vq-throughput-round2-2026-09-19.md) also separates
+new padded-tile and QSA component measurements from paired full-model results.
+No component latency improvement should be added to this scorecard as an
+end-to-end speed claim.
+
 ## VQ expert pruning
 
 Both conservative VQ pruning paths were already tested with routing masks before

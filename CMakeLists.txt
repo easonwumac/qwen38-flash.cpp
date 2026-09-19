@@ -360,6 +360,11 @@ if(QWEN38_BUILD_TESTS)
         set_target_properties(qwen38-mlx-tests PROPERTIES BUILD_RPATH "${QWEN38_MLX_LIBRARY_DIR}")
         add_test(NAME qwen38-mlx-tests COMMAND qwen38-mlx-tests)
     endif()
+    if(Python3_Interpreter_FOUND AND TARGET qwen38-runtime-ab-probe AND TARGET qwen38-qsa-peak-probe)
+        add_test(NAME qwen38-probe-cli-tests
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime_probe_cli_test.py
+                    $<TARGET_FILE_DIR:qwen38-runtime-ab-probe>)
+    endif()
     if(TARGET qwen38_tokenizer)
         add_executable(qwen38-tokenizer-tests tests/tokenizer_test.cpp)
         target_link_libraries(qwen38-tokenizer-tests PRIVATE qwen38_tokenizer)

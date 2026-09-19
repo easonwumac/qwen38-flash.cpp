@@ -75,6 +75,9 @@ was exported; both directions are rejected in the [results guide](docs/results-g
 
 ## Results and evidence map
 
+- [September 19 throughput follow-up](docs/vq-throughput-round2-2026-09-19.md):
+  tile-layout and QSA experiments, paired long-context measurements, and
+  the distinction between component wins and full-model gains.
 - [September 19 VQ qualification](docs/vq-quality-preserving-2026-09-19.md):
   QSA rollback fix, full-program HumanEval protocol, rejected speed probes,
   and the evidence boundary for possible ANE work.

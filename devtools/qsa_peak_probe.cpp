@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
@@ -56,6 +57,11 @@ int main(int argc, char** argv) try {
         (!decode_probe && (std::string_view(argv[3]).size() != 1 ||
          argv[3][0] < '0' || argv[3][0] > '4')))
         throw std::runtime_error("invalid bounded probe configuration");
+    const char* raw_toggle = std::getenv("QWEN38_QSA_BENCH_TOGGLE");
+    const std::string toggle = raw_toggle == nullptr ? "" : raw_toggle;
+    if (!toggle.empty() && (!toggle.starts_with("QWEN38_") ||
+            toggle.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != std::string::npos))
+        throw std::runtime_error("invalid QSA benchmark switch");
     std::size_t old{};
     if (mlx_set_memory_limit(&old, 3ULL * 1024 * 1024 * 1024) != 0)
         throw std::runtime_error("allocation limit failed");
@@ -67,7 +73,7 @@ int main(int argc, char** argv) try {
     if (decode_probe) {
         if (std::getenv("QWEN38_QSA_DECODE_BUDGET") == nullptr)
             setenv("QWEN38_QSA_DECODE_BUDGET", "512", 1);
-        setenv("QWEN38_PROFILE_QSA_DECODE", "1", 1);
+        // Phase barriers are opt-in: ordinary A/B must measure the lazy graph.
     }
     unsetenv("QWEN38_QSA_TILED_SCORES");
     if (!decode_probe && argv[3][0] >= '2') {
@@ -125,7 +131,13 @@ int main(int argc, char** argv) try {
     std::vector<double> times;
     std::vector<std::size_t> peaks;
     std::uint64_t hash = 1469598103934665603ULL;
-    for (int i = 0; i < 14; ++i) {
+    std::vector<double> control_times, candidate_times;
+    std::vector<float> reference_values;
+    const int warmups = toggle.empty() ? 3 : 40;
+    const int iterations = toggle.empty() ? 14 : 160;
+    for (int i = 0; i < iterations; ++i) {
+        const bool candidate = i % 4 == 1 || i % 4 == 2;
+        if (!toggle.empty()) setenv(toggle.c_str(), candidate ? "1" : "0", 1);
         SelfAttentionState state;
         state.keys = origin.keys.share(); state.values = origin.values.share();
         state.qsa_raw_keys = origin.qsa_raw_keys.share();
@@ -154,21 +166,61 @@ int main(int argc, char** argv) try {
             std::chrono::steady_clock::now() - start).count();
         std::size_t peak{};
         if (mlx_get_peak_memory(&peak) != 0) throw std::runtime_error("peak query failed");
-        if (i >= 3) { times.push_back(ms); peaks.push_back(peak); }
-        if (i == 13) for (const auto* value : evaluated)
+        if (i >= warmups) {
+            times.push_back(ms); peaks.push_back(peak);
+            (candidate ? candidate_times : control_times).push_back(ms);
+        }
+        std::vector<float> observed;
+        if (!toggle.empty() || i == iterations - 1) for (const auto* value : evaluated)
             for (float x : value->astype(MLX_FLOAT32).to_float32()) {
                 if (!std::isfinite(x)) throw std::runtime_error("nonfinite state/output");
-                hash ^= std::bit_cast<std::uint32_t>(x); hash *= 1099511628211ULL;
+                observed.push_back(x);
+                if (i == iterations - 1) {
+                    hash ^= std::bit_cast<std::uint32_t>(x); hash *= 1099511628211ULL;
+                }
             }
+        if (!toggle.empty()) {
+            if (i == 0) reference_values = observed;
+            if (observed.size() != reference_values.size() || !std::equal(
+                    observed.begin(), observed.end(), reference_values.begin(),
+                    [](float a, float b) {
+                        return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+                    })) throw std::runtime_error("interleaved QSA A/B changed output/state bits");
+        }
     }
-    std::cout << "{\"synthetic_history\":true,\"context\":" << context
+    std::cout << std::setprecision(10)
+              << "{\"synthetic_history\":true,\"context\":" << context
               << ",\"rows\":" << (decode_probe ? 1 : 512)
+              << ",\"phase_barriers\":"
+              << (std::getenv("QWEN38_PROFILE_QSA_DECODE") != nullptr ? "true" : "false")
               << ",\"mode\":";
     if (decode_probe) std::cout << "\"decode\"";
     else std::cout << argv[3];
     std::cout << ",\"samples_ms\":[";
     for (std::size_t i = 0; i < times.size(); ++i) { if (i) std::cout << ','; std::cout << times[i]; }
     std::sort(times.begin(), times.end()); std::sort(peaks.begin(), peaks.end());
-    std::cout << "],\"median_ms\":" << times[5] << ",\"median_peak_mlx_bytes\":" << peaks[5]
-              << ",\"output_state_hash\":\"" << hash << "\"}\n";
+    const auto median = [](const auto& sorted) {
+        const std::size_t middle = sorted.size() / 2;
+        return (static_cast<double>(sorted[middle]) + sorted[(sorted.size() - 1) / 2]) / 2;
+    };
+    std::cout << (toggle.empty() ? "],\"median_ms\":" : "],\"combined_sample_median_ms\":")
+              << median(times)
+              << ",\"median_peak_mlx_bytes\":" << median(peaks)
+              << ",\"output_state_hash\":\"" << hash << "\"";
+    if (!toggle.empty()) {
+        const auto print_samples = [](const std::vector<double>& samples) {
+            for (std::size_t i = 0; i < samples.size(); ++i) {
+                if (i) std::cout << ',';
+                std::cout << samples[i];
+            }
+        };
+        std::cout << ",\"ab\":{\"switch\":\"" << toggle
+                  << "\",\"warmup_samples_per_arm\":" << warmups / 2
+                  << ",\"exact_bits\":true,\"control_ms\":[";
+        print_samples(control_times);
+        std::cout << "],\"candidate_ms\":[";
+        print_samples(candidate_times);
+        std::cout << "]}";
+    }
+    std::cout << "}\n";
 } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
