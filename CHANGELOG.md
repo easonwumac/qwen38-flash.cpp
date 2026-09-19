@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-09-19 — VQ v2 paired evaluation
+
+- Prepare existing compact d8 gate/up codebooks independently of down geometry;
+  retain original FP16 d2/d4 and wide prefill. v1 arithmetic is unchanged.
+- Invalidate the SSD state-cache namespace across this numeric-policy change.
+- Complete v2 HumanEval: 153/164 (93.29%), no HTTP errors; historical v1 is
+  146/164. Fresh paired IFBench first30 is v1 18/30 versus v2 14/30.
+- Paired warm PP: v1 526.68 / v2 535.59 tok/s; target-only short decode:
+  30.46 / 30.23; native-MTP fixture: 55.69 / 54.86. No large speed or memory win.
+- Retain both revisions, with v1 still the daily default pending selection.
+  Document the user-approved 40 GiB reclaimable-memory admission threshold;
+  runtime footprint/RSS/availability stops remain 40/38/6 GiB.
+- Diagnose three IFBench counting regressions with MTP off: v1 3/3, v2 0/3.
+  This excludes MTP alone for those cases, not full-engine numerical issues;
+  independent full-model reference parity remains unverified.
+- Final clean build and 8/8 CTest pass. Full protocols, distributions, guard
+  peaks and raw-artifact hashes are recorded; no VQ v2 long-context claim.
+
+Details: [VQ v2 evaluation](docs/vq-v2-upgrade-2026-09-19.md).
+
 ## 2026-09-19 — VQ v2 compatibility
 
 - Support the upstream mixed d8/packed-14 and d4/packed-8 checkpoint in segmented
@@ -11,8 +31,8 @@
   segmented CPU-oracle cases and 24 exact slot-packed/scalar comparisons.
 - Stage the pinned v2 assets independently, verify all 141 large-file hashes,
   and regenerate the optional Q4 draft head from v2's Q8 target head.
-- Full-model qualification is in progress; **v1 remains the
-  qualified daily model and its scores are not v2 results**.
+- This initial compatibility milestone preceded full-model evaluation above;
+  **v1's retained scores are not v2 results**.
 
 Details: [VQ v2 upgrade](docs/vq-v2-upgrade-2026-09-19.md).
 

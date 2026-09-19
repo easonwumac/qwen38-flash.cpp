@@ -495,17 +495,21 @@ SparseMoe::SparseMoe(
         expert_down_.qmeta.present();
     fused_vq_ = expert_gate_.vector_quantized && expert_up_.vector_quantized &&
         expert_down_.vector_quantized;
-    const bool d8_packed14 = fused_vq_ &&
+    const bool gate_up_d8_packed14 = fused_vq_ &&
         expert_gate_.vector_dimension == 8 && expert_gate_.packed_bits == 14 &&
-        expert_up_.vector_dimension == 8 && expert_up_.packed_bits == 14 &&
-        expert_down_.vector_dimension == 8 && expert_down_.packed_bits == 14;
-    if (d8_packed14) {
+        expert_up_.vector_dimension == 8 && expert_up_.packed_bits == 14;
+    if (gate_up_d8_packed14) {
         // Gate vectors are nearly zero-centred.  Keeping the affine scale but
         // using signed codes removes one add from their hottest decode loop.
         // Up/down retain affine U8 because the same approximation did not pass
         // the paired quality gate when applied more broadly.
         prepare_u8_codebook(expert_gate_, true);
         prepare_u8_codebook(expert_up_, false);
+    }
+    // Mixed VQ v2 layers retain the existing d8 gate/up arithmetic. A d4 down
+    // projection uses its small original FP16 table, independently of gate/up.
+    if (fused_vq_ && expert_down_.vector_dimension == 8 &&
+        expert_down_.packed_bits == 14) {
         prepare_u8_codebook(expert_down_, false);
     }
     if (experts_per_token_ != experts_per_token && !compact_qmeta_) {

@@ -42,7 +42,8 @@ compatibility key and benchmark metadata.
 
 VQ v2 also supports d4/K256 packed-8 and mixed d8 gate/up + d4 down in the
 automatic MLX/Metal path. It keeps the table's dimensions, expert count, routing,
-backbone and PLE, but has a separate, pending qualification record. The opt-in
+backbone and PLE, but has a separate evaluation record with quality trade-offs:
+153/164 HumanEval and 14/30 IFBench. v1 remains the daily default. The opt-in
 legacy persistent backend rejects its mixed geometry.
 [Exact revision and upgrade checks](vq-v2-upgrade-2026-09-19.md).
 

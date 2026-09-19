@@ -1,0 +1,106 @@
+{
+  "date": "2026-09-19",
+  "purpose": "Narrow diagnostic of three already-observed regressions, not an unbiased quality score",
+  "protocol": "Same final server binary and hardware as upgrade report; greedy, non-thinking, MTP off, all prefix caches off, max4096; one guarded engine at a time",
+  "keys": [
+    "17",
+    "19",
+    "20"
+  ],
+  "arms": {
+    "vq1": {
+      "strict_passed": 3,
+      "loose_passed": 3,
+      "cases": [
+        {
+          "key": "17",
+          "required_numbers": 2,
+          "response": "The idea that frequent hardship builds societal resilience is a complex and debated topic in sociology and psychology. While some argue that overcoming adversity can strengthen community bonds and individual coping mechanisms, others suggest that chronic stress leads to burnout, trauma, and social fragmentation rather than resilience. Resilience often depends more on the availability of support systems and resources than on the sheer volume of hardship experienced.\n\nIn this context, the number 1 represents the primary hypothesis that adversity builds strength, while the number 2 represents the counter-hypothesis that it causes damage.",
+          "finish_reason": "stop",
+          "completion_tokens": 110,
+          "mtp_proposed": 0,
+          "passed": true
+        },
+        {
+          "key": "19",
+          "required_numbers": 13,
+          "response": "1. The 2. agent 3. 4. 5. 6. 7. 8. 9. 10. 11. 12. 13.",
+          "finish_reason": "stop",
+          "completion_tokens": 44,
+          "mtp_proposed": 0,
+          "passed": true
+        },
+        {
+          "key": "20",
+          "required_numbers": 3,
+          "response": "1. Homeschooling\n2. Training\n3. Centers",
+          "finish_reason": "stop",
+          "completion_tokens": 13,
+          "mtp_proposed": 0,
+          "passed": true
+        }
+      ],
+      "guard": {
+        "exit_code": 143,
+        "minimum_available_gib": 10.062973022460938,
+        "peak_footprint_gib": 36.65840405225754,
+        "peak_rss_gib": 32.79582214355469,
+        "reason": "signal",
+        "start_available_gib": 49.90016174316406
+      }
+    },
+    "vq2": {
+      "strict_passed": 0,
+      "loose_passed": 0,
+      "cases": [
+        {
+          "key": "17",
+          "required_numbers": 2,
+          "response": "Yes, it is plausible that frequent hardship can make a society more resilient. This phenomenon is often described as \"antifragility,\" where systems gain strength from stressors, volatility, and disorder. By facing repeated challenges, a society develops stronger institutions, adaptive behaviors, and collective problem-solving skills that allow it to withstand future shocks more effectively than a society that has remained sheltered from difficulty.",
+          "finish_reason": "stop",
+          "completion_tokens": 79,
+          "mtp_proposed": 0,
+          "passed": false
+        },
+        {
+          "key": "19",
+          "required_numbers": 13,
+          "response": "The clock strikes 13.\nAgent Sarah Vance is trapped.\nShe is stuck in 1961.\nHer target is a killer.\nHe hops through time.\nHe kills in 1962.\nHe kills in 1963.\nHe kills in 1964.\nHe kills in 1965.\nHe kills in 1966.\nHe kills in 1967.\nHe kills in 1968.\nHe kills in 1969.",
+          "finish_reason": "stop",
+          "completion_tokens": 118,
+          "mtp_proposed": 0,
+          "passed": false
+        },
+        {
+          "key": "20",
+          "required_numbers": 3,
+          "response": "Align resources and goals to support the education ecosystem, enabling adaptation to the new normal through homeschooling, training, community internet centers, a Citizen Watch for Education, and LGU leaders as education champions.",
+          "finish_reason": "stop",
+          "completion_tokens": 40,
+          "mtp_proposed": 0,
+          "passed": false
+        }
+      ],
+      "guard": {
+        "exit_code": 143,
+        "minimum_available_gib": 9.824371337890625,
+        "peak_footprint_gib": 36.60423532873392,
+        "peak_rss_gib": 30.620254516601562,
+        "reason": "signal",
+        "start_available_gib": 45.5626220703125
+      }
+    }
+  },
+  "conclusion": "The three failures persist without MTP. Independent full-model reference parity has not been established; checkpoint effects and v2 engine numerical-path effects remain unresolved.",
+  "artifact_sha256": {
+    "ifbench-vq2-attribution3.jsonl": "24359f7a42249404d8495dc1b620092e32118a752148a8faabf05e87476adcb8",
+    "vq1-attribution-target3-telemetry.json": "1e156077dc10f9353456da2b865ad876ca5bba05a9d08e92071a3cefad231417",
+    "vq1-attribution-target3-eval/vq1-attribution-target3-eval_results_strict.jsonl": "950347db21fdc6b85a202be036507dae7bf61d486964216199fc0643312a6b04",
+    "vq1-attribution-target3-eval/vq1-attribution-target3-eval_results_loose.jsonl": "950347db21fdc6b85a202be036507dae7bf61d486964216199fc0643312a6b04",
+    "vq1-attribution-target-guard.json": "cfc864cd9d5589266f0ab2251e832db0a72d5753ac7a67049b9a0c5ec0b5c99e",
+    "vq2-attribution-target3-telemetry.json": "27058ad3ff1c63c5d442414e508b66e5241f088864310f63bbe3c330e88d43e2",
+    "vq2-attribution-target3-eval/vq2-attribution-target3-eval_results_strict.jsonl": "11d61b103a416e18dfb424366c4bcffccd479c797fc9071eb4807a94b4c97b28",
+    "vq2-attribution-target3-eval/vq2-attribution-target3-eval_results_loose.jsonl": "11d61b103a416e18dfb424366c4bcffccd479c797fc9071eb4807a94b4c97b28",
+    "vq2-attribution-target-guard.json": "3863a02d1c60472e2e24416463e1babfaf3cc296ea4647c521abac6719024995"
+  }
+}

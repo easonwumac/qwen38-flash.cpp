@@ -330,6 +330,10 @@ std::string cache_compatibility_key(
         }
     }
     source << "|persistent-state-io-v1";
+    // Mixed d8/d4 VQ layers now use the existing compact d8 gate/up
+    // codebooks. States computed with their previous FP16-only policy are
+    // not interchangeable, even when model files and paths are unchanged.
+    source << "|vq-codebooks-d8-s8u8-d2d4-fp16-v2";
     constexpr std::array<const char*, 24> state_environment{
         "QWEN38_PERSISTENT_METAL",
         "QWEN38_PERSISTENT_VQ",

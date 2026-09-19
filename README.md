@@ -10,9 +10,11 @@ this is the best retained tested configuration, not a proven hardware limit.
 [Closeout and verification](docs/daily-use-2026-09-19.md) ·
 [Changelog](CHANGELOG.md) · [All model comparisons](docs/results-guide.md)
 
-The newer mixed-d4/d8 **VQ v2 checkpoint is supported but not yet qualified**.
-The scorecard below is still v1; do not transfer its scores to v2.
-[Upgrade status and checks](docs/vq-v2-upgrade-2026-09-19.md)
+The newer mixed-d4/d8 **VQ v2 has been evaluated, with quality trade-offs**:
+HumanEval 153/164 versus v1's historical 146/164, but paired IFBench 14/30 versus
+18/30. Short decode and footprint are essentially unchanged. v1 remains the
+daily default pending model selection; the scorecard below is still v1.
+[Paired results and upgrade decision](docs/vq-v2-upgrade-2026-09-19.md)
 
 ## What this delivers
 

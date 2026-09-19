@@ -33,6 +33,13 @@ and rejected PP/decode experiments. No new speed record is claimed by that fix.
 
 ## Current production target: VQ 2.1bpw
 
+The upstream mixed-codebook [v2 upgrade evaluation](vq-v2-upgrade-2026-09-19.md)
+is complete for the bounded short-context suite: HumanEval 153/164 versus the
+historical v1 146/164, but fresh paired IFBench 14/30 versus 18/30. Paired warm
+PP is 535.59 versus 526.68 tok/s; short target-only decode and physical footprint
+are essentially unchanged. Both revisions are retained and v1 remains the daily
+default pending selection. The tables below remain the v1 historical scorecard.
+
 The [persistent-verifier follow-up](persistent-verifier-2026-09-19.md) was
 rejected: S=5 target verification took 84.57 ms versus 62.84 ms for the existing
 path. A native single-group QSA selector bug was fixed; production MTP and its

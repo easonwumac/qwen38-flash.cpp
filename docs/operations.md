@@ -86,6 +86,15 @@ the next poll, and a request that exceeds the budget is stopped, not completed
 with a guarantee. Do not run a second model benchmark alongside the server.
 Keep the unauthenticated listener on loopback unless a secured gateway is used.
 
+"Available" here means the macOS `free + inactive + speculative` page estimate,
+not just unused RAM. Purgeable pages can overlap inactive pages, so they are not
+added again. This remains a reclaimability heuristic: some active file-backed
+pages may also be reclaimable, and not every inactive page is immediately free.
+Do not equate model-file size, swap capacity, or `memory_pressure -Q`'s percentage
+with a guaranteed allocation budget. Inspect actual footprint and system memory
+pressure as well. A user-approved admission adjustment (40 instead of 42 GiB in
+the v2 qualification) does not remove the runtime footprint/RSS/availability stops.
+
 Treat `readyz != 200`, a nonempty `last_error`, a rising cancellation count, or a
 memory-guard exit as an operational signal. The guard exit codes are 75 for
 admission refusal, 76 for a memory limit, and 77 for an unsafe measurement
