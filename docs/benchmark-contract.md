@@ -27,16 +27,30 @@ Every result records:
 Repeated text, cached prompts, or a single high-acceptance coding prompt may be
 reported as diagnostics but cannot prove a universal acceptance gate.
 
-## Release gates
+## Daily-use acceptance and unfinished targets
 
-- Greedy output parity on committed fixtures.
+On 2026-09-19 the user accepted the existing VQ configuration for daily use and
+closed the optimization phase. See the [closeout](daily-use-2026-09-19.md).
+This is not a claim that the original performance release gates passed.
+The current VQ stretch targets are 600 PP / 40 target-only / 60 mixed-workload
+MTP tok/s under 40 GiB; they remain unfulfilled as a combined requirement.
+Earlier 45/65 decode thresholds belonged to the historical optimization plan,
+not the measured daily-use baseline. Historical REAP numbers do not qualify VQ.
+
+## Gates for future performance promotion
+
+- Greedy output/state parity on committed fixtures for numerical-preserving
+  changes. A changed numerical path must separately pass paired quality gates;
+  current batched MTP is not promised target-only token parity.
 - Quality suite does not regress from the retained reference.
-- Non-MTP controlled median is at least 45 tok/s.
-- Warm exact prefill is at least 600 prompt tok/s through 8K. 32K remains a
-  600 PP/s optimization target; larger contexts publish measured PP/TTFT and
-  memory degradation instead of extrapolating the short-context result.
-- MTP controlled median is at least 65 tok/s and p10 does not fall below the
-  non-MTP path because unprofitable verification must fall back.
+- Report paired non-MTP controlled median and p10/p90; 40 tok/s remains a target,
+  not a condition already satisfied by the accepted daily baseline.
+- Report paired cold/warm prefill with no regression on the retained corpus.
+  600 prompt tok/s through 8K and at 32K remains an optimization target; larger
+  contexts publish measured PP/TTFT and memory degradation instead of
+  extrapolating the short-context result.
+- MTP mixed-workload median targets 60 tok/s and p10 should not fall below the
+  non-MTP path; measure fallback overhead rather than assuming it is free.
 - Prefix-cache correctness and a context sweep through the maximum feasible size,
   with an explicit 262,144-token result or a measured hardware-memory limit.
 - No leaks, sanitizer errors, request corruption, or unrecovered failed state.
@@ -49,6 +63,7 @@ requires exact per-request token parity, repeatability after reversing arrival
 order, higher aggregate decode throughput, and a peak footprint below 40 GiB on
 the 64 GB validation Mac. Per-request tok/s is not presented as aggregate tok/s.
 
+The following are historical controls, not current VQ promotion evidence.
 The retained warm directional check uses REAP-288 Q4/group-64, standalone Q8
 PLE, the `speed` profile, MTP/thinking off, four distinct short prompts, and 128
 greedy output tokens each. It measured 45.70 aggregate decode tok/s versus four

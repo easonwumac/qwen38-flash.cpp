@@ -44,7 +44,11 @@ Completion requests accept a string `prompt` and a positive `max_tokens` up to
 the server's `--max-generation-tokens` limit (4096 by default). The combined
 prompt and requested generation must also fit the model context window. Chat
 requests accept a non-empty OpenAI-style `messages` array and either
-`max_completion_tokens` or `max_tokens`. The current engine is greedy-only;
+`max_completion_tokens` or `max_tokens`. Temperature zero selects greedy
+generation; sampled generation accepts `temperature`, `top_p`, `top_k` and
+`seed`. Positive-temperature sampling requires `top_k` in 1..256 and bypasses
+greedy-only MTP. Thinking defaults to temperature 1, top-p .95, top-k 20 unless
+explicitly overridden. These are request semantics, not performance profiles.
 `enable_thinking` and the mlx-serve-compatible alias `thinking` select the Qwen
 thinking template; when both are present they must agree.
 OpenAI-style `tools`, assistant `tool_calls`, and `role: "tool"` results follow

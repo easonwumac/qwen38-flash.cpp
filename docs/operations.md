@@ -2,6 +2,9 @@
 
 This runbook operates the server-only engine without modifying another local-LLM
 service. Use a distinct loopback port while validating a new build.
+The accepted checkpoint and qualification boundary are recorded in the
+[2026-09-19 daily-use baseline](daily-use-2026-09-19.md). Historical experiments
+are not alternate launch profiles.
 
 ## Build
 
@@ -11,13 +14,18 @@ cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
   -DQWEN38_MLXC_INCLUDE_DIR="$MLXC_INCLUDE_DIR" \
   -DQWEN38_MLX_LIBRARY_DIR="$MLX_LIBRARY_DIR"
 cmake --build build-release --parallel
-ctest --test-dir build-release --output-on-failure
 QWEN38_TEST_MODEL="$MODEL_DIR" \
-  ctest --test-dir build-release --output-on-failure -R qwen38-tokenizer-tests
+  ctest --test-dir build-release --output-on-failure
 ```
 
-The checkpoint must contain `config.json`, `model.safetensors.index.json`, every
-indexed shard, tokenizer files, and at least one supported n-gram table.
+The VQ daily checkpoint must contain `config.json`,
+`model.safetensors.index.json`, every indexed shard, tokenizer files, and its
+bundled VQ PLE n-gram tensors. These are mapped on demand; no BF16 PLE duplicate
+or external REAP PLE is required. Keep compatible `mtp-head-q6.safetensors` and,
+optionally, `mtp-lm-head-q4.safetensors` beside the shards for native MTP. These
+sidecars are separate assets, not necessarily included by the upstream download.
+
+For historical non-VQ layouts only:
 Row-addressable `ngram_table.bf16.aos`, affine `ngram_table.q8.aos`, and Q4
 `ngram_table.bin.aos` are detected in that precision order and read with bounded
 `pread` calls, so they remain SSD-backed. The original `ngram_table.bin`
@@ -30,11 +38,16 @@ edit the upstream shard payloads to install them.
 ## Automatic tuning
 
 The server exposes one production policy: exact top-10 routing, adaptive
-1,024-row prefill, Q8 KV after 8K, QSA after its context threshold, four-slot
-continuous batching, automatic lossless16 metadata when its sidecar is present,
-and adaptive MTP when compatible assets are present.
+2,048-row VQ prefill through 32K (smaller bounded chunks beyond that), Q8 KV after
+8K, QSA after its context threshold, four-slot continuous batching, and adaptive
+MTP when compatible assets are present. Sampled/thinking and batched requests
+may bypass MTP. The experimental persistent VQ backend is not enabled.
 Flags that remain in this runbook are resource limits or reproducibility
 controls, not alternate performance profiles.
+
+Use a fresh shell without old `QWEN38_*` research overrides; in particular, do
+not set `QWEN38_PERSISTENT_VQ=1` for daily operation. Existing environment
+overrides take precedence over automatic defaults.
 
 When a compatible MTP companion is supplied, automatic tuning probes its
 economics and falls back to serial target decode after repeated unprofitable
@@ -45,33 +58,33 @@ allocation does not fit.
 
 ```bash
 DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
-./devtools/memory_guard.py -- ./build-release/qwen38-server \
-  --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --prefix-cache-tokens 8192 \
-  --max-generation-tokens 4096
+python3 devtools/memory_guard.py \
+  --min-start-gib 42 --min-available-gib 6 \
+  --max-rss-gib 38 --max-footprint-gib 40 -- \
+  ./build-release/qwen38-server \
+  --host 127.0.0.1 --port 11438 --model "$MODEL_DIR"
+```
 
+Run the following in a second terminal:
+
+```bash
 curl -fsS http://127.0.0.1:11438/healthz
 curl -fsS http://127.0.0.1:11438/readyz
 curl -fsS http://127.0.0.1:11438/v1/status
 curl -fsS http://127.0.0.1:11438/metrics
 ```
 
-For a guarded Q8 long-context run, keep MTP and the RAM prefix cache off:
+Defaults already limit the RAM prefix cache to 8,192 tokens and generation to
+4,096 tokens. Adjust only these resource limits when needed; disabling MTP
+with `--mtp-depth off` or RAM snapshots with `--prefix-cache-tokens 0` trades
+speed/reuse for headroom. It does not qualify VQ at 128K. Historical long-context
+recipes in [Q8 KV cache](q8-kv-cache.md) apply only to their named checkpoint.
 
-```bash
-QWEN38_RESIDENT_EXPERT_RANGE= DYLD_LIBRARY_PATH="$MLX_LIBRARY_DIR" \
-./devtools/memory_guard.py --min-available-gib 6 -- \
-  ./build-release/qwen38-server \
-  --host 127.0.0.1 --port 11438 --model "$MODEL_DIR" \
-  --mtp-depth off --prefix-cache-tokens 0 \
-  --qmeta-cache-max-prompt-tokens 262144 --qmeta-cache-layers 8 \
-  --qsa-packed-min-tokens 32768 --qsa-shared-rows 4 \
-  --kv-cache q8 --kv-q8-min-tokens 65536 \
-  --kv-q8-flush-tokens 8192 \
-  --prefill-chunk 512 --prefill-chunk-fixed
-```
-
-See [Q8 KV cache](q8-kv-cache.md) for the current validation boundary.
+The guard polls process footprint/RSS and available memory. A 40 GiB stop
+threshold is not a hard allocator cap: a transient overshoot can occur before
+the next poll, and a request that exceeds the budget is stopped, not completed
+with a guarantee. Do not run a second model benchmark alongside the server.
+Keep the unauthenticated listener on loopback unless a secured gateway is used.
 
 Treat `readyz != 200`, a nonempty `last_error`, a rising cancellation count, or a
 memory-guard exit as an operational signal. The guard exit codes are 75 for
@@ -104,8 +117,9 @@ cached state and should not be part of routine health checks.
 ## Recovery
 
 1. Save `/v1/status`, `/metrics`, the startup line, guard report, and request ID.
-2. If admission was refused, close unrelated memory-heavy applications or select
-   `memory`/`long-context`; do not weaken both guard limits at once.
+2. If admission was refused, close unrelated memory-heavy applications and retry.
+   Reduce request/cache resource limits if needed; do not disable the guard or
+   silently raise the 40 GiB budget. There are no user-facing tuning profiles.
 3. If a request failed but the server remains ready, issue a one-token smoke and
    inspect `last_error` before restarting.
 4. If the server is not ready, stop it normally, verify model files and sidecars,

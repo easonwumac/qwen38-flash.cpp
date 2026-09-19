@@ -5,6 +5,10 @@ separates production results, historical controls, specialized upper bounds,
 and rejected models. Exact prompts, hashes, distributions, and sampling rules
 remain in the linked source documents.
 
+Status: the optimization phase was closed on 2026-09-19 at the user's request.
+VQ remains the daily-use baseline; no runtime defaults or historical scores
+changed in the [documentation closeout](daily-use-2026-09-19.md).
+
 ## How to read the numbers
 
 - **PP tok/s** is prompt processing. **Decode tok/s** is generated tokens per
@@ -60,7 +64,7 @@ MTP sidecar, MLX 0.32.2.
 Qualified VQ workloads peak around 36.3--39.6 GiB. The current target has not
 been requalified at 128K and no VQ 128K performance is claimed.
 
-Sources: [README current evaluation](../README.md#current-vq-evaluation),
+Sources: [detailed VQ evaluation](benchmark-history.md#current-vq-evaluation),
 [public quality evaluation](public-quality-evaluation.md#vq-21bpw-native-quality-gate),
 and [prior-research ledger](prior-research-ledger.md).
 
@@ -190,20 +194,23 @@ target-only decode while top-10 activated experts remain unchanged.
 
 ## Product targets
 
+These are deferred research targets, not pending automatic work after closeout.
+"Met" below only applies to the stated workload scope.
+
 | Goal | Current evidence | Status |
 |---|---:|---|
 | PP >= 600 tok/s | VQ 519.91 warm | Open |
 | Target-only decode >= 40 tok/s | VQ 30.59 median | Open |
-| MTP decode >= 60 tok/s | VQ 57.94 retained fixture | Close; workload dependent |
-| Peak footprint <= 40 GiB | VQ 36.3--39.5 GiB qualified rows | Met |
+| MTP decode >= 60 tok/s | VQ 57.94 retained fixture | Not met; mixed-workload target unqualified |
+| Peak footprint <= 40 GiB | VQ 36.3--39.6 GiB qualified rows | Met only on qualified workloads; not an all-context cap |
 | Stable automatic configuration | one normal serving path | Met |
 | Public quality comparable with 27B | partial VQ IFBench only | Open |
 
 ## Document map
 
-- [README current VQ evaluation](../README.md#current-vq-evaluation): full current
+- [Detailed VQ evaluation](benchmark-history.md#current-vq-evaluation): full retained
   performance table and implementation notes.
-- [README historical reference evaluation](../README.md#historical-reference-evaluation):
+- [Historical reference evaluation](benchmark-history.md#historical-reference-evaluation):
   REAP, 27B, Niwaki, long-context, concurrency, and soak rows.
 - [Public quality evaluation](public-quality-evaluation.md): complete local
   quality protocol and comparison details.
