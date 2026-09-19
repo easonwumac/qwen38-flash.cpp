@@ -348,7 +348,7 @@ kernel void vq_d8_down_reduce(
     const device uchar* codebook [[buffer(2)]],
     const device uchar* scales [[buffer(3)]],
     const device uint* experts [[buffer(4)]],
-    const device bfloat* route_weights [[buffer(5)]],
+    const device float* route_weights [[buffer(5)]],
     device bfloat* output [[buffer(6)]],
     uint group_id [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -356,7 +356,7 @@ kernel void vq_d8_down_reduce(
     constexpr uint rows = 2560, k = 640, groups = 10, words = 42;
     const uint row = group_id * 4u + simd;
     if (row >= rows) return;
-    bfloat total = bfloat(0.0f);
+    float total = 0.0f;
     for (uint slot = 0; slot < 10; ++slot) {
         const ulong matrix_row = ulong(experts[slot]) * rows + row;
         const device uchar* code_row = codes + matrix_row * words * 4u;
@@ -368,11 +368,11 @@ kernel void vq_d8_down_reduce(
         }
         dot = simd_sum(dot);
         if (lane == 0) {
-            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
-            total = bfloat(float(total) + float(weighted));
+            const float weighted = route_weights[slot] * float(bfloat(dot));
+            total += weighted;
         }
     }
-    if (lane == 0) output[row] = total;
+    if (lane == 0) output[row] = bfloat(total);
 }
 
 kernel void vq_d2_down_reduce(
@@ -381,7 +381,7 @@ kernel void vq_d2_down_reduce(
     const device uchar* codebook [[buffer(2)]],
     const device uchar* scales [[buffer(3)]],
     const device uint* experts [[buffer(4)]],
-    const device bfloat* route_weights [[buffer(5)]],
+    const device float* route_weights [[buffer(5)]],
     device bfloat* output [[buffer(6)]],
     uint group_id [[threadgroup_position_in_grid]],
     uint simd [[simdgroup_index_in_threadgroup]],
@@ -389,7 +389,7 @@ kernel void vq_d2_down_reduce(
     constexpr uint rows = 2560, k = 640, groups = 10, codes_per_row = 320;
     const uint row = group_id * 4u + simd;
     if (row >= rows) return;
-    bfloat total = bfloat(0.0f);
+    float total = 0.0f;
     for (uint slot = 0; slot < 10; ++slot) {
         const ulong matrix_row = ulong(experts[slot]) * rows + row;
         const device uchar* code_row = codes + matrix_row * codes_per_row;
@@ -401,11 +401,11 @@ kernel void vq_d2_down_reduce(
         }
         dot = simd_sum(dot);
         if (lane == 0) {
-            const bfloat weighted = bfloat(float(route_weights[slot]) * float(bfloat(dot)));
-            total = bfloat(float(total) + float(weighted));
+            const float weighted = route_weights[slot] * float(bfloat(dot));
+            total += weighted;
         }
     }
-    if (lane == 0) output[row] = total;
+    if (lane == 0) output[row] = bfloat(total);
 }
 
 kernel void vq_d8_all_gate_up(
@@ -548,7 +548,7 @@ kernel void vq_d8_all_down(
     const device uchar* codebook_scales [[buffer(3)]],
     const device uchar* codebook_biases [[buffer(4)]],
     const device uchar* scales [[buffer(5)]], const device uint* experts [[buffer(6)]],
-    const device bfloat* route_weights [[buffer(7)]],
+    const device float* route_weights [[buffer(7)]],
     const device bfloat* shared_hidden [[buffer(8)]],
     const device uchar* sw [[buffer(9)]], const device uchar* ss [[buffer(10)]],
     const device uchar* sb [[buffer(11)]], const device bfloat* router [[buffer(12)]],
@@ -557,7 +557,7 @@ kernel void vq_d8_all_down(
     constexpr uint rows = 2560, k = 640, groups = 10, words = 42;
     const uint row = group_id * 4u + simd;
     if (row >= rows) return;
-    bfloat routed_total = bfloat(0.0f);
+    float routed_total = 0.0f;
     constexpr uint slots_per_wave = 3u;
     for (uint slot_base = 0; slot_base < 10u; slot_base += slots_per_wave) {
         const uint local_slot = lane / groups;
@@ -580,9 +580,7 @@ kernel void vq_d8_all_down(
             const float value = simd_sum(ordered);
             const uint reduced_slot = slot_base + wave_slot;
             if (lane == 0 && reduced_slot < 10u) {
-                routed_total = bfloat(float(routed_total) +
-                    float(bfloat(float(route_weights[reduced_slot]) *
-                        float(bfloat(value)))));
+                routed_total += route_weights[reduced_slot] * float(bfloat(value));
             }
         }
     }
@@ -595,7 +593,7 @@ kernel void vq_d8_all_down(
             float(load_bf16_unaligned(sb, row * groups + base / 64u)) * sum;
     }
     shared_dot = simd_sum(shared_dot);
-    if (lane == 0) output[row] = bfloat(float(routed_total) +
+    if (lane == 0) output[row] = bfloat(float(bfloat(routed_total)) +
         float(bfloat(float(bfloat(shared_dot)) * float(router[0]))));
 }
 
@@ -603,7 +601,7 @@ kernel void vq_d2_all_down(
     const device bfloat* routed_hidden [[buffer(0)]],
     const device uchar* codes [[buffer(1)]], const device uchar* codebook [[buffer(2)]],
     const device uchar* scales [[buffer(3)]], const device uint* experts [[buffer(4)]],
-    const device bfloat* route_weights [[buffer(5)]],
+    const device float* route_weights [[buffer(5)]],
     const device bfloat* shared_hidden [[buffer(6)]],
     const device uchar* sw [[buffer(7)]], const device uchar* ss [[buffer(8)]],
     const device uchar* sb [[buffer(9)]], const device bfloat* router [[buffer(10)]],
@@ -612,7 +610,7 @@ kernel void vq_d2_all_down(
     constexpr uint rows = 2560, k = 640, groups = 10, codes_per_row = 320;
     const uint row = group_id * 4u + simd;
     if (row >= rows) return;
-    bfloat routed_total = bfloat(0.0f);
+    float routed_total = 0.0f;
     for (uint slot = 0; slot < 10u; ++slot) {
         const ulong matrix_row = ulong(experts[slot]) * rows + row;
         const device uchar* code_row = codes + matrix_row * codes_per_row;
@@ -623,8 +621,7 @@ kernel void vq_d2_all_down(
                 vq_d2_group_dot(code_row, codebook, x, lane);
         }
         value = simd_sum(value);
-        if (lane == 0) routed_total = bfloat(float(routed_total) +
-            float(bfloat(float(route_weights[slot]) * float(bfloat(value)))));
+        if (lane == 0) routed_total += route_weights[slot] * float(bfloat(value));
     }
     float shared_dot = 0.0f;
     for (uint base = lane * 8u; base < k; base += 256u) {
@@ -635,7 +632,7 @@ kernel void vq_d2_all_down(
             float(load_bf16_unaligned(sb, row * groups + base / 64u)) * sum;
     }
     shared_dot = simd_sum(shared_dot);
-    if (lane == 0) output[row] = bfloat(float(routed_total) +
+    if (lane == 0) output[row] = bfloat(float(bfloat(routed_total)) +
         float(bfloat(float(bfloat(shared_dot)) * float(router[0]))));
 }
 
@@ -949,7 +946,7 @@ kernel void bf16_router_logits(
         dot += float(load_bf16_unaligned(weight, ulong(row) * 2560u + column)) *
             float(x[column]);
     dot = simd_sum(dot);
-    if (lane == 0) logits[row] = dot;
+    if (lane == 0) logits[row] = float(bfloat(dot));
 }
 
 kernel void select_top10(
@@ -972,6 +969,28 @@ kernel void select_top10(
     for (uint slot = 0; slot < 10; ++slot) denominator += metal::exp(selected[slot] - selected[0]);
     for (uint slot = 0; slot < 10; ++slot)
         weights[slot] = bfloat(metal::exp(selected[slot] - selected[0]) / denominator);
+}
+
+kernel void select_top10_vq(
+    device float* logits [[buffer(0)]], device uint* experts [[buffer(1)]],
+    device float* weights [[buffer(2)]], uint tid [[thread_position_in_grid]]) {
+    if (tid != 0) return;
+    float selected[10];
+    for (uint slot = 0; slot < 10; ++slot) {
+        float best = -INFINITY;
+        uint best_id = 0;
+        for (uint expert = 0; expert < 512; ++expert) {
+            const float value = logits[expert];
+            if (value > best) { best = value; best_id = expert; }
+        }
+        experts[slot] = best_id;
+        selected[slot] = best;
+        logits[best_id] = -INFINITY;
+    }
+    float denominator = 0.0f;
+    for (uint slot = 0; slot < 10; ++slot) denominator += metal::exp(selected[slot] - selected[0]);
+    for (uint slot = 0; slot < 10; ++slot)
+        weights[slot] = metal::exp(selected[slot] - selected[0]) / denominator;
 }
 
 kernel void qsa_score_blocks(
@@ -1043,10 +1062,10 @@ kernel void qsa_append_decode_state(
                                   (float(load_bf16_unaligned(index_key_norm, component)) + 1.0f));
     }
     const bfloat first = normalized[0], second = normalized[1];
-    normalized[0] = bfloat(float(first) * float(pool_rope_cos[lane]) -
-                           float(second) * float(pool_rope_sin[lane]));
-    normalized[1] = bfloat(float(second) * float(pool_rope_cos[lane + 32]) +
-                           float(first) * float(pool_rope_sin[lane + 32]));
+    normalized[0] = bfloat(float(bfloat(float(first) * float(pool_rope_cos[lane]))) -
+                           float(bfloat(float(second) * float(pool_rope_sin[lane]))));
+    normalized[1] = bfloat(float(bfloat(float(second) * float(pool_rope_cos[lane + 32]))) +
+                           float(bfloat(float(first) * float(pool_rope_sin[lane + 32]))));
     for (uint item = 0; item < 4; ++item)
         pooled[pooled_index * 128 + lane + item * 32] = normalized[item];
 }
@@ -1326,10 +1345,10 @@ kernel void attention_normalize_rope(
         normalized[item] = bfloat(values[item] * inverse_rms * float(weight));
     }
     const bfloat first = normalized[0], second = normalized[1];
-    normalized[0] = bfloat(float(first) * float(rope_cos[lane]) -
-                           float(second) * float(rope_sin[lane]));
-    normalized[1] = bfloat(float(second) * float(rope_cos[lane + 32]) +
-                           float(first) * float(rope_sin[lane + 32]));
+    normalized[0] = bfloat(float(bfloat(float(first) * float(rope_cos[lane]))) -
+                           float(bfloat(float(second) * float(rope_sin[lane]))));
+    normalized[1] = bfloat(float(bfloat(float(second) * float(rope_cos[lane + 32]))) +
+                           float(bfloat(float(first) * float(rope_sin[lane + 32]))));
     device bfloat* output = is_index ? selector_query : (is_query ? attention_query : attention_key);
     const uint output_base = local_head * dimension;
     for (uint item = 0; item < items; ++item)
@@ -2022,7 +2041,7 @@ kernel void lm_head_q4(
             float(load_bf16_unaligned(bias, row * 80 + base / 32)) * sum;
     }
     dot = simd_sum(dot);
-    if (lane == 0) logits[row] = dot;
+    if (lane == 0) logits[row] = float(bfloat(dot));
 }
 
 kernel void lm_head_q8(
@@ -2043,12 +2062,15 @@ kernel void lm_head_q8(
             float(load_bf16_unaligned(bias, row * groups + base / 64)) * sum;
     }
     dot = simd_sum(dot);
-    if (lane == 0) logits[row] = dot;
+    // MLX qmm returns the activation dtype. Retain that rounding before
+    // argmax: FP32 logits otherwise break BF16 ties differently.
+    if (lane == 0) logits[row] = float(bfloat(dot));
 }
 
 kernel void head_top2_reduce(
     const device float* logits [[buffer(0)]], device float* candidate_values [[buffer(1)]],
     device uint* candidate_ids [[buffer(2)]], constant uint& rows [[buffer(3)]],
+    const device uint* input_ids [[buffer(4)]], constant uint& mapped [[buffer(5)]],
     uint group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
     threadgroup float best_values[256];
     threadgroup float second_values[256];
@@ -2058,9 +2080,10 @@ kernel void head_top2_reduce(
     uint best_id = 0xffffffffu, second_id = 0xffffffffu;
     const uint begin = group * 1024u + tid * 4u;
     for (uint offset = 0; offset < 4u; ++offset) {
-        const uint id = begin + offset;
-        if (id >= rows) continue;
-        const float value = logits[id];
+        const uint index = begin + offset;
+        if (index >= rows) continue;
+        const uint id = mapped ? input_ids[index] : index;
+        const float value = logits[index];
         if (value > best_value || (value == best_value && id < best_id)) {
             second_value = best_value; second_id = best_id;
             best_value = value; best_id = id;

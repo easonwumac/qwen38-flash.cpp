@@ -208,6 +208,13 @@ MlxArray DecoderLayer::apply_mlp_output_map(MlxArray output) const {
     return MlxArray::matmul(output.astype(MLX_BFLOAT16), mlp_output_map_).astype(dtype);
 }
 
+void DecoderLayer::prepare_persistent_state(DecoderLayerState& state) const {
+    materialize_speculative_state(state);
+    if (full_attention_ != nullptr) {
+        full_attention_->materialize_qsa_pools(state.full_attention);
+    }
+}
+
 void DecoderLayer::materialize_speculative_state(DecoderLayerState& state) const {
     if (linear_attention_ != nullptr) {
         linear_attention_->materialize_rollback(state.linear_attention);

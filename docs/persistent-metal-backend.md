@@ -318,6 +318,12 @@ mutation from that warm step. `QWEN38_PERSISTENT_SHARE_MLX_WEIGHTS=0` restores
 the independent mmap path, while `QWEN38_PERSISTENT_ANCHOR_TOKENS` and
 `QWEN38_PERSISTENT_MIN_TOKENS` retain explicit trajectory controls.
 
+September 19 correction: the default minimum is now **zero**, not eight.
+Substituting a runner-up for an early EOS broke short-answer instructions;
+removing that implicit rule restored the VQ IF3 strict gate from 2/3 to 3/3.
+The old measurements below retain their historical minimum-eight protocol.
+See [current state/cache/recovery evidence](vq-production-dataflow-2026-09-19.md).
+
 The decisive cold request used Apple M5 Pro 64 GiB, Niwaki 99B Q3 routed/Q4
 backbone, the external REAP-288 Q4 AoS n-gram, `speed`, affine-Q8 KV beginning
 at 8,192 tokens with 2,048-token slabs, QSA decode budget 512, greedy sampling,

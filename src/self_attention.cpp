@@ -588,6 +588,56 @@ MlxArray SelfAttention::project_branch2(
         std::array<int, 3>{64, 1, 1}, dtype_templates, int_templates).front());
 }
 
+void SelfAttention::materialize_qsa_pools(SelfAttentionState& state) const {
+    materialize_qsa_pools(state, state.token_count);
+}
+
+void SelfAttention::materialize_qsa_pools(
+    SelfAttentionState& state, const std::size_t total) const {
+    const std::size_t block_count = total / indexer_compress_ratio_;
+    const int ratio = dimension(indexer_compress_ratio_, "QSA ratio");
+    const int index_dimension = dimension(indexer_head_dimension_, "QSA dimension");
+    const std::vector<int> strides3{1, 1, 1};
+    if (state.qsa_pooled_count > block_count) {
+        throw std::runtime_error("QSA pooled state extends beyond the KV frontier");
+    }
+    if (state.qsa_pooled_count < block_count) {
+        const std::size_t first_block = state.qsa_pooled_count;
+        const std::size_t new_blocks = block_count - first_block;
+        const std::size_t first_token = first_block * indexer_compress_ratio_;
+        const std::size_t stop_token = block_count * indexer_compress_ratio_;
+        if (first_token < state.qsa_raw_start) {
+            throw std::runtime_error("QSA raw window does not cover the pooling frontier");
+        }
+        MlxArray fresh = state.qsa_raw_keys.slice(
+            std::vector<int>{0, coordinate(first_token - state.qsa_raw_start,
+                                           "QSA pooled start"), 0},
+            std::vector<int>{1, dimension(stop_token - state.qsa_raw_start,
+                                          "QSA pooled stop"), index_dimension},
+            strides3);
+        fresh = fresh.reshape(std::vector<int>{
+            1, dimension(new_blocks, "QSA new blocks"), ratio, index_dimension});
+        MlxArray pooled = fresh.astype(MLX_FLOAT32)
+                              .mean_axis(2)
+                              .astype(state.qsa_raw_keys.dtype())
+                              .rms_norm(indexer_key_norm_weight_, epsilon_)
+                              .reshape(std::vector<int>{
+                                  1, 1, dimension(new_blocks, "QSA new blocks"),
+                                  index_dimension});
+        pooled = apply_rope_rows(
+            pooled,
+            state.position_base + first_block * indexer_compress_ratio_,
+            indexer_compress_ratio_,
+            indexer_head_dimension_)
+                     .reshape(std::vector<int>{
+                         1, dimension(new_blocks, "QSA new blocks"), index_dimension});
+        state.qsa_pooled_keys = first_block == 0
+            ? pooled.share()
+            : MlxArray::concatenate(state.qsa_pooled_keys, pooled, 1);
+        state.qsa_pooled_count = block_count;
+    }
+}
+
 MlxArray SelfAttention::apply_rope(const MlxArray& input, const std::size_t position) const {
     const auto shape = input.shape();
     if (shape.size() != 4 || shape[2] != 1 ||
@@ -705,7 +755,9 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
         const std::vector<int> raw_shape = state.qsa_raw_keys.shape();
         if (state.qsa_raw_start > state.token_count ||
             raw_shape != std::vector<int>({
-                1, dimension(state.token_count - state.qsa_raw_start, "QSA history"),
+                // A native handoff exactly on a pooling boundary legitimately
+                // has no pending raw rows; all history is already pooled.
+                1, coordinate(state.token_count - state.qsa_raw_start, "QSA history"),
                                           index_dimension})) {
             throw std::runtime_error("QSA raw-key state is not aligned with attention KV");
         }
@@ -724,45 +776,7 @@ SelfAttention::QsaSelection SelfAttention::update_qsa_and_build_mask(
     const auto raw_done = std::chrono::steady_clock::now();
 #endif
 
-    if (state.qsa_pooled_count > block_count) {
-        throw std::runtime_error("QSA pooled state extends beyond the KV frontier");
-    }
-    if (state.qsa_pooled_count < block_count) {
-        const std::size_t first_block = state.qsa_pooled_count;
-        const std::size_t new_blocks = block_count - first_block;
-        const std::size_t first_token = first_block * indexer_compress_ratio_;
-        const std::size_t stop_token = block_count * indexer_compress_ratio_;
-        if (first_token < state.qsa_raw_start) {
-            throw std::runtime_error("QSA raw window does not cover the pooling frontier");
-        }
-        MlxArray fresh = state.qsa_raw_keys.slice(
-            std::vector<int>{0, coordinate(first_token - state.qsa_raw_start,
-                                           "QSA pooled start"), 0},
-            std::vector<int>{1, dimension(stop_token - state.qsa_raw_start,
-                                          "QSA pooled stop"), index_dimension},
-            strides3);
-        fresh = fresh.reshape(std::vector<int>{
-            1, dimension(new_blocks, "QSA new blocks"), ratio, index_dimension});
-        MlxArray pooled = fresh.astype(MLX_FLOAT32)
-                              .mean_axis(2)
-                              .astype(raw_keys.dtype())
-                              .rms_norm(indexer_key_norm_weight_, epsilon_)
-                              .reshape(std::vector<int>{
-                                  1, 1, dimension(new_blocks, "QSA new blocks"),
-                                  index_dimension});
-        pooled = apply_rope_rows(
-            pooled,
-            state.position_base + first_block * indexer_compress_ratio_,
-            indexer_compress_ratio_,
-            indexer_head_dimension_)
-                     .reshape(std::vector<int>{
-                         1, dimension(new_blocks, "QSA new blocks"), index_dimension});
-        state.qsa_pooled_keys = first_block == 0
-            ? pooled.share()
-            : MlxArray::concatenate(state.qsa_pooled_keys, pooled, 1);
-        state.qsa_pooled_count = block_count;
-    }
-
+    materialize_qsa_pools(state, total);
     const std::size_t raw_window = qsa_raw_window();
     const std::size_t retained_rows = raw_window == 0
         ? total : std::min(total, raw_window + static_cast<std::size_t>(rows));

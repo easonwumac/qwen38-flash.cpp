@@ -27,7 +27,8 @@
 namespace qwen38 {
 namespace {
 
-constexpr std::array<const char*, 54> pipeline_names{
+constexpr std::array<const char*, 55> pipeline_names{
+    "select_top10_vq",
     "q3_gate_up", "q3_down_reduce", "q4_shared_gate_up", "q8_shared_router",
     "q4_shared_down_merge", "q8_shared_gate_up", "q8_shared_down_merge",
     "fused_all_gate_up", "fused_all_down",
@@ -135,7 +136,15 @@ public:
             metal_source.append(persistent_metal::metal_source_prefix);
             metal_source.append(persistent_metal::metal_source_suffix);
             NSString* source = [NSString stringWithUTF8String:metal_source.c_str()];
-            library_ = [device_ newLibraryWithSource:source options:nil error:&error];
+            MTLCompileOptions* compile_options = [MTLCompileOptions new];
+            if (@available(macOS 15.0, *)) compile_options.mathMode = MTLMathModeSafe;
+            else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                compile_options.fastMathEnabled = NO;
+#pragma clang diagnostic pop
+            }
+            library_ = [device_ newLibraryWithSource:source options:compile_options error:&error];
             if (library_ == nil) {
                 throw std::runtime_error(error == nil ? "Metal library compilation failed" :
                     error.localizedDescription.UTF8String);
@@ -373,7 +382,7 @@ public:
         block_output_ = make_buffer(2560 * sizeof(std::uint16_t));
         post_attention_ = make_buffer(10240 * sizeof(std::uint16_t));
         expert_ids_ = make_buffer(10 * sizeof(std::uint32_t));
-        route_weights_ = make_buffer(10 * sizeof(std::uint16_t));
+        route_weights_ = make_buffer(10 * (vq_routed_ ? sizeof(float) : sizeof(std::uint16_t)));
         routed_hidden_ = make_buffer(
             10 * std::max<std::size_t>(448, config_.moe_intermediate_size) *
             sizeof(std::uint16_t));
@@ -409,6 +418,8 @@ public:
         const std::size_t head_groups = (config_.vocabulary_size + 1023) / 1024;
         head_candidate_values_ = make_buffer(head_groups * 2 * sizeof(float), false);
         head_candidate_ids_ = make_buffer(head_groups * 2 * sizeof(std::uint32_t), false);
+        head_result_values_ = make_buffer(2 * sizeof(float), false);
+        head_result_ids_ = make_buffer(2 * sizeof(std::uint32_t), false);
     }
 
     id<MTLComputePipelineState> pipeline(const char* name) const {
@@ -703,7 +714,8 @@ public:
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             [encoder endEncoding];
             encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("select_top10")];
+            [encoder setComputePipelineState:pipeline(
+                vq_routed_ ? "select_top10_vq" : "select_top10")];
             [encoder setBuffer:router_logits_ offset:0 atIndex:0];
             [encoder setBuffer:expert_ids_ offset:0 atIndex:1];
             [encoder setBuffer:route_weights_ offset:0 atIndex:2];
@@ -1115,6 +1127,12 @@ public:
                 attention_states_[layer].token_count = 0;
                 attention_states_[layer].position_base = 0;
                 attention_states_[layer].cold_count = 0;
+                attention_states_[layer].key_weights = nil;
+                attention_states_[layer].key_scales = nil;
+                attention_states_[layer].key_biases = nil;
+                attention_states_[layer].value_weights = nil;
+                attention_states_[layer].value_scales = nil;
+                attention_states_[layer].value_biases = nil;
                 std::memset(attention_states_[layer].hot_keys.contents, 0,
                             2ULL * hot_capacity * 256 * sizeof(std::uint16_t));
                 std::memset(attention_states_[layer].hot_values.contents, 0,
@@ -1130,6 +1148,114 @@ public:
         }
         std::memset(ple_convolution_.contents, 0, 9ULL * 10240 * sizeof(std::uint16_t));
         ple_ngram_state_ = {};
+    }
+
+    bool can_decode() const noexcept {
+        for (std::size_t layer = 3; layer < 48; layer += 4) {
+            const auto& state = attention_states_[layer];
+            if (state.cold_count > state.token_count ||
+                state.token_count - state.cold_count >= hot_capacity ||
+                state.token_count >= 262144 ||
+                state.position_base >= std::numeric_limits<std::uint32_t>::max() -
+                    state.token_count) return false;
+        }
+        return true;
+    }
+
+    static MlxArray export_array(id<MTLBuffer> source,
+                                  const std::vector<int>& shape, mlx_dtype dtype,
+                                  std::size_t bytes, std::size_t offset = 0) {
+        if (source == nil || offset > source.length || bytes > source.length - offset) {
+            throw std::runtime_error("persistent export exceeds buffer");
+        }
+        MlxArray result(mlx_array_new_data(
+            static_cast<const std::uint8_t*>(source.contents) + offset,
+            shape.data(), static_cast<int>(shape.size()), dtype));
+        if (result.byte_size() != bytes) {
+            throw std::runtime_error("persistent export shape mismatch");
+        }
+        return result;
+    }
+
+    ModelDecodeState export_state() const {
+        ModelDecodeState result(48);
+        result.token_count = attention_states_[3].token_count;
+        for (std::size_t layer = 0; layer < 48; ++layer) {
+            if (layer % 4 != 3) {
+                auto& out = result.layers[layer].linear_attention;
+                out.convolution = export_array(gdn_states_[layer].convolution,
+                    {1, 3, 10240}, MLX_BFLOAT16, 3 * 10240 * 2);
+                out.recurrent = export_array(gdn_states_[layer].recurrent,
+                    {1, 48, 128, 128}, MLX_BFLOAT16, 48 * 128 * 128 * 2);
+                out.initialized = result.token_count != 0;
+                continue;
+            }
+            const auto& input = attention_states_[layer];
+            if (input.token_count != result.token_count) {
+                throw std::runtime_error("cannot export partially advanced native state");
+            }
+            auto& out = result.layers[layer].full_attention;
+            out.token_count = input.token_count;
+            out.position_base = input.position_base;
+            const int hot = static_cast<int>(input.token_count - input.cold_count);
+            if (hot != 0) {
+                const auto copy_hot = [&](id<MTLBuffer> buffer) {
+                    const std::size_t head_bytes = static_cast<std::size_t>(hot) * 256 * 2;
+                    std::vector<std::uint8_t> bytes(head_bytes * 2);
+                    for (std::size_t head = 0; head < 2; ++head) {
+                        std::memcpy(bytes.data() + head * head_bytes,
+                            static_cast<const std::uint8_t*>(buffer.contents) +
+                                head * hot_capacity * 256 * 2, head_bytes);
+                    }
+                    const std::array<int, 4> shape{1, 2, hot, 256};
+                    return MlxArray(mlx_array_new_data(bytes.data(), shape.data(), 4,
+                                                     MLX_BFLOAT16));
+                };
+                out.keys = copy_hot(input.hot_keys);
+                out.values = copy_hot(input.hot_values);
+            }
+            if (input.cold_count != 0) {
+                const int cold = static_cast<int>(input.cold_count);
+                out.kv_q8 = true;
+                out.kv_q8_cold_tokens = input.cold_count;
+                const auto weights = [&](id<MTLBuffer> buffer) {
+                    return export_array(buffer, {1, 2, cold, 64}, MLX_UINT32,
+                                        2ULL * input.cold_count * 256);
+                };
+                const auto metadata = [&](id<MTLBuffer> buffer) {
+                    return export_array(buffer, {1, 2, cold, 4}, MLX_BFLOAT16,
+                                        2ULL * input.cold_count * 4 * 2);
+                };
+                out.key_weights = weights(input.key_weights);
+                out.value_weights = weights(input.value_weights);
+                out.key_scales = metadata(input.key_scales);
+                out.key_biases = metadata(input.key_biases);
+                out.value_scales = metadata(input.value_scales);
+                out.value_biases = metadata(input.value_biases);
+            }
+            const int pending = static_cast<int>(input.token_count % 4);
+            out.qsa_raw_start = input.token_count - static_cast<std::uint32_t>(pending);
+            out.qsa_raw_keys = pending == 0
+                ? MlxArray::zeros(std::vector<int>{1, 0, 128}, MLX_BFLOAT16)
+                : export_array(input.pending, {1, pending, 128}, MLX_BFLOAT16,
+                               static_cast<std::size_t>(pending) * 128 * 2);
+            out.qsa_pooled_count = input.token_count / 4;
+            if (out.qsa_pooled_count != 0) {
+                out.qsa_pooled_keys = export_array(input.pooled,
+                    {1, static_cast<int>(out.qsa_pooled_count), 128}, MLX_BFLOAT16,
+                    out.qsa_pooled_count * 128 * 2);
+            }
+        }
+        auto& ple = result.layers[1].ple;
+        ple.ngram = ple_ngram_state_;
+        ple.convolution = export_array(ple_convolution_, {1, 9, 10240},
+                                      MLX_BFLOAT16, 9 * 10240 * 2);
+        ple.convolution_initialized = result.token_count != 0;
+        return result;
+    }
+
+    MlxArray export_stream() const {
+        return export_array(output_stream_, {1, 1, 10240}, MLX_BFLOAT16, 10240 * 2);
     }
 
     static void copy_array(const MlxArray& source, id<MTLBuffer> target,
@@ -1157,6 +1283,63 @@ public:
         if (source.layers.size() != 48) {
             throw std::runtime_error("persistent state layer count mismatch");
         }
+        const auto validate = [](const MlxArray& a, const std::vector<int>& shape,
+                                  mlx_dtype dtype) {
+            if (a.shape() != shape || a.dtype() != dtype)
+                throw std::runtime_error("persistent import state geometry/dtype mismatch");
+        };
+        // Check every geometry and frontier before touching destination state.
+        // MLX defers pooling on short prompts; reading those uninitialized
+        // native entries after crossing 512 tokens silently corrupts attention.
+        for (std::size_t layer = 3; layer < 48; layer += 4) {
+            const auto& input = source.layers[layer].full_attention;
+            if (input.token_count != source.token_count || input.token_count > 262144 ||
+                input.qsa_pooled_count != input.token_count / 4) {
+                throw std::runtime_error(
+                    "persistent import requires complete QSA pools; prepare state first");
+            }
+            const auto cold = input.kv_q8 ? input.kv_q8_cold_tokens : 0;
+            if (cold > input.token_count || input.token_count - cold > hot_capacity ||
+                input.position_base > std::numeric_limits<std::uint32_t>::max() - input.token_count)
+                throw std::runtime_error("persistent import exceeds capacity");
+            const int hot = static_cast<int>(input.token_count - cold);
+            if (hot) {
+                validate(input.keys, {1, 2, hot, 256}, MLX_BFLOAT16);
+                validate(input.values, {1, 2, hot, 256}, MLX_BFLOAT16);
+            }
+            if (cold) {
+                const int n = static_cast<int>(cold);
+                validate(input.key_weights, {1, 2, n, 64}, MLX_UINT32);
+                validate(input.value_weights, {1, 2, n, 64}, MLX_UINT32);
+                for (const auto* a : {&input.key_scales, &input.key_biases,
+                                      &input.value_scales, &input.value_biases})
+                    validate(*a, {1, 2, n, 4}, MLX_BFLOAT16);
+            }
+            if (input.qsa_pooled_count)
+                validate(input.qsa_pooled_keys,
+                         {1, static_cast<int>(input.qsa_pooled_count), 128}, MLX_BFLOAT16);
+            const auto pending = input.token_count % 4;
+            if (pending) {
+                const auto shape = input.qsa_raw_keys.shape();
+                if (shape.size() != 3 || shape[0] != 1 || shape[2] != 128 ||
+                    input.qsa_raw_keys.dtype() != MLX_BFLOAT16 ||
+                    input.qsa_raw_start > input.token_count - pending ||
+                    input.qsa_raw_start + static_cast<std::size_t>(shape[1]) != input.token_count)
+                    throw std::runtime_error("persistent import QSA raw frontier mismatch");
+            }
+        }
+        for (std::size_t layer = 0; layer < 48; ++layer) {
+            if (layer % 4 == 3) continue;
+            const auto& input = source.layers[layer].linear_attention;
+            if (!input.initialized)
+                throw std::runtime_error("cannot import uninitialized GDN state");
+            validate(input.convolution, {1, 3, 10240}, MLX_BFLOAT16);
+            validate(input.recurrent, {1, 48, 128, 128}, MLX_BFLOAT16);
+        }
+        const auto& ple_input = source.layers[1].ple;
+        if (!ple_input.convolution_initialized)
+            throw std::runtime_error("cannot import uninitialized PLE state");
+        validate(ple_input.convolution, {1, 9, 10240}, MLX_BFLOAT16);
         for (std::size_t layer = 0; layer < 48; ++layer) {
             const DecoderLayerState& input = source.layers[layer];
             if (layer % 4 != 3) {
@@ -1184,13 +1367,17 @@ public:
             output.token_count = static_cast<std::uint32_t>(attention.token_count);
             output.position_base = static_cast<std::uint32_t>(attention.position_base);
             output.cold_count = static_cast<std::uint32_t>(cold_tokens);
-            if (attention.kv_q8) {
+            if (cold_tokens != 0) {
                 copy_or_replace(attention.key_weights, output.key_weights);
                 copy_or_replace(attention.key_scales, output.key_scales);
                 copy_or_replace(attention.key_biases, output.key_biases);
                 copy_or_replace(attention.value_weights, output.value_weights);
                 copy_or_replace(attention.value_scales, output.value_scales);
                 copy_or_replace(attention.value_biases, output.value_biases);
+            } else {
+                output.key_weights = nil; output.value_weights = nil;
+                output.key_scales = nil; output.value_scales = nil;
+                output.key_biases = nil; output.value_biases = nil;
             }
             std::memset(output.hot_keys.contents, 0, output.hot_keys.length);
             std::memset(output.hot_values.contents, 0, output.hot_values.length);
@@ -1245,7 +1432,25 @@ public:
             throw std::runtime_error("persistent stream width mismatch");
         }
         if (reset) reset_all_state();
+        if (!can_decode()) {
+            throw std::runtime_error("persistent decode capacity exhausted; export to MLX");
+        }
         std::memcpy(stream_.contents, initial_stream.data(), initial_stream.size_bytes());
+        std::vector<id<MTLCommandBuffer>> commands;
+        try {
+            encode_trunk(token, commands, false);
+        } catch (...) {
+            if (!commands.empty()) [commands.back() waitUntilCompleted];
+            throw;
+        }
+        const double elapsed_gpu = finish_commands(commands);
+        if (gpu_ms != nullptr) *gpu_ms = elapsed_gpu;
+        const auto* begin = static_cast<const std::uint16_t*>(output_stream_.contents);
+        return {begin, begin + 10240};
+    }
+
+    void encode_trunk(std::uint32_t token,
+                      std::vector<id<MTLCommandBuffer>>& commands, bool whole_token) {
         std::size_t group_size = 3;
         if (const char* configured = std::getenv("QWEN38_PERSISTENT_LAYER_GROUP")) {
             char* end = nullptr;
@@ -1255,11 +1460,11 @@ public:
             }
             group_size = static_cast<std::size_t>(parsed);
         }
-        std::vector<id<MTLCommandBuffer>> commands;
         commands.reserve((48 + group_size - 1) / group_size);
         id<MTLCommandBuffer> command = nil;
         for (std::size_t index = 0; index < 48; ++index) {
             if (index % group_size == 0) command = [queue_ commandBuffer];
+            if (index == 0 && whole_token) encode_embedding(command, token);
             id<MTLBuffer> layer_input = index == 0 ? stream_ : output_stream_;
             if (index == 1) {
                 encode_ple(command, token, layer_input);
@@ -1280,10 +1485,15 @@ public:
             encode_hc_write(command, layer_input, block_output_, post_attention_);
             encode_mlp(command, layer, index);
             if ((index + 1) % group_size == 0 || index + 1 == 48) {
+                if (index + 1 == 48 && whole_token) encode_head(command, output_stream_);
                 [command commit];
                 commands.push_back(command);
             }
         }
+    }
+
+    static double finish_commands(const std::vector<id<MTLCommandBuffer>>& commands) {
+        if (commands.empty()) return 0.0;
         [commands.back() waitUntilCompleted];
         double total_gpu_ms = 0.0;
         for (id<MTLCommandBuffer> completed : commands) {
@@ -1292,15 +1502,22 @@ public:
             }
             total_gpu_ms += (completed.GPUEndTime - completed.GPUStartTime) * 1000.0;
         }
-        if (gpu_ms != nullptr) *gpu_ms = total_gpu_ms;
-        const auto* begin = static_cast<const std::uint16_t*>(output_stream_.contents);
-        return {begin, begin + 10240};
+        return total_gpu_ms;
     }
 
     std::vector<std::uint16_t> embed(std::uint32_t token, double* gpu_ms) {
         if (token >= config_.vocabulary_size) throw std::out_of_range("token id out of range");
-        const std::string base = "language_model.model.embed_tokens";
         id<MTLCommandBuffer> command = [queue_ commandBuffer];
+        encode_embedding(command, token);
+        [command commit];
+        const double elapsed_gpu = finish_commands({command});
+        if (gpu_ms != nullptr) *gpu_ms = elapsed_gpu;
+        const auto* begin = static_cast<const std::uint16_t*>(stream_.contents);
+        return {begin, begin + 10240};
+    }
+
+    void encode_embedding(id<MTLCommandBuffer> command, std::uint32_t token) {
+        const std::string base = "language_model.model.embed_tokens";
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline(
             vq_routed_ ? "embedding_q8_stream" : "embedding_q4_stream")];
@@ -1311,14 +1528,6 @@ public:
         [encoder dispatchThreads:MTLSizeMake(2560, 1, 1)
              threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [encoder endEncoding];
-        [command commit];
-        [command waitUntilCompleted];
-        if (command.status != MTLCommandBufferStatusCompleted) {
-            throw std::runtime_error(command.error.localizedDescription.UTF8String);
-        }
-        if (gpu_ms != nullptr) *gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0;
-        const auto* begin = static_cast<const std::uint16_t*>(stream_.contents);
-        return {begin, begin + 10240};
     }
 
     GreedyResult head(std::span<const std::uint16_t> stream) {
@@ -1326,7 +1535,13 @@ public:
         std::memcpy(stream_.contents, stream.data(), stream.size_bytes());
         const auto started = std::chrono::steady_clock::now();
         id<MTLCommandBuffer> command = [queue_ commandBuffer];
-        encode_hc_read_final(command, stream_);
+        encode_head(command, stream_);
+        [command commit];
+        return read_head_result(finish_commands({command}), started);
+    }
+
+    void encode_head(id<MTLCommandBuffer> command, id<MTLBuffer> input) {
+        encode_hc_read_final(command, input);
         id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline(vq_routed_ ? "lm_head_q8" : "lm_head_q4")];
         [encoder setBuffer:mixed_ offset:0 atIndex:0];
@@ -1343,44 +1558,37 @@ public:
         [encoder setBuffer:head_candidate_values_ offset:0 atIndex:1];
         [encoder setBuffer:head_candidate_ids_ offset:0 atIndex:2];
         [encoder setBytes:&rows length:sizeof(rows) atIndex:3];
+        const std::uint32_t unmapped = 0;
+        [encoder setBuffer:head_candidate_ids_ offset:0 atIndex:4];
+        [encoder setBytes:&unmapped length:sizeof(unmapped) atIndex:5];
         const std::uint32_t head_groups = (rows + 1023) / 1024;
         [encoder dispatchThreadgroups:MTLSizeMake(head_groups, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
         [encoder endEncoding];
-        [command commit];
-        [command waitUntilCompleted];
-        if (command.status != MTLCommandBufferStatusCompleted) {
-            throw std::runtime_error(command.error.localizedDescription.UTF8String);
-        }
-        const auto* values = static_cast<const float*>(head_candidate_values_.contents);
-        const auto* ids = static_cast<const std::uint32_t*>(head_candidate_ids_.contents);
-        std::uint32_t best = ids[0];
-        std::uint32_t second = ids[1];
-        float best_value = values[0];
-        float second_value = values[1];
-        const auto better = [](const float lhs_value, const std::uint32_t lhs_id,
-                               const float rhs_value, const std::uint32_t rhs_id) {
-            return lhs_value > rhs_value ||
-                (lhs_value == rhs_value && lhs_id < rhs_id);
-        };
-        for (std::uint32_t index = 2; index < head_groups * 2; ++index) {
-            const float value = values[index];
-            const std::uint32_t id = ids[index];
-            if (better(value, id, best_value, best)) {
-                second = best;
-                second_value = best_value;
-                best = id;
-                best_value = value;
-            } else if (id != best && better(value, id, second_value, second)) {
-                second = id;
-                second_value = value;
-            }
-        }
+        encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline("head_top2_reduce")];
+        [encoder setBuffer:head_candidate_values_ offset:0 atIndex:0];
+        [encoder setBuffer:head_result_values_ offset:0 atIndex:1];
+        [encoder setBuffer:head_result_ids_ offset:0 atIndex:2];
+        const std::uint32_t candidates = head_groups * 2;
+        const std::uint32_t mapped = 1;
+        [encoder setBytes:&candidates length:sizeof(candidates) atIndex:3];
+        [encoder setBuffer:head_candidate_ids_ offset:0 atIndex:4];
+        [encoder setBytes:&mapped length:sizeof(mapped) atIndex:5];
+        [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [encoder endEncoding];
+    }
+
+    GreedyResult read_head_result(double gpu_ms,
+                                 std::chrono::steady_clock::time_point started) const {
+        const auto* values = static_cast<const float*>(head_result_values_.contents);
+        const auto* ids = static_cast<const std::uint32_t*>(head_result_ids_.contents);
         return {
-            .token = best,
-            .alternative_token = second,
-            .logit = best_value,
-            .gpu_ms = (command.GPUEndTime - command.GPUStartTime) * 1000.0,
+            .token = ids[0],
+            .alternative_token = ids[1],
+            .logit = values[0],
+            .gpu_ms = gpu_ms,
             .wall_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - started).count(),
         };
@@ -1419,14 +1627,21 @@ public:
 
     GreedyResult greedy_decode(std::uint32_t token, bool reset) {
         const auto started = std::chrono::steady_clock::now();
-        double embedding_gpu = 0.0, trunk_gpu = 0.0;
-        std::vector<std::uint16_t> initial = embed(token, &embedding_gpu);
-        std::vector<std::uint16_t> trunk = decode_trunk(token, initial, reset, &trunk_gpu);
-        GreedyResult result = head(trunk);
-        result.gpu_ms += embedding_gpu + trunk_gpu;
-        result.wall_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - started).count();
-        return result;
+        if (token >= config_.vocabulary_size) throw std::out_of_range("token id out of range");
+        if (reset) reset_all_state();
+        if (!can_decode()) {
+            throw std::runtime_error("persistent decode capacity exhausted; export to MLX");
+        }
+        std::vector<id<MTLCommandBuffer>> commands;
+        try {
+            encode_trunk(token, commands, true);
+        } catch (...) {
+            // Already committed groups may still own scratch/state. Drain them
+            // before unwinding, resetting or accepting the next request.
+            if (!commands.empty()) [commands.back() waitUntilCompleted];
+            throw;
+        }
+        return read_head_result(finish_commands(commands), started);
     }
 
     Inventory inventory_;
@@ -1462,6 +1677,7 @@ public:
     id<MTLBuffer> ple_embedding_{nil}, ple_projected_{nil}, ple_stream_{nil};
     id<MTLBuffer> ple_convolution_{nil};
     id<MTLBuffer> head_logits_{nil}, head_candidate_values_{nil}, head_candidate_ids_{nil};
+    id<MTLBuffer> head_result_values_{nil}, head_result_ids_{nil};
 };
 
 bool PersistentMetalBackend::supports(const ModelConfig& config) noexcept {
@@ -1545,6 +1761,18 @@ PersistentMetalBackend::GreedyResult PersistentMetalBackend::greedy_head(
 
 void PersistentMetalBackend::import_state(const ModelDecodeState& state) {
     impl_->import_state(state);
+}
+
+ModelDecodeState PersistentMetalBackend::export_state() const {
+    return impl_->export_state();
+}
+
+MlxArray PersistentMetalBackend::export_stream() const {
+    return impl_->export_stream();
+}
+
+bool PersistentMetalBackend::can_decode() const noexcept {
+    return impl_->can_decode();
 }
 
 void PersistentMetalBackend::prepare_shared_weights() {

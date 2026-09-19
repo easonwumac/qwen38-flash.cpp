@@ -29,6 +29,11 @@ and rejected PP/decode experiments. No new speed record is claimed by that fix.
 
 ## Current production target: VQ 2.1bpw
 
+The latest [production-dataflow experiment](vq-production-dataflow-2026-09-19.md)
+retains experimental native state/cache/recovery improvements, but does not
+change the production scorecard: an inherited EOS rule was fixed (native IF3
+recovered to 3/3), while compact verifier / GPU-indirect PP prototypes were slower.
+
 Model: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`, native packed-14 routed
 VQ, exact top-10 routing, Q8 dense backbone, checkpoint PLE, optional native Q6
 MTP sidecar, MLX 0.32.2.

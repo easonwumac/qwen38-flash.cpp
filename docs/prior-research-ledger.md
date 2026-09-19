@@ -1,5 +1,13 @@
 # Prior-research ledger
 
+Latest [production-dataflow evidence](vq-production-dataflow-2026-09-19.md):
+whole-token native activation flow is a small native-vs-native timing gain.
+Fixing an inherited forced-eight-token rule restored native strict IF3 from
+2/3 to 3/3 (MLX 3/3). Broad native quality remains unqualified. True compact
+S=5 weight sharing cost 2.643 vs 0.831 ms/block; stable GPU histogram/scatter plus
+indirect PP dispatch cost 478.39 vs 497.61 full-model PP tok/s. Both slower
+prototypes were removed; do not repeat them as an untested new direction.
+
 This document is the optimization gate for `qwen38-flash.cpp`. Before starting
 an experiment, its hypothesis must be checked against this ledger. A rejected
 experiment is not repeated unless a materially different implementation or

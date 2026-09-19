@@ -70,6 +70,7 @@ public:
         std::span<const std::uint32_t> tokens,
         DecoderLayerState& state) const;
     void materialize_speculative_state(DecoderLayerState& state) const;
+    void prepare_persistent_state(DecoderLayerState& state) const;
     void set_prefill_qmeta_cache_allowed(bool allowed) const noexcept;
     [[nodiscard]] bool clear_prefill_qmeta_cache() const;
 

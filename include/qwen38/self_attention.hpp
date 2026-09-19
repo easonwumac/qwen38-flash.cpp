@@ -48,8 +48,12 @@ public:
     [[nodiscard]] MlxArray forward_prefill(
         const MlxArray& input,
         SelfAttentionState& state) const;
+    // Materialize deferred pools before handing state to a backend which
+    // appends pools eagerly. Does not consume a token or change KV arithmetic.
+    void materialize_qsa_pools(SelfAttentionState& state) const;
 
 private:
+    void materialize_qsa_pools(SelfAttentionState& state, std::size_t total) const;
     struct QsaSelection {
         MlxArray dense_mask;
         MlxArray packed_indices;

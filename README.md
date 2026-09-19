@@ -75,6 +75,9 @@ was exported; both directions are rejected in the [results guide](docs/results-g
 
 ## Results and evidence map
 
+- [September 19 production-dataflow experiments](docs/vq-production-dataflow-2026-09-19.md):
+  persistent state/cache/recovery foundations, an EOS fix restoring native
+  IF3 to 3/3, and measured rejection of compact verifier and GPU-indirect PP paths.
 - [September 19 throughput follow-up](docs/vq-throughput-round2-2026-09-19.md):
   tile-layout and QSA experiments, paired long-context measurements, and
   the distinction between component wins and full-model gains.

@@ -454,6 +454,7 @@ void check_state_import(qwen38::PersistentMetalBackend& backend,
     qwen38::ModelDecodeState state = model.make_state();
     const std::array<std::uint32_t, 3> prefix{9419, 11, 353};
     static_cast<void>(model.prefill_chunk(prefix, state));
+    model.prepare_persistent_state(state);
     backend.import_state(state);
     const qwen38::GreedyStep expected = model.greedy_decode(2688, state);
     const auto actual = backend.greedy_decode(2688, false);
@@ -484,6 +485,7 @@ void check_q8_state_import(qwen38::PersistentMetalBackend& backend,
     if (!state.layers[3].full_attention.kv_q8) {
         throw std::runtime_error("Q8 import smoke did not create Q8 KV state");
     }
+    model.prepare_persistent_state(state);
     backend.import_state(state);
     qwen38::DecoderLayer layer(tensors, 3, tensors.manifest().config());
     qwen38::DecoderLayerState layer_state =
@@ -543,12 +545,12 @@ int main(int argc, char** argv) {
         if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_TRUNK");
             bench != nullptr && std::string_view(bench) == "1") {
             benchmark_trunk(*backend, input_bf16);
-            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 55 && inventory.shard_count != 0 ? 0 : 1;
         }
         if (const char* bench = std::getenv("QWEN38_PERSISTENT_SMOKE_BENCH_GREEDY");
             bench != nullptr && std::string_view(bench) == "1") {
             benchmark_greedy(*backend);
-            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 55 && inventory.shard_count != 0 ? 0 : 1;
         }
         qwen38::MlxTensorStore tensors(manifest);
         std::size_t first_layer = 0;
@@ -562,7 +564,7 @@ int main(int argc, char** argv) {
             check_ple(*backend, tensors, input_f32, input_bf16);
             check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
             check_head(*backend, tensors, input_f32, input_bf16);
-            return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
+            return inventory.pipeline_count == 55 && inventory.shard_count != 0 ? 0 : 1;
         }
         check_layer(*backend, tensors, 10, input_f32, input_bf16);
         check_attention_layer(*backend, tensors, 3, input_f32, input_bf16);
@@ -576,7 +578,7 @@ int main(int argc, char** argv) {
             q8_import != nullptr && std::string_view(q8_import) == "1") {
             check_q8_state_import(*backend, tensors, input_f32, input_bf16);
         }
-        return inventory.pipeline_count == 54 && inventory.shard_count != 0 ? 0 : 1;
+        return inventory.pipeline_count == 55 && inventory.shard_count != 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

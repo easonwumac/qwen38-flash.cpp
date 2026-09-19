@@ -13,6 +13,7 @@ namespace qwen38 {
 
 struct ModelDecodeState;
 class MlxTensorStore;
+class MlxArray;
 
 class PersistentMetalBackend final {
 public:
@@ -68,6 +69,10 @@ public:
     void prepare_shared_weights();
     void release_shared_weights();
     void import_state(const ModelDecodeState& state);
+    // Owning snapshots: later native steps never mutate an exported MLX array.
+    [[nodiscard]] ModelDecodeState export_state() const;
+    [[nodiscard]] MlxArray export_stream() const;
+    [[nodiscard]] bool can_decode() const noexcept;
 
 private:
     class Impl;

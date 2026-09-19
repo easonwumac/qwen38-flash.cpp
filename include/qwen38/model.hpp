@@ -98,6 +98,7 @@ public:
         std::vector<double>* layer_ms = nullptr,
         double* head_ms = nullptr) const;
     void materialize_speculative_state(ModelDecodeState& state) const;
+    void prepare_persistent_state(ModelDecodeState& state) const;
     void consume_decode(std::uint32_t token, ModelDecodeState& state) const;
     [[nodiscard]] MlxArray trace_decode(
         std::uint32_t token,

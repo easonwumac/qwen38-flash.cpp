@@ -329,7 +329,12 @@ std::string cache_compatibility_key(
             ignored.clear();
         }
     }
-    constexpr std::array<const char*, 20> state_environment{
+    source << "|persistent-state-io-v1";
+    constexpr std::array<const char*, 24> state_environment{
+        "QWEN38_PERSISTENT_METAL",
+        "QWEN38_PERSISTENT_VQ",
+        "QWEN38_PERSISTENT_ANCHOR_TOKENS",
+        "QWEN38_PERSISTENT_MIN_TOKENS",
         "QWEN38_COMPACT_QMETA",
         "QWEN38_FUSED_MOE",
         "QWEN38_DEVICE_ROUTER",
@@ -935,6 +940,12 @@ GenerationResult NativeEngine::complete_impl(
     const bool serial_only = sampling_enabled || sampling.thinking_budget_tokens != 0;
     std::mt19937_64 sampling_random(sampling.seed);
     std::scoped_lock lock(inference_mutex_);
+    struct PersistentRequestLease {
+        PersistentMetalBackend* backend;
+        ~PersistentRequestLease() {
+            if (backend != nullptr) backend->release_shared_weights();
+        }
+    } persistent_request_lease{persistent_backend_.get()};
     if (persistent_backend_ != nullptr) {
         persistent_backend_->release_shared_weights();
     }
@@ -1208,7 +1219,7 @@ GenerationResult NativeEngine::complete_impl(
     result.tokens.reserve(max_tokens);
     const char* extend_cache = std::getenv("QWEN38_EXTEND_PREFIX_CACHE");
     const bool extend_cache_enabled =
-        persistent_backend_ == nullptr &&
+        (persistent_backend_ == nullptr || mtp_head_ == nullptr) &&
         (ssd_prefix_cache_ != nullptr ||
          (extend_cache != nullptr && std::string_view(extend_cache) == "1"));
     bool mtp_cache_extendable = true;
@@ -1239,6 +1250,7 @@ GenerationResult NativeEngine::complete_impl(
             persistent_backend_->prepare_shared_weights();
             static_cast<void>(persistent_backend_->greedy_decode(0, true));
         }
+        model_.prepare_persistent_state(state);
         persistent_backend_->import_state(state);
         const std::size_t imported_token_count = state.token_count;
         state = model_.make_state();
@@ -1319,8 +1331,11 @@ GenerationResult NativeEngine::complete_impl(
     };
     const std::array<std::uint32_t, 2> stop_tokens{
         tensors_.manifest().config().end_of_sequence_token, chat_end_token_};
-    std::size_t persistent_min_tokens = persistent_backend_ == nullptr
-        ? 0 : std::min<std::size_t>(8, max_tokens);
+    // Native greedy must honor EOS just like MLX. A historical eight-token
+    // minimum replaced early EOS with the runner-up and broke short-answer
+    // instruction following (e.g. IFBench options). Only explicit diagnostic
+    // overrides may impose a minimum, and their state caches are fingerprinted.
+    std::size_t persistent_min_tokens = 0;
     if (const char* configured = std::getenv("QWEN38_PERSISTENT_MIN_TOKENS");
         persistent_backend_ != nullptr && configured != nullptr) {
         char* end = nullptr;
@@ -1389,6 +1404,14 @@ GenerationResult NativeEngine::complete_impl(
     };
     std::optional<std::size_t> pending_top2_recovery_position;
     while (result.tokens.size() < max_tokens) {
+        if (persistent_active && !persistent_reset && !persistent_backend_->can_decode()) {
+            // No partial native step: return the complete frontier to MLX so
+            // its existing Q8 slab flush handles capacity without losing context.
+            state = persistent_backend_->export_state();
+            previous_target_stream = persistent_backend_->export_stream();
+            persistent_backend_->release_shared_weights();
+            persistent_active = false;
+        }
         if (!thinking_closed && forced_tokens.empty() &&
             sampling.thinking_budget_tokens != 0 &&
             result.tokens.size() >= sampling.thinking_budget_tokens) {
@@ -1653,6 +1676,12 @@ GenerationResult NativeEngine::complete_impl(
         prefix_cache_changed = true;
     }
     const std::size_t complete_token_count = prompt_tokens.size() + result.tokens.size();
+    if (persistent_active && extend_cache_enabled &&
+        options_.prefix_cache_max_tokens != 0 &&
+        state.token_count <= options_.prefix_cache_max_tokens) {
+        state = persistent_backend_->export_state();
+        previous_target_stream = persistent_backend_->export_stream();
+    }
     const bool target_matches_output = stopped_on_terminator
         ? state.token_count == complete_token_count
         : (state.token_count < complete_token_count &&
