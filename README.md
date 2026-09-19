@@ -75,6 +75,9 @@ was exported; both directions are rejected in the [results guide](docs/results-g
 
 ## Results and evidence map
 
+- [Persistent verifier follow-up](docs/persistent-verifier-2026-09-19.md):
+  S=5 native verification was slower and rejected; a native QSA selector
+  correctness fix was retained. Production speed/quality numbers are unchanged.
 - [September 19 production-dataflow experiments](docs/vq-production-dataflow-2026-09-19.md):
   persistent state/cache/recovery foundations, an EOS fix restoring native
   IF3 to 3/3, and measured rejection of compact verifier and GPU-indirect PP paths.

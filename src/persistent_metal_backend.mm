@@ -1,6 +1,7 @@
 #include "qwen38/persistent_metal_backend.hpp"
 
 #include "persistent_metal_kernels.hpp"
+#include "persistent_qsa_selector.hpp"
 #include "qwen38/model.hpp"
 #include "qwen38/ngram.hpp"
 #include "qwen38/safetensors.hpp"
@@ -887,32 +888,9 @@ public:
         [encoder dispatchThreadgroups:MTLSizeMake(padded / 4, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
         [encoder endEncoding];
-        encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:pipeline("qsa_top128_first")];
-        [encoder setBuffer:qsa_scores_ offset:0 atIndex:0];
-        [encoder setBuffer:temp_scores_a_ offset:0 atIndex:1];
-        [encoder setBuffer:temp_ids_a_ offset:0 atIndex:2];
-        [encoder dispatchThreadgroups:MTLSizeMake(padded / 256, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-        [encoder endEncoding];
-        std::uint32_t groups = padded / 256;
-        bool source_a = true;
-        while (groups > 1) {
-            const std::uint32_t output_groups = (groups + 1) / 2;
-            encoder = [command computeCommandEncoder];
-            [encoder setComputePipelineState:pipeline("qsa_top128_merge")];
-            [encoder setBuffer:(source_a ? temp_scores_a_ : temp_scores_b_) offset:0 atIndex:0];
-            [encoder setBuffer:(source_a ? temp_ids_a_ : temp_ids_b_) offset:0 atIndex:1];
-            [encoder setBuffer:(source_a ? temp_scores_b_ : temp_scores_a_) offset:0 atIndex:2];
-            [encoder setBuffer:(output_groups == 1 ? selected_ :
-                (source_a ? temp_ids_b_ : temp_ids_a_)) offset:0 atIndex:3];
-            [encoder setBytes:&groups length:sizeof(groups) atIndex:4];
-            [encoder dispatchThreadgroups:MTLSizeMake(output_groups, 1, 1)
-                    threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [encoder endEncoding];
-            groups = output_groups;
-            source_a = !source_a;
-        }
+        persistent_metal::encode_qsa_top128(command,
+            pipeline("qsa_top128_first"), pipeline("qsa_top128_merge"), qsa_scores_,
+            temp_scores_a_, temp_scores_b_, temp_ids_a_, temp_ids_b_, selected_, padded);
     }
 
     void encode_attention(id<MTLCommandBuffer> command, const std::string& base,

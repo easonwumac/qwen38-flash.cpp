@@ -756,3 +756,20 @@ are recorded here to prevent accidental repeats:
 | Exact dual-SIMD gate/up tail split | Second SIMD computes groups 32–39, scratch restores original lanes 0–7 and the same reduction. Layer-3 output bits match, but 41-iteration gate/up samples are 0.787–0.791 ms control versus 0.825–0.831 candidate | Do not add another cross-SIMD scratch barrier for this geometry |
 | OTILE64 segmented GEMM | Exact layers 2/20/47 complete MoE medians 56.70/58.15/56.74 ms versus 55.96/56.48/55.74. Down-only widening later reached 495.61 full PP versus 505.90 control | Larger tiles alone do not improve occupancy enough |
 | Bounded BF16 expert materialization | Eight-expert blocks slow 64-row layer 2 from 13.672 to 48.184 ms. Large-row isolated reuse improves, but a 638-token full-model test falls 91.8 to 38.3 PP/s, changes output, and peaks at 39.0 GiB | Must improve full-model amortization and preserve numeric policy, not just repeated single-layer GEMM |
+
+## September 19 persistent target-verifier follow-up
+
+A real layer-major native S=1/2/5 verifier, reusable buffers, GPU argmax and
+every-prefix state commit were implemented. Native-serial parity passed 33
+prefix/continuation cases and 114 token/top-2/logit/stream comparisons, including
+QSA and Q8-cold state. Interleaving rows and folding causal GDN updates into
+multi-row kernels did not close the gap: with 12 measured samples per arm,
+S=2 was 41.38 versus 41.54 ms, but S=5 was 84.57 versus 62.84 ms (+34.6%).
+Shared-weight target A/B peak was 38.09 GiB; native/MLX IDs were not identical.
+The prototype was removed before learned-MTP/HTTP integration or quality runs.
+Do not retry the same scalar-kernel row lifting as a new shared-weight design.
+
+The experiment exposed a pre-existing native QSA bug: a one-group top-128
+reduction wrote temporary IDs but skipped the final destination because there
+was no merge pass. The fix and CPU-oracle Metal regression test are retained.
+Full conditions and raw samples: [report](persistent-verifier-2026-09-19.md).

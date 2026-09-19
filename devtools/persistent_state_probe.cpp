@@ -247,6 +247,29 @@ void parity(const ModelManifest& manifest) {
     if (matches != 16) throw std::runtime_error("native backend is not production-parity qualified");
 }
 
+// Importing the same state must not depend on stale selector scratch left by
+// another request. Exercise both ends of the one-group selector range.
+void qsa_reuse(PersistentMetalBackend& backend) {
+    for (int context : {515, 1023}) {
+        const auto origin = fixture(context, 0);
+        backend.import_state(fixture(511, 0));
+        static_cast<void>(backend.greedy_decode(9419));
+        backend.import_state(origin);
+        const auto expected = backend.greedy_decode(9419);
+        const auto expected_state = backend.export_state();
+        const auto expected_stream = backend.export_stream();
+        backend.import_state(fixture(2051, 2048));
+        static_cast<void>(backend.greedy_decode(11));
+        backend.import_state(origin);
+        const auto actual = backend.greedy_decode(9419);
+        if (actual.token != expected.token || actual.alternative_token != expected.alternative_token ||
+            actual.logit != expected.logit) throw std::runtime_error("QSA selector depends on prior request");
+        equal_states(expected_state, backend.export_state());
+        equal(expected_stream, backend.export_stream(), "QSA scratch reuse stream");
+        std::cout << "qsa_reuse context=" << context << " token_logit_stream_state_exact=true\n" << std::flush;
+    }
+}
+
 void boundary(const ModelManifest& manifest) {
     apply_automatic_runtime_config();
     ::setenv("QWEN38_KV_CACHE", "q8", 1);
@@ -293,9 +316,9 @@ void boundary(const ModelManifest& manifest) {
 int main(int argc, char** argv) {
     try {
         if (argc != 3 || std::getenv("QWEN38_MEMORY_GUARD") == nullptr)
-            throw std::runtime_error("usage under memory_guard: persistent-state-probe MODEL state|pipeline|parity|boundary");
+            throw std::runtime_error("usage under memory_guard: persistent-state-probe MODEL state|pipeline|parity|boundary|qsa-reuse");
         const std::string mode(argv[2]);
-        if (mode != "state" && mode != "pipeline" && mode != "parity" && mode != "boundary")
+        if (mode != "state" && mode != "pipeline" && mode != "parity" && mode != "boundary" && mode != "qsa-reuse")
             throw std::runtime_error("invalid mode");
         ::setenv("QWEN38_PERSISTENT_VQ", "1", 1);
         static_cast<void>(MlxArray::set_cache_limit(64 * 1024 * 1024));
@@ -308,7 +331,8 @@ int main(int argc, char** argv) {
         if (mode == "state") {
             MlxTensorStore tensors(manifest);
             state_io(*backend, tensors);
-        } else pipeline(*backend);
+        } else if (mode == "qsa-reuse") qsa_reuse(*backend);
+        else pipeline(*backend);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -1,0 +1,1224 @@
+{
+  "status": "rejected_not_promoted",
+  "model": "TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw",
+  "revision": "64b0fb0f98a552d91fb9abd5531d547b2e78c8a8",
+  "hardware": "Apple M5 Pro, 18 CPU cores, 64 GiB, macOS 26.5",
+  "runtime": "MLX 0.32.2; native Metal safe math",
+  "protocol": {
+    "prompt_token_ids": "127 repetitions of 9419",
+    "target_inputs": [
+      9419,
+      11,
+      271,
+      40,
+      13
+    ],
+    "widths": [
+      2,
+      5
+    ],
+    "sampling": "fixed inputs; greedy argmax; not autoregressive generation",
+    "mtp": "target verifier only; no drafting, learned MTP state replay or HTTP integration",
+    "quantization": "packed-14 d8 / uint8 d2 VQ, INT8/U8 compact d8 codebooks, Q8 dense, exact top-10",
+    "arms": "A B B A; each block eight iterations, first two warmups; 12 measured observations per arm per width",
+    "timing": "verification only; native full-accept commit separate; state import outside timer; tokens differ across native and MLX",
+    "thermal": "AC, no active thermal/frequency controls; no recorded pmset warnings; OS noise uncontrolled",
+    "kv": "127-token BF16 hot KV; no Q8 cold storage in timing fixture"
+  },
+  "state_checks": {
+    "contexts": [
+      {
+        "tokens": 3,
+        "cold": 0
+      },
+      {
+        "tokens": 511,
+        "cold": 0
+      },
+      {
+        "tokens": 2051,
+        "cold": 2048
+      }
+    ],
+    "widths": [
+      1,
+      2,
+      5
+    ],
+    "prefix_count": 33,
+    "per_row_token_top2_logit_stream_comparisons": 114,
+    "continuation_state_checks": 33,
+    "oracle": "native serial, synthetic state; not MLX equivalence or benchmark quality",
+    "cases": [
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 1,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 2951.115584,
+        "gpu_ms": 1674.548792,
+        "serial_with_export_ms": 7616.775333
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 1,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 30.388125,
+        "gpu_ms": 29.62779166,
+        "serial_with_export_ms": 7616.775333
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 2,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 41.018042,
+        "gpu_ms": 40.25425,
+        "serial_with_export_ms": 66.491667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 2,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 40.245292,
+        "gpu_ms": 39.98174999,
+        "serial_with_export_ms": 66.491667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 2,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 40.544209,
+        "gpu_ms": 39.79166666,
+        "serial_with_export_ms": 66.491667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 86.315292,
+        "gpu_ms": 85.57191666,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 85.535792,
+        "gpu_ms": 84.88041667,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 86.795875,
+        "gpu_ms": 86.081,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 3,
+        "exact": true,
+        "wall_ms": 86.44725,
+        "gpu_ms": 85.73004166,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 4,
+        "exact": true,
+        "wall_ms": 86.120625,
+        "gpu_ms": 85.389125,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 3,
+        "cold": 0,
+        "width": 5,
+        "prefix": 5,
+        "exact": true,
+        "wall_ms": 84.959333,
+        "gpu_ms": 84.21254167,
+        "serial_with_export_ms": 167.357667
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 1,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 32.687791,
+        "gpu_ms": 31.92816666,
+        "serial_with_export_ms": 37.372417
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 1,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 31.775542,
+        "gpu_ms": 31.52925,
+        "serial_with_export_ms": 37.372417
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 2,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 44.374042,
+        "gpu_ms": 43.63870834,
+        "serial_with_export_ms": 74.957834
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 2,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 43.664167,
+        "gpu_ms": 42.90041667,
+        "serial_with_export_ms": 74.957834
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 2,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 43.716792,
+        "gpu_ms": 42.9715,
+        "serial_with_export_ms": 74.957834
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 93.96775,
+        "gpu_ms": 93.183375,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 93.50525,
+        "gpu_ms": 92.74108333,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 93.9935,
+        "gpu_ms": 93.23283334,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 3,
+        "exact": true,
+        "wall_ms": 94.570334,
+        "gpu_ms": 93.82483333,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 4,
+        "exact": true,
+        "wall_ms": 94.511458,
+        "gpu_ms": 93.80879166,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 511,
+        "cold": 0,
+        "width": 5,
+        "prefix": 5,
+        "exact": true,
+        "wall_ms": 94.457,
+        "gpu_ms": 93.72641667,
+        "serial_with_export_ms": 185.992167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 1,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 32.036917,
+        "gpu_ms": 31.31154166,
+        "serial_with_export_ms": 38.197875
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 1,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 32.7005,
+        "gpu_ms": 31.932375,
+        "serial_with_export_ms": 38.197875
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 2,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 45.063125,
+        "gpu_ms": 44.32595834,
+        "serial_with_export_ms": 75.924959
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 2,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 44.418792,
+        "gpu_ms": 43.65883333,
+        "serial_with_export_ms": 75.924959
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 2,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 44.318875,
+        "gpu_ms": 43.59020834,
+        "serial_with_export_ms": 75.924959
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 0,
+        "exact": true,
+        "wall_ms": 95.159666,
+        "gpu_ms": 94.39024999,
+        "serial_with_export_ms": 190.033167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 1,
+        "exact": true,
+        "wall_ms": 95.088292,
+        "gpu_ms": 94.31337499,
+        "serial_with_export_ms": 190.033167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 2,
+        "exact": true,
+        "wall_ms": 95.1965,
+        "gpu_ms": 94.44108334,
+        "serial_with_export_ms": 190.033167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 3,
+        "exact": true,
+        "wall_ms": 95.14625,
+        "gpu_ms": 94.39458334,
+        "serial_with_export_ms": 190.033167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 4,
+        "exact": true,
+        "wall_ms": 95.72075,
+        "gpu_ms": 94.95483333,
+        "serial_with_export_ms": 190.033167
+      },
+      {
+        "context": 2051,
+        "cold": 2048,
+        "width": 5,
+        "prefix": 5,
+        "exact": true,
+        "wall_ms": 95.069375,
+        "gpu_ms": 94.27016666,
+        "serial_with_export_ms": 190.033167
+      }
+    ]
+  },
+  "guard": {
+    "exit_code": 0,
+    "minimum_available_gib": 9.415573120117188,
+    "peak_footprint_gib": 38.086498118937016,
+    "peak_rss_gib": 24.85205078125,
+    "reason": "child_exit",
+    "start_available_gib": 47.04310607910156
+  },
+  "samples": [
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 344.694,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 41.6609,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.4838,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 40.9469,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 42.2092,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 42.6208,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 40.9589,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.5957,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 418.235,
+      "commit_ms": 0.184625,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 41.4527,
+      "commit_ms": 0.188542,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.5129,
+      "commit_ms": 0.174458,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 40.5969,
+      "commit_ms": 0.175875,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.633,
+      "commit_ms": 0.164917,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 40.9023,
+      "commit_ms": 0.172667,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.4221,
+      "commit_ms": 0.195458,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 40.9903,
+      "commit_ms": 0.1725,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 40.628,
+      "commit_ms": 0.173083,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 41.0834,
+      "commit_ms": 0.200875,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.7261,
+      "commit_ms": 0.179375,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 40.8288,
+      "commit_ms": 0.185917,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.7108,
+      "commit_ms": 0.160166,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 42.3609,
+      "commit_ms": 0.161625,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 40.9832,
+      "commit_ms": 0.156417,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 41.3418,
+      "commit_ms": 0.170125,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 382.443,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 41.52,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.5928,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.9921,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.748,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.4125,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.4365,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 2,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 41.3721,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 63.1554,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 63.2927,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.8053,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.8814,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.6115,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 102.437,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.4517,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 63.0924,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 379.523,
+      "commit_ms": 0.179666,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 84.2613,
+      "commit_ms": 0.190833,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.9552,
+      "commit_ms": 0.145375,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.3142,
+      "commit_ms": 0.178875,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.6794,
+      "commit_ms": 0.175833,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.2858,
+      "commit_ms": 0.194292,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.4398,
+      "commit_ms": 0.188541,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.7066,
+      "commit_ms": 0.1295,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 85.0265,
+      "commit_ms": 0.153958,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 1,
+      "wall_ms": 84.9417,
+      "commit_ms": 0.174375,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.9028,
+      "commit_ms": 0.1625,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.5252,
+      "commit_ms": 0.160625,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.8534,
+      "commit_ms": 0.142583,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.3774,
+      "commit_ms": 0.178084,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.5425,
+      "commit_ms": 0.194708,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 1,
+      "warmup": 0,
+      "wall_ms": 84.5907,
+      "commit_ms": 0.183666,
+      "tokens": [
+        9419,
+        271,
+        9419,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 390.414,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 1,
+      "wall_ms": 63.2536,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 63.4885,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 63.3196,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.1442,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.2494,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 62.0126,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    },
+    {
+      "width": 5,
+      "native": 0,
+      "warmup": 0,
+      "wall_ms": 63.7441,
+      "commit_ms": 0,
+      "tokens": [
+        9419,
+        271,
+        248068,
+        1436,
+        271
+      ]
+    }
+  ],
+  "retained_qsa_fix": {
+    "candidate_counts": [
+      129,
+      255,
+      256,
+      257,
+      511,
+      512,
+      513,
+      769,
+      65536
+    ],
+    "repeats_per_count": 2,
+    "poisoned_destination": true,
+    "oracle": "CPU exact top-128 set on unique scores",
+    "negative_control": "old first-pass output destination fails at 129",
+    "full_model_reuse_contexts": [
+      515,
+      1023
+    ],
+    "reuse_exact": [
+      "token",
+      "alternate token",
+      "logit",
+      "hidden stream",
+      "complete next state"
+    ],
+    "production_mlx_verifier_changed": false
+  }
+}

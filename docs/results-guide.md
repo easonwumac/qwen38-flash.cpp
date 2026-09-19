@@ -29,6 +29,11 @@ and rejected PP/decode experiments. No new speed record is claimed by that fix.
 
 ## Current production target: VQ 2.1bpw
 
+The [persistent-verifier follow-up](persistent-verifier-2026-09-19.md) was
+rejected: S=5 target verification took 84.57 ms versus 62.84 ms for the existing
+path. A native single-group QSA selector bug was fixed; production MTP and its
+scorecard remain unchanged.
+
 The latest [production-dataflow experiment](vq-production-dataflow-2026-09-19.md)
 retains experimental native state/cache/recovery improvements, but does not
 change the production scorecard: an inherited EOS rule was fixed (native IF3

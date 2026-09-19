@@ -330,6 +330,15 @@ if(QWEN38_BUILD_TESTS)
     include(CTest)
     enable_testing()
 
+    if(APPLE AND TARGET qwen38_mlx)
+        add_executable(qwen38-persistent-qsa-tests tests/persistent_qsa_test.mm)
+        target_link_libraries(qwen38-persistent-qsa-tests PRIVATE "-framework Foundation" "-framework Metal")
+        target_compile_options(qwen38-persistent-qsa-tests PRIVATE -fobjc-arc)
+        target_link_options(qwen38-persistent-qsa-tests PRIVATE -fobjc-arc)
+        add_test(NAME qwen38-persistent-qsa-tests COMMAND qwen38-persistent-qsa-tests)
+        set_tests_properties(qwen38-persistent-qsa-tests PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
+
     add_executable(qwen38-tests
         tests/api_test.cpp
         tests/expert_cache_test.cpp
