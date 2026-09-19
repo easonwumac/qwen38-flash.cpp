@@ -47,6 +47,9 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     ModelManifest result;
     result.directory_ = std::filesystem::canonical(model_directory);
     const Json root = Json::parse(read_text(result.directory_ / "config.json"));
+    const Json* external_shards_value = root.find("qwen38_external_shards");
+    const bool external_shards = external_shards_value != nullptr &&
+        external_shards_value->as_boolean();
     const auto& architectures = root.at("architectures").as_array();
     if (architectures.size() != 1) {
         throw std::runtime_error("expected exactly one model architecture");
@@ -269,8 +272,11 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
     std::unordered_set<std::string> shards;
     for (const auto& [tensor_name, shard_value] : index.at("weight_map").as_object()) {
         const std::string shard = shard_value.as_string();
-        if (tensor_name.empty() || shard.empty() || shard.find('/') != std::string::npos ||
-            shard.find('\\') != std::string::npos) {
+        const std::filesystem::path shard_path(shard);
+        const bool nested = shard.find('/') != std::string::npos ||
+            shard.find('\\') != std::string::npos;
+        if (tensor_name.empty() || shard.empty() || shard_path.is_absolute() ||
+            (nested && !external_shards)) {
             throw std::runtime_error("invalid model shard mapping for " + tensor_name);
         }
         result.weight_map_.emplace(tensor_name, shard);
