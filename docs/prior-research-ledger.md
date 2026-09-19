@@ -773,3 +773,33 @@ The experiment exposed a pre-existing native QSA bug: a one-group top-128
 reduction wrote temporary IDs but skipped the final destination because there
 was no merge pass. The fix and CPU-oracle Metal regression test are retained.
 Full conditions and raw samples: [report](persistent-verifier-2026-09-19.md).
+
+## September 19 mixed-d4 VQ v2 kernel probes
+
+The mixed-codebook v2 checkpoint was used to test whether its 256-entry d4
+tables could close the **600 PP / 40 target-only / 70 native-MTP tok/s** goals.
+The paired v2 baseline remains 535.59 warmed PP on the 7,064-token corpus,
+30.23 target-only on the 64-token fixture, and 54.86 native MTP on the same
+fixture. Reaching the goals would require 12.0%, 32.3%, and 27.6% more
+throughput respectively; equivalently the latter two token paths need about
+24.4% and 21.6% less latency. None of the candidates passed the isolated gate,
+so no full-model or quality claim was inferred from them.
+
+| Candidate | Evidence | Decision |
+|---|---|---|
+| Precompute all 256 d4 codebook dots | Materializing activation-by-codebook tables added 1.25 MiB for gate/up and 1.56 MiB for down at batch one. On real v2 layer 27, the complete routed MoE moved directionally from about 1.24 ms to 1.50 ms for gate/up lookup and 2.01 ms for down lookup | Extra dispatch and table traffic dominate a codebook already small enough for cache. Removed before full-model testing |
+| Exact d4 packed-word cache | A 101-iteration interleaved layer-27 A/B kept identical output bits and moved complete MoE median only from 1.1265 to 1.1188 ms (0.7%) | Below the 5% component gate; removed |
+| d4 `float4` codebook dot | Counterposed layer-27 runs measured 1.2607/1.2709 ms controls versus 1.1616 ms candidate, but only nine of 48 layers have d4 gate/up and the output checksum changed by about 1.9e-5. A down-only layer showed no repeatable gain | Too little whole-model reach for a new approximate numeric policy; removed before quality testing |
+| Exact prefill d4 word reuse | For 2,048 rows, layer 27 control/candidate arrays overlapped around 50.0 ms; down-only layer 2 was about 54.4--54.6 ms. Both retained exact output bits | The compiler/cache already eliminates the apparent repeated packed-word cost; removed |
+| Exact S=5 cross-row expert reuse | A route leader reconstructed weights once for every row selecting the same expert; down used a threadgroup unique-expert table and restored the original slot reduction. Output bits matched, but complete MoE rose from roughly 1.3 ms to 3.2--3.8 ms on layers 2 and 27 | Five-row accumulator pressure and reduced SIMD occupancy cost more than repeated weight reads. Removed |
+| Exact d4 threadgroup codebook staging | Each 256-thread group staged the 2 KiB down or 4 KiB gate/up tables before use. Two 201-iteration interleaved layer probes retained exact output bits but showed no stable complete-MoE gain amid the same scheduling variation | Device-cache lookup is not the limiting cost once the table is only K256; removed |
+
+Protocol: `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw` revision
+`87d89bc328f8226deb95e26d9a69c7cd1f353007`, original FP16 d4 codebooks,
+existing compact d8 policy, exact top-10 routing, deterministic embedding
+fixture, Apple M5 Pro 18-core/64 GiB, macOS 26.5 and MLX 0.32.2. Component
+probes ran one at a time under the memory guard; two warmups per A/B arm were
+excluded where the interleaved harness was used. No MTP head, HTTP serving,
+long context, sampling or model-quality benchmark ran because every candidate
+failed the component promotion gate. The experimental kernels and switches
+were removed; only this textual record remains.
