@@ -457,7 +457,7 @@ SparseMoe::SparseMoe(
               std::string(prefix) + ".switch_mlp.gate_proj").group_size,
           "expert quantization group_size")),
       normalize_topk_probability_(normalize_topk_probability),
-      paged_store_(tensors.paged() ? &tensors : nullptr),
+      paged_store_(tensors.paged_layer(layer_index_) ? &tensors : nullptr),
       prefix_(prefix),
       has_routed_(
           tensors.manifest().has_tensor(
@@ -465,11 +465,11 @@ SparseMoe::SparseMoe(
           tensors.manifest().has_tensor(
               std::string(prefix) + ".switch_mlp.gate_proj.codes")),
       router_(load_linear(tensors, std::string(prefix) + ".gate")),
-      expert_gate_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+      expert_gate_(paged_store_ != nullptr || !has_routed_ ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.gate_proj")),
-      expert_up_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+      expert_up_(paged_store_ != nullptr || !has_routed_ ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.up_proj")),
-      expert_down_(tensors.paged() || !has_routed_ ? QuantizedProjection{} : load_projection(
+      expert_down_(paged_store_ != nullptr || !has_routed_ ? QuantizedProjection{} : load_projection(
           tensors, std::string(prefix) + ".switch_mlp.down_proj")),
       shared_gate_(load_projection(
           tensors, std::string(prefix) + ".shared_expert.gate_proj")),
@@ -488,6 +488,13 @@ SparseMoe::SparseMoe(
     if (paged_store_) {
         if (experts_per_token_ != experts_per_token || compact_qmeta_requested_bits() != 0)
             throw std::runtime_error("paged probe preserves original experts and affine metadata");
+        const std::string routed = std::string(prefix) + ".switch_mlp.";
+        if (tensors.manifest().vector_quantization_for(routed + "gate_proj") != nullptr) {
+            expert_gate_ = load_paged_vq_projection(tensors, routed + "gate_proj");
+            expert_up_ = load_paged_vq_projection(tensors, routed + "up_proj");
+            expert_down_ = load_paged_vq_projection(tensors, routed + "down_proj");
+            fused_vq_ = true;
+        }
         return;
     }
     compact_qmeta_ =
@@ -556,6 +563,33 @@ SparseMoe::SparseMoe(
             fused_down_ = fused_down_kernel();
         }
     }
+}
+
+SparseMoe::QuantizedProjection SparseMoe::load_paged_vq_projection(
+    MlxTensorStore& tensors,
+    const std::string_view name) {
+    const std::string base(name);
+    const VectorQuantizationSpec* vq =
+        tensors.manifest().vector_quantization_for(base);
+    if (vq == nullptr) {
+        throw std::runtime_error("paged VQ projection is missing metadata: " + base);
+    }
+    MlxArray codebook = tensors.tensor(base + ".codebook");
+    if (codebook.shape() != std::vector<int>({
+            checked_int(vq->codebook_size, "VQ codebook size"),
+            checked_int(vq->vector_dimension, "VQ vector dimension")}) ||
+        codebook.dtype() != MLX_FLOAT16) {
+        throw std::runtime_error("invalid paged VQ codebook for " + base);
+    }
+    return {
+        .codebook = std::move(codebook),
+        .group_size = checked_int(vq->group_size, "VQ group size"),
+        .input_dimension = checked_int(vq->input_dimension, "VQ input"),
+        .output_dimension = checked_int(vq->output_dimension, "VQ output"),
+        .vector_dimension = checked_int(vq->vector_dimension, "VQ vector dimension"),
+        .packed_bits = static_cast<int>(vq->packed_bits),
+        .vector_quantized = true,
+    };
 }
 
 SparseMoe::QuantizedProjection SparseMoe::load_projection(
@@ -963,47 +997,63 @@ MlxArray SparseMoe::decode_vector_quantized_expert(
 }
 
 RouterSelection SparseMoe::route_decode(const MlxArray& input) const {
+    return route_decode_batch(input).front();
+}
+
+std::vector<RouterSelection> SparseMoe::route_decode_batch(
+    const MlxArray& input) const {
     const auto shape = input.shape();
-    if (shape.size() != 3 || shape[0] != 1 || shape[1] != 1) {
-        throw std::runtime_error("decode router requires input shape [1,1,hidden]");
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 8) {
+        throw std::runtime_error("decode router requires input shape [1,S,hidden], S=1..8");
     }
     MlxArray logits = project_linear(input, router_);
     const std::vector<float> values = logits.astype(MLX_FLOAT32).to_float32();
-    if (values.size() != expert_count_) throw std::runtime_error("router width mismatch");
-    const float maximum = *std::max_element(values.begin(), values.end());
-    std::vector<float> probabilities(values.size());
-    double denominator = 0.0;
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        probabilities[index] = std::exp(values[index] - maximum);
-        denominator += probabilities[index];
+    const std::size_t rows = static_cast<std::size_t>(shape[1]);
+    if (values.size() != rows * expert_count_) {
+        throw std::runtime_error("router width mismatch");
     }
-    for (float& probability : probabilities) {
-        probability = static_cast<float>(static_cast<double>(probability) / denominator);
+    std::vector<RouterSelection> result;
+    result.reserve(rows);
+    for (std::size_t row = 0; row < rows; ++row) {
+        const auto begin = values.begin() + static_cast<std::ptrdiff_t>(row * expert_count_);
+        const auto end = begin + static_cast<std::ptrdiff_t>(expert_count_);
+        const float maximum = *std::max_element(begin, end);
+        std::vector<float> probabilities(expert_count_);
+        double denominator = 0.0;
+        for (std::size_t index = 0; index < expert_count_; ++index) {
+            probabilities[index] = std::exp(begin[static_cast<std::ptrdiff_t>(index)] - maximum);
+            denominator += probabilities[index];
+        }
+        for (float& probability : probabilities) {
+            probability = static_cast<float>(
+                static_cast<double>(probability) / denominator);
+        }
+        std::vector<std::size_t> order(expert_count_);
+        std::iota(order.begin(), order.end(), 0);
+        std::partial_sort(
+            order.begin(),
+            order.begin() + static_cast<std::ptrdiff_t>(experts_per_token_),
+            order.end(),
+            [&probabilities](const std::size_t left, const std::size_t right) {
+                if (probabilities[left] != probabilities[right]) {
+                    return probabilities[left] > probabilities[right];
+                }
+                return left < right;
+            });
+        order.resize(experts_per_token_);
+        std::vector<float> weights;
+        weights.reserve(experts_per_token_);
+        float selected_sum = 0.0F;
+        for (const std::size_t expert : order) {
+            weights.push_back(probabilities[expert]);
+            selected_sum += probabilities[expert];
+        }
+        if (normalize_topk_probability_) {
+            for (float& weight : weights) weight /= selected_sum;
+        }
+        result.push_back({.experts = std::move(order), .weights = std::move(weights)});
     }
-    std::vector<std::size_t> order(expert_count_);
-    std::iota(order.begin(), order.end(), 0);
-    std::partial_sort(
-        order.begin(),
-        order.begin() + static_cast<std::ptrdiff_t>(experts_per_token_),
-        order.end(),
-        [&probabilities](const std::size_t left, const std::size_t right) {
-            if (probabilities[left] != probabilities[right]) {
-                return probabilities[left] > probabilities[right];
-            }
-            return left < right;
-        });
-    order.resize(experts_per_token_);
-    std::vector<float> weights;
-    weights.reserve(experts_per_token_);
-    float selected_sum = 0.0F;
-    for (const std::size_t expert : order) {
-        weights.push_back(probabilities[expert]);
-        selected_sum += probabilities[expert];
-    }
-    if (normalize_topk_probability_) {
-        for (float& weight : weights) weight /= selected_sum;
-    }
-    return {.experts = std::move(order), .weights = std::move(weights)};
+    return result;
 }
 
 MlxArray SparseMoe::forward_experts_decode(const MlxArray& input) const {
@@ -1233,6 +1283,112 @@ MlxArray SparseMoe::forward_shared(const MlxArray& input) const {
     return MlxArray::multiply(shared_output, shared_router);
 }
 
+MlxArray SparseMoe::forward_paged_vq_group(const MlxArray& input) const {
+    const auto shape = input.shape();
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 8) {
+        throw std::runtime_error("paged VQ group requires [1,S,hidden], S=1..8");
+    }
+    const int rows = shape[1];
+    const int topk = checked_int(experts_per_token_, "paged VQ topk");
+    std::vector<RouterSelection> selections = route_decode_batch(input);
+    std::vector<bool> selected(expert_count_, false);
+    for (const RouterSelection& selection : selections) {
+        if (selection.experts.size() != experts_per_token_) {
+            throw std::runtime_error("paged VQ routing width mismatch");
+        }
+        for (const std::size_t expert : selection.experts) {
+            selected[expert] = true;
+        }
+    }
+
+    // Read each expert once for the entire verifier/prefill microbatch.  The
+    // stable ascending order also turns the six row reads into mostly forward
+    // shard access instead of following the per-token route order.
+    std::vector<std::size_t> unique_experts;
+    std::vector<std::int32_t> local_by_expert(expert_count_, -1);
+    for (std::size_t expert = 0; expert < expert_count_; ++expert) {
+        if (!selected[expert]) continue;
+        unique_experts.push_back(expert);
+    }
+    std::vector<MlxTensorStore::ExpertLease> leases;
+    leases.reserve(unique_experts.size());
+    for (std::size_t index = 0; index < unique_experts.size(); ++index) {
+        local_by_expert[unique_experts[index]] = static_cast<std::int32_t>(index);
+        leases.push_back(paged_store_->expert(prefix_, unique_experts[index]));
+    }
+    std::vector<MlxArray> packed;
+    packed.reserve(6);
+    for (std::size_t field = 0; field < 6; ++field) {
+        std::vector<MlxArray> field_rows;
+        field_rows.reserve(leases.size());
+        for (const auto& lease : leases) {
+            if (lease->size() != 6) {
+                throw std::runtime_error("paged VQ expert bundle is incomplete");
+            }
+            field_rows.push_back((*lease)[field].expand_dims(0));
+        }
+        packed.push_back(MlxArray::concatenate_many(field_rows, 0));
+    }
+    std::vector<std::int32_t> local_ids;
+    std::vector<float> route_weights;
+    local_ids.reserve(static_cast<std::size_t>(rows * topk));
+    route_weights.reserve(static_cast<std::size_t>(rows * topk));
+    for (const RouterSelection& selection : selections) {
+        for (std::size_t rank = 0; rank < selection.experts.size(); ++rank) {
+            local_ids.push_back(local_by_expert[selection.experts[rank]]);
+            route_weights.push_back(selection.weights[rank]);
+        }
+    }
+    const MlxArray experts = MlxArray::from_int32(
+        local_ids, std::vector<int>{rows, topk});
+    const MlxArray weights = MlxArray::from_float32(
+        route_weights, std::vector<int>{rows, topk});
+    MlxArray routed = forward_vq_routed_arrays(
+        input, experts, weights, rows,
+        packed[0], packed[1], packed[2], packed[3], packed[4], packed[5]);
+    routed.eval();
+    const auto stream = mlx_default_gpu_stream_new();
+    const int status = mlx_synchronize(stream);
+    static_cast<void>(mlx_stream_free(stream));
+    if (status != 0) throw std::runtime_error("paged VQ completion failed");
+    paged_store_->finish_expert_batch();
+    return MlxArray::add(routed, forward_shared(input));
+}
+
+MlxArray SparseMoe::forward_paged_vq_row(const MlxArray& input) const {
+    return forward_paged_vq_group(input);
+}
+
+MlxArray SparseMoe::forward_paged_vq(const MlxArray& input) const {
+    const auto shape = input.shape();
+    if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024) {
+        throw std::runtime_error("paged VQ MoE requires [1,S,hidden], S=1..1024");
+    }
+    // Learned-MTP verifies at most four rows.  The legacy rowwise path is
+    // slightly faster at that width, while prompt chunks benefit from sharing
+    // expert loads once they are wider than the verifier.
+    if (shape[1] <= 4) {
+        std::vector<MlxArray> legacy;
+        legacy.reserve(static_cast<std::size_t>(shape[1]));
+        for (int row = 0; row < shape[1]; ++row) {
+            legacy.push_back(forward_paged_vq_row(
+                slice_sequence_row(input, static_cast<std::size_t>(row))));
+        }
+        return concatenate_sequence_rows(legacy);
+    }
+    if (shape[1] <= 8) return forward_paged_vq_group(input);
+    std::vector<MlxArray> rows;
+    rows.reserve(static_cast<std::size_t>((shape[1] + 7) / 8));
+    for (int begin = 0; begin < shape[1]; begin += 8) {
+        const int end = std::min(begin + 8, shape[1]);
+        rows.push_back(forward_paged_vq_group(input.slice(
+            std::vector<int>{0, begin, 0},
+            std::vector<int>{1, end, shape[2]},
+            std::vector<int>{1, 1, 1})));
+    }
+    return concatenate_sequence_rows(rows);
+}
+
 MlxArray SparseMoe::forward_paged_packed(const MlxArray& input) const {
     const auto selection = route_decode(input);
     const int topk = checked_int(selection.experts.size(), "packed topk");
@@ -1385,6 +1541,7 @@ MlxArray SparseMoe::forward_paged(const MlxArray& input) const {
     const auto shape = input.shape();
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 1024)
         throw std::runtime_error("paged MoE requires [1,S,hidden], S=1..1024");
+    if (fused_vq_) return forward_paged_vq(input);
     if (paged_store_->batch_experts() && paged_store_->grouped_prefill() && shape[1] > 1)
         return forward_paged_grouped(input);
     if (paged_store_->fixed_slots() && shape[1]==1 &&
@@ -1483,6 +1640,24 @@ MlxArray SparseMoe::forward_vq_routed_batch(
     const MlxArray& experts,
     const MlxArray& weights,
     const int batch) const {
+    return forward_vq_routed_arrays(
+        input, experts, weights, batch,
+        expert_gate_.weight, expert_gate_.scales,
+        expert_up_.weight, expert_up_.scales,
+        expert_down_.weight, expert_down_.scales);
+}
+
+MlxArray SparseMoe::forward_vq_routed_arrays(
+    const MlxArray& input,
+    const MlxArray& experts,
+    const MlxArray& weights,
+    const int batch,
+    const MlxArray& gate_codes,
+    const MlxArray& gate_scales,
+    const MlxArray& up_codes,
+    const MlxArray& up_scales,
+    const MlxArray& down_codes,
+    const MlxArray& down_scales) const {
     if (!fused_vq_ || batch < 1 || batch > 8) {
         throw std::runtime_error("VQ routed batch requires 1 to 8 rows");
     }
@@ -1533,10 +1708,10 @@ MlxArray SparseMoe::forward_vq_routed_batch(
     const std::array<int, 3> threadgroup{256, 1, 1};
     const MlxArray* gate_inputs[]{
         &input,
-        &expert_gate_.weight, &gate_codebook, &gate_cb_scales, &gate_cb_biases,
-        &expert_gate_.scales,
-        &expert_up_.weight, &up_codebook, &up_cb_scales, &up_cb_biases,
-        &expert_up_.scales,
+        &gate_codes, &gate_codebook, &gate_cb_scales, &gate_cb_biases,
+        &gate_scales,
+        &up_codes, &up_codebook, &up_cb_scales, &up_cb_biases,
+        &up_scales,
         &experts};
     MlxArray hidden = std::move(vq_gate_up_kernel()->apply(
         gate_inputs, gate_outputs,
@@ -1559,8 +1734,8 @@ MlxArray SparseMoe::forward_vq_routed_batch(
     }};
     const int down_groups = (batch * expert_down_.output_dimension + 7) / 8;
     const MlxArray* down_inputs[]{
-        &hidden, &expert_down_.weight, &down_codebook,
-        &down_cb_scales, &down_cb_biases, &expert_down_.scales,
+        &hidden, &down_codes, &down_codebook,
+        &down_cb_scales, &down_cb_biases, &down_scales,
         &experts, &weights};
     return std::move(vq_down_reduce_kernel()->apply(
         down_inputs, down_outputs,

@@ -102,6 +102,7 @@ private:
     std::unique_ptr<GatedDeltaNet> linear_attention_;
     std::unique_ptr<SelfAttention> full_attention_;
     std::unique_ptr<Ple> ple_;
+    bool paged_mlp_{false};
     SparseMoe mlp_;
     bool has_mlp_output_map_{false};
     bool has_low_rank_mlp_output_map_{false};

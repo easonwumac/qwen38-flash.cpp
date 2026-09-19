@@ -1,0 +1,36 @@
+{
+  "date": "2026-09-20",
+  "hardware": "Apple M5 Pro, 18 CPU cores, 64 GiB unified memory",
+  "software": "macOS 26.5, MLX 0.32.2",
+  "thermal": "AC power, no active thermal conditioning",
+  "memory_limit_gib": 40.0,
+  "models": {
+    "base": "TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw v1",
+    "overlay": "TheDrainFlorist/Qwen3.8-Flash-Next-VQ-3.2bpw",
+    "mtp": "VQ 2.1bpw native Q6 MTP with Q4 draft LM head"
+  },
+  "fixed_input_decode": [
+    {"candidate": "vq21_control", "steady_tps": 30.5298, "peak_footprint_gib": 36.3},
+    {"candidate": "resident_v32_layer30", "steady_tps": 29.271, "peak_footprint_gib": 36.5},
+    {"candidate": "stream_v32_layer30_128mib", "steady_tps": 21.3234, "peak_footprint_gib": 35.7},
+    {"candidate": "stream_v32_six_layers_1gib", "steady_tps": 8.7263, "peak_footprint_gib": 33.0},
+    {"candidate": "rejected_fixed_slots_six_layers_1gib", "steady_tps": 9.92028, "peak_footprint_gib": 33.5}
+  ],
+  "paired_non_fixed_parity": {
+    "tokens": [0, 5606, 220, 17, 15, 16, 15, 19488],
+    "resident_layer30_tps": 27.0334,
+    "streamed_layer30_tps": 19.4381,
+    "resident_peak_footprint_gib": 36.5,
+    "streamed_peak_footprint_gib": 35.7
+  },
+  "mtp_smoke": [
+    {"candidate": "six_layer_stream_rowwise", "generation_tps": 6.80484, "accepted": 48, "proposed": 60, "peak_footprint_gib": 37.0},
+    {"candidate": "six_layer_stream_grouped", "generation_tps": 5.22561, "accepted": 48, "proposed": 60, "peak_footprint_gib": 37.1},
+    {"candidate": "four_layer_stream_l31_l35_128mib", "generation_tps": 16.9639, "accepted": 34, "proposed": 40, "peak_footprint_gib": 39.7}
+  ],
+  "ifbench_development_gate": [
+    {"candidate": "vq21_control", "keys": [20, 70, 100], "strict": 3, "loose": 3, "aggregate_decode_tps": 28.1874259569, "peak_footprint_gib": 39.1},
+    {"candidate": "resident_v32_layer31_down", "keys": [20, 70, 100], "strict": 3, "loose": 3, "aggregate_decode_tps": 24.5353549875, "peak_footprint_gib": 39.9}
+  ],
+  "decision": "Retain VQ 2.1bpw v1 for daily use. Keep selective external-shard streaming opt-in, but do not promote V3.2 hybrid or full streaming."
+}

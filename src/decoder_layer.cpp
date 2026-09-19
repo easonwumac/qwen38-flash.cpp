@@ -130,6 +130,7 @@ DecoderLayer::DecoderLayer(
           config.quantization_group_size,
           static_cast<float>(config.rms_norm_epsilon),
           true),
+      paged_mlp_(tensors.paged_layer(layer_index)),
       mlp_(
           tensors,
           prefix + ".mlp",
@@ -228,7 +229,8 @@ MlxArray DecoderLayer::forward_decode(
     DecoderLayerTrace* trace) const {
     materialize_speculative_state(state);
     const char* compile = std::getenv("QWEN38_COMPILE_LAYER");
-    if (linear_attention_ != nullptr && ple_ == nullptr && state.linear_attention.initialized &&
+    if (linear_attention_ != nullptr && ple_ == nullptr && !paged_mlp_ &&
+        state.linear_attention.initialized &&
         trace == nullptr && compile != nullptr && std::string_view(compile) == "1") {
         ensure_compiled();
         return apply_compiled(input_stream, state);

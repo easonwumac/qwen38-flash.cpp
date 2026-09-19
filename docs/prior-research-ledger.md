@@ -736,6 +736,20 @@ source attribution in the file and in `NOTICE`.
 | Rejected layer-sensitive HOPE-448 physical export | Masking only layers 0, 1, 11, 12, 24, 26, 27, and 28 to 448 experts scored 16/30 IFBench versus the 14/30 unpruned control, passed the 20/70/100 thinking gate 3/3, and reached 147/164 EvalPlus HumanEval versus the recorded 145/164 control. Decode was unchanged at 28.565 versus 28.555 aggregate tok/s. A physical export removed exactly 836,239,360 bytes, but reindexing changed the numerical trajectory: two of its first ten IFBench generations hit 4,096 tokens where the mask needed 320 and 388, raising first-ten output from 8,292 to 14,350 tokens (+73.1%) | Light non-uniform pruning can preserve benchmark accuracy, but this checkpoint's 0.779 GiB saving is not worth the unstable generation length introduced by physical expert reindexing. Top-10 active work also remains unchanged, so there is no decode-speed payoff | VQ-2.1bpw, MTP/prefix cache off, exact top-10 among survivors, greedy/non-thinking except the stated thinking gate, Apple M5 Pro 64 GiB. Runtime mask, per-layer loader, and exporter prototypes removed; the rejected local checkpoint was not promoted |
 | Rejected automatic MTP-free history-copy verification | A short repeated-pattern fixture proposed 8 tokens, accepted only 2, spent 128--136 ms in two verifier rounds, then correctly disabled itself. Three enabled warm runs had a 29.817 tok/s median versus 29.845 control, and their output hash differed from serial. A longer prompt crossed the QSA frontier and failed with `QSA raw window does not cover the pooling frontier` after a partial-accept round | Exact n-gram proposal generation is cheap, but the target verifier is not: low acceptance erases any batching gain, while the current batched verifier is not serial-bit-identical and its rollback checkpoint is unsafe across this QSA boundary. Keep the existing MTP-backed, explicit context-copy path rather than enabling target-only copy automatically | VQ-2.1bpw, MTP off, greedy, 96-token short fixture at 284 prompt tokens plus a longer 675-token diagnostic, Apple M5 Pro 64 GiB; prototype removed |
 
+## September 20 VQ 3.2bpw hybrid and SSD streaming
+
+Selective external-shard loading, d4/K2048 packed-11 execution, bounded expert
+streaming and projection-level hybrid manifests were qualified against the
+40 GiB product boundary. One streamed V3.2 layer preserved the tested greedy
+trajectory but fell from 27.03 resident to 19.44 tok/s on the paired non-fixed
+probe. Six streamed layers reached only 8.73 tok/s; a fixed-slot cache improved
+that to 9.92 and was removed. Depth-4 MTP reached 6.80 tok/s rowwise and 5.23
+grouped with identical 48/60 acceptance. A down-only L31 hybrid passed IFBench
+keys 20/70/100 but decoded at 24.54 aggregate tok/s versus the VQ 2.1 control's
+28.19, while using 39.9 versus 39.1 GiB. Full V3.2 download and REAP composition
+were stopped because the six-layer scaling gate had already failed. See the
+[full report](vq32-hybrid-streaming-2026-09-20.md).
+
 ## September 19 VQ throughput follow-up
 
 Three quality-preserving layout/storage candidates were tested and removed:

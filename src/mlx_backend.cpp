@@ -1165,7 +1165,7 @@ void MlxSafetensors::save(
 MlxArray MlxTensorStore::tensor(const std::string_view name) {
     std::scoped_lock lock(mutex_);
     const std::string resolved = manifest_.resolve_tensor_name(name);
-    if (paged_) return read_tensor(resolved, std::nullopt);
+    if (paged_ && !selective_paged_) return read_tensor(resolved, std::nullopt);
     const auto mapping = manifest_.weight_map().find(resolved);
     if (mapping == manifest_.weight_map().end()) {
         throw std::out_of_range("tensor is not present in model index: " + std::string(name));
@@ -1178,18 +1178,26 @@ MlxArray MlxTensorStore::tensor(const std::string_view name) {
     return shard->second->tensor(resolved);
 }
 
+bool MlxTensorStore::paged_layer(const std::size_t layer) const noexcept {
+    if (!paged_) return false;
+    const auto& layers = manifest_.config().streamed_expert_layers;
+    return layers.empty() || std::binary_search(layers.begin(), layers.end(), layer);
+}
+
 TensorView MlxTensorStore::disk_view(const std::string& name) {
-    const auto mapping = manifest_.weight_map().find(name);
+    const std::string resolved = manifest_.resolve_tensor_name(name);
+    const auto mapping = manifest_.weight_map().find(resolved);
     if (mapping == manifest_.weight_map().end()) throw std::runtime_error("missing tensor: " + name);
     auto& catalog = catalogs_[mapping->second];
     if (!catalog) catalog = std::make_unique<SafetensorsFile>(manifest_.directory() / mapping->second);
-    return catalog->tensor(name);
+    return catalog->tensor(resolved);
 }
 
 MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optional<std::size_t> row,
                                     const std::span<const std::byte> prefetched) {
-    const TensorView view = disk_view(name);
-    const auto& shard = manifest_.weight_map().at(name);
+    const std::string resolved = manifest_.resolve_tensor_name(name);
+    const TensorView view = disk_view(resolved);
+    const auto& shard = manifest_.weight_map().at(resolved);
     const auto mapping = catalogs_.at(shard)->mapped_view();
     std::size_t offset = static_cast<std::size_t>(view.bytes.data() - mapping.data());
     std::size_t bytes = view.bytes.size();
@@ -1210,7 +1218,8 @@ MlxArray MlxTensorStore::read_tensor(const std::string& name, const std::optiona
     if (bytes == 0 || bytes > 1024ULL * 1024ULL * 1024ULL)
         throw std::runtime_error("paged tensor exceeds staging bound");
     mlx_dtype dtype;
-    if (view.dtype == "U32") dtype = MLX_UINT32;
+    if (view.dtype == "U8") dtype = MLX_UINT8;
+    else if (view.dtype == "U32") dtype = MLX_UINT32;
     else if (view.dtype == "BF16") dtype = MLX_BFLOAT16;
     else if (view.dtype == "F32") dtype = MLX_FLOAT32;
     else if (view.dtype == "F16") dtype = MLX_FLOAT16;
@@ -1294,7 +1303,8 @@ MlxTensorStore::FixedLayer& MlxTensorStore::fixed_layer(const std::string& prefi
                 view.shape[2]!=cols || view.dtype != (index%3==0 ? "U32" : "BF16"))
                 throw std::runtime_error("fixed slots require Q4/group64 BF16 experts");
             auto& f = layer->disk[index];
-            const auto& shard = manifest_.weight_map().at(name);
+            const auto& shard = manifest_.weight_map().at(
+                manifest_.resolve_tensor_name(name));
             f.path = manifest_.directory()/shard;
             f.offset = static_cast<std::size_t>(view.bytes.data()-catalogs_.at(shard)->mapped_view().data());
             f.bytes = view.bytes.size()/288;
@@ -1396,11 +1406,20 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
         }
         return lease;
     }
+    const std::string gate_base = std::string(prefix) + ".switch_mlp.gate_proj";
+    const bool vector_quantized =
+        manifest_.vector_quantization_for(gate_base) != nullptr;
     std::vector<std::string> names;
     std::size_t bytes = 0;
     for (const auto* projection : {"gate_proj", "up_proj", "down_proj"}) {
-        for (const auto* field : {"weight", "scales", "biases"}) {
-            names.push_back(std::string(prefix) + ".switch_mlp." + projection + "." + field);
+        const std::array<const char*, 3> affine_fields{"weight", "scales", "biases"};
+        const std::array<const char*, 2> vq_fields{"codes", "vq_scales"};
+        const std::span<const char* const> fields = vector_quantized
+            ? std::span<const char* const>(vq_fields)
+            : std::span<const char* const>(affine_fields);
+        for (const char* field : fields) {
+            names.push_back(manifest_.resolve_tensor_name(
+                std::string(prefix) + ".switch_mlp." + projection + "." + field));
             const auto view = disk_view(names.back());
             if (view.shape.size() != 3 || id >= view.shape[0] || view.bytes.size() % view.shape[0] != 0)
                 throw std::runtime_error("invalid paged expert geometry");
@@ -1411,21 +1430,30 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             bytes += (raw + page - 1) / page * page;
         }
     }
+    // Six independently imported VQ arrays carry a small allocator-side
+    // footprint beyond their page-rounded payload. Charge it conservatively so
+    // the bounded cache remains a real upper bound.
+    if (vector_quantized) bytes += 4 * 16384;
     const auto key = std::string(prefix) + "/" + std::to_string(id);
     auto lease = experts_.acquire(key, bytes, [&] {
         const auto started = std::chrono::steady_clock::now();
+        const bool deferred_vq = selective_paged_ && vector_quantized;
         // Retire prior asynchronous work before taking a global allocator
         // snapshot; otherwise old graph releases can make the delta negative.
-        check(mlx_synchronize(default_gpu_stream()), "paged pre-load accounting fence");
+        if (!deferred_vq) {
+            check(mlx_synchronize(default_gpu_stream()), "paged pre-load accounting fence");
+        }
         std::size_t before = 0;
-        check(mlx_get_active_memory(&before), "paged memory before load");
+        if (!deferred_vq) {
+            check(mlx_get_active_memory(&before), "paged memory before load");
+        }
         auto arrays = std::make_shared<ExpertArrays>();
         arrays->reserve(names.size());
         if (!parallel_reads_) {
             for (const auto& name : names) arrays->push_back(read_tensor(name, id));
         } else {
             struct Request { std::filesystem::path path; std::size_t offset, bytes; };
-            std::array<Request, 9> requests;
+            std::vector<Request> requests(names.size());
             for (std::size_t i = 0; i < names.size(); ++i) {
                 const auto view = disk_view(names[i]);
                 const auto& shard = manifest_.weight_map().at(names[i]);
@@ -1436,13 +1464,15 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             }
             // At most three CPU readers, one expert at a time; no MLX calls on
             // worker threads. Futures join even when a read/copy throws.
-            using Buffers = std::array<std::vector<std::byte>, 3>;
+            using Buffers = std::vector<std::vector<std::byte>>;
             std::array<std::future<Buffers>, 3> reads;
+            const std::size_t fields_per_projection = vector_quantized ? 2 : 3;
             for (std::size_t p = 0; p < reads.size(); ++p) {
-                reads[p] = std::async(std::launch::async, [&requests, p] {
-                    Buffers buffers;
+                reads[p] = std::async(std::launch::async,
+                    [&requests, p, fields_per_projection] {
+                    Buffers buffers(fields_per_projection);
                     for (std::size_t f = 0; f < buffers.size(); ++f) {
-                        const auto& request = requests[p * 3 + f];
+                        const auto& request = requests[p * fields_per_projection + f];
                         buffers[f].resize(request.bytes);
                         std::ifstream file(request.path, std::ios::binary);
                         file.seekg(static_cast<std::streamoff>(request.offset));
@@ -1456,15 +1486,18 @@ MlxTensorStore::ExpertLease MlxTensorStore::expert(const std::string_view prefix
             for (std::size_t p = 0; p < reads.size(); ++p) {
                 const auto buffers = reads[p].get();
                 for (std::size_t f = 0; f < buffers.size(); ++f)
-                    arrays->push_back(read_tensor(names[p * 3 + f], id, buffers[f]));
+                    arrays->push_back(read_tensor(
+                        names[p * fields_per_projection + f], id, buffers[f]));
             }
         }
-        check(mlx_synchronize(default_gpu_stream()), "paged expert bundle completion");
-        std::size_t after = 0;
-        check(mlx_get_active_memory(&after), "paged memory after load");
-        if (after < before || after - before > bytes)
-            throw std::runtime_error("paged expert accounting mismatch before=" + std::to_string(before) +
-                " after=" + std::to_string(after) + " charge=" + std::to_string(bytes));
+        if (!deferred_vq) {
+            check(mlx_synchronize(default_gpu_stream()), "paged expert bundle completion");
+            std::size_t after = 0;
+            check(mlx_get_active_memory(&after), "paged memory after load");
+            if (after < before || after - before > bytes)
+                throw std::runtime_error("paged expert accounting mismatch before=" + std::to_string(before) +
+                    " after=" + std::to_string(after) + " charge=" + std::to_string(bytes));
+        }
         expert_load_ms_ += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - started).count();
         return arrays;

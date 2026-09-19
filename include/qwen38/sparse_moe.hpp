@@ -122,9 +122,14 @@ private:
     [[nodiscard]] static QuantizedProjection load_projection(
         MlxTensorStore& tensors,
         std::string_view name);
+    [[nodiscard]] static QuantizedProjection load_paged_vq_projection(
+        MlxTensorStore& tensors,
+        std::string_view name);
     [[nodiscard]] static LinearProjection load_linear(
         MlxTensorStore& tensors,
         std::string_view name);
+    [[nodiscard]] std::vector<RouterSelection> route_decode_batch(
+        const MlxArray& input) const;
     static void make_resident(QuantizedProjection& projection);
     static void prepare_u8_codebook(
         QuantizedProjection& projection, bool centered);
@@ -150,9 +155,23 @@ private:
         const MlxArray& experts,
         const MlxArray& weights,
         int batch) const;
+    [[nodiscard]] MlxArray forward_vq_routed_arrays(
+        const MlxArray& input,
+        const MlxArray& experts,
+        const MlxArray& weights,
+        int batch,
+        const MlxArray& gate_codes,
+        const MlxArray& gate_scales,
+        const MlxArray& up_codes,
+        const MlxArray& up_scales,
+        const MlxArray& down_codes,
+        const MlxArray& down_scales) const;
     [[nodiscard]] MlxArray forward_paged(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_grouped(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_paged_packed(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged_vq(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged_vq_group(const MlxArray& input) const;
+    [[nodiscard]] MlxArray forward_paged_vq_row(const MlxArray& input) const;
     [[nodiscard]] MlxArray forward_compact_routed(
         const MlxArray& input,
         const MlxArray& experts,

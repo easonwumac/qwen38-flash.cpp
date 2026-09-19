@@ -263,6 +263,27 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
         }
     }
 
+    if (const Json* streaming = root.find("qwen38_streaming")) {
+        result.config_.streamed_expert_cache_bytes = size_value(
+            streaming->at("expert_cache_bytes"),
+            "qwen38_streaming.expert_cache_bytes");
+        std::unordered_set<std::size_t> seen;
+        for (const Json& layer : streaming->at("layers").as_array()) {
+            const std::size_t index = size_value(layer, "qwen38_streaming.layers");
+            if (index >= result.config_.layer_count || !seen.insert(index).second) {
+                throw std::runtime_error("invalid streamed expert layer index");
+            }
+            result.config_.streamed_expert_layers.push_back(index);
+        }
+        if (result.config_.streamed_expert_cache_bytes == 0 ||
+            result.config_.streamed_expert_layers.empty()) {
+            throw std::runtime_error("streamed experts require layers and a cache budget");
+        }
+        std::sort(
+            result.config_.streamed_expert_layers.begin(),
+            result.config_.streamed_expert_layers.end());
+    }
+
     const Json index = Json::parse(read_text(result.directory_ / "model.safetensors.index.json"));
     const std::int64_t declared_weight_bytes = index.at("metadata").at("total_size").as_integer();
     if (declared_weight_bytes < 0) {

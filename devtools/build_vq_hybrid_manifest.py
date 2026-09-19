@@ -41,18 +41,18 @@ def save_json(path: Path, value: dict) -> None:
         handle.write("\n")
 
 
-def tensor_names(layer: int) -> list[str]:
+def tensor_names(layer: int, projections: tuple[str, ...]) -> list[str]:
     prefix = f"model.layers.{layer}.mlp.switch_mlp"
     return [
         f"{prefix}.{projection}.{suffix}"
-        for projection in PROJECTIONS
+        for projection in projections
         for suffix in TENSOR_SUFFIXES
     ]
 
 
-def vq_module_names(layer: int) -> list[str]:
+def vq_module_names(layer: int, projections: tuple[str, ...]) -> list[str]:
     prefix = f"model.layers.{layer}.mlp.switch_mlp"
-    return [f"{prefix}.{projection}" for projection in PROJECTIONS]
+    return [f"{prefix}.{projection}" for projection in projections]
 
 
 def tensor_size(directory: Path, index: dict, name: str) -> int:
@@ -87,7 +87,29 @@ def main() -> int:
     parser.add_argument("--overlay", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--layers", type=parse_layers, required=True)
+    parser.add_argument(
+        "--projection-set",
+        choices=("all", "gate-up", "down"),
+        default="all",
+        help="overlay all routed projections, gate+up together, or down only",
+    )
+    parser.add_argument(
+        "--stream-cache-mib",
+        type=int,
+        default=0,
+        help="stream overlay layers through this bounded expert cache",
+    )
+    parser.add_argument(
+        "--stream-layers",
+        type=parse_layers,
+        help="overlay-layer subset to stream (defaults to every overlay layer)",
+    )
     args = parser.parse_args()
+    projections = {
+        "all": PROJECTIONS,
+        "gate-up": ("gate_proj", "up_proj"),
+        "down": ("down_proj",),
+    }[args.projection_set]
 
     base = args.base.resolve()
     overlay = args.overlay.resolve()
@@ -125,9 +147,21 @@ def main() -> int:
 
     hybrid_config = dict(base_config)
     hybrid_config["qwen38_external_shards"] = True
+    if args.stream_cache_mib < 0:
+        raise ValueError("stream cache must not be negative")
+    stream_layers = args.stream_layers or args.layers
+    if args.stream_layers and not set(stream_layers).issubset(args.layers):
+        raise ValueError("stream layers must be a subset of overlay layers")
+    if args.stream_layers and not args.stream_cache_mib:
+        raise ValueError("stream layers require a non-zero stream cache")
+    if args.stream_cache_mib:
+        hybrid_config["qwen38_streaming"] = {
+            "layers": stream_layers,
+            "expert_cache_bytes": args.stream_cache_mib * 1024 * 1024,
+        }
     hybrid_modules = dict(base_config.get("vq_modules", {}))
     for layer in args.layers:
-        for module in vq_module_names(layer):
+        for module in vq_module_names(layer, projections):
             if module not in overlay_config.get("vq_modules", {}):
                 raise KeyError(f"overlay is missing VQ module: {module}")
             hybrid_modules[module] = overlay_config["vq_modules"][module]
@@ -140,7 +174,7 @@ def main() -> int:
     base_size = int(base_index.get("metadata", {}).get("total_size", 0))
     total_size = base_size
     for layer in args.layers:
-        for name in tensor_names(layer):
+        for name in tensor_names(layer, projections):
             if name not in base_index["weight_map"]:
                 raise KeyError(f"base is missing tensor: {name}")
             if name not in overlay_index["weight_map"]:
@@ -167,6 +201,8 @@ def main() -> int:
             "base": os.path.relpath(base, output),
             "overlay": os.path.relpath(overlay, output),
             "overlay_layers": args.layers,
+            "overlay_projections": list(projections),
+            "stream_layers": stream_layers if args.stream_cache_mib else [],
             "declared_weight_bytes": total_size if base_size else None,
         },
     )
@@ -175,6 +211,7 @@ def main() -> int:
             {
                 "output": str(output),
                 "layers": args.layers,
+                "projections": list(projections),
                 "declared_weight_bytes": total_size if base_size else None,
             }
         )

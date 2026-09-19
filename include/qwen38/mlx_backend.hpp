@@ -277,10 +277,19 @@ public:
                             bool batch_experts = false, std::uint64_t decay_period = 4096,
                             bool grouped_prefill = true, bool packed_decode = false,
                             bool parallel_reads = false)
-        : manifest_(std::move(manifest)), paged_(expert_budget != 0),
-          experts_(expert_budget, decay_period, expert_budget != 0 && decay_period != 64 ? 16384 : 0),
-          batch_experts_(batch_experts), grouped_prefill_(grouped_prefill), packed_decode_(packed_decode),
-          parallel_reads_(parallel_reads) {}
+        : manifest_(std::move(manifest)),
+          paged_(expert_budget != 0 || manifest_.config().streamed_expert_cache_bytes != 0),
+          selective_paged_(!manifest_.config().streamed_expert_layers.empty()),
+          experts_(
+              expert_budget != 0 ? expert_budget :
+                  manifest_.config().streamed_expert_cache_bytes,
+              decay_period,
+              (expert_budget != 0 || manifest_.config().streamed_expert_cache_bytes != 0) &&
+                      decay_period != 64
+                  ? 16384 : 0),
+          batch_experts_(batch_experts || selective_paged_),
+          grouped_prefill_(grouped_prefill), packed_decode_(packed_decode),
+          parallel_reads_(parallel_reads || selective_paged_) {}
 
     using ExpertArrays = std::vector<MlxArray>;
     using ExpertLease = ExpertCache<ExpertArrays>::Handle;
@@ -292,6 +301,8 @@ public:
     [[nodiscard]] const std::vector<ExpertTraceEvent>& expert_trace() const { return expert_trace_; }
     void finish_expert_batch();
     [[nodiscard]] bool paged() const noexcept { return paged_; }
+    [[nodiscard]] bool paged_layer(std::size_t layer) const noexcept;
+    [[nodiscard]] bool selective_paged() const noexcept { return selective_paged_; }
     [[nodiscard]] bool batch_experts() const noexcept { return batch_experts_; }
     [[nodiscard]] bool grouped_prefill() const noexcept { return grouped_prefill_; }
     [[nodiscard]] bool packed_decode() const noexcept { return packed_decode_; }
@@ -325,6 +336,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, std::unique_ptr<MlxSafetensors>> shards_;
     bool paged_{false};
+    bool selective_paged_{false};
     ExpertCache<ExpertArrays> experts_;
     double expert_load_ms_{0};
     bool batch_experts_{false};

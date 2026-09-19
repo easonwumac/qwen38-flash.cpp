@@ -16,6 +16,13 @@ HumanEval 153/164 versus v1's historical 146/164, but paired IFBench 14/30 versu
 daily default pending model selection; the scorecard below is still v1.
 [Paired results and upgrade decision](docs/vq-v2-upgrade-2026-09-19.md)
 
+VQ 3.2bpw hybrid and SSD expert streaming were also tested under the same
+40 GiB ceiling. A one-layer stream preserved the paired token trajectory, but
+fell to 21.32 tok/s; six streamed layers fell to 8.73 tok/s, and MTP did not
+recover the loss. A down-only hybrid passed the 3-case IFBench gate but was
+slower than VQ 2.1bpw. These remain opt-in checkpoint capabilities, not the
+daily model. [Hybrid/streaming qualification](docs/vq32-hybrid-streaming-2026-09-20.md)
+
 ## What this delivers
 
 - Packed-VQ expert execution without expanding the whole model into dense weights.
