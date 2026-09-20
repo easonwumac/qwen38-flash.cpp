@@ -3,6 +3,7 @@
 #include "qwen38/json.hpp"
 
 #include <array>
+#include <charconv>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -260,6 +261,36 @@ ModelManifest ModelManifest::load(const std::filesystem::path& model_directory) 
                 }
                 result.config_.shared_only_layers.push_back(index);
             }
+        }
+    }
+
+    if (const Json* masks = root.find("qwen38_expert_keep")) {
+        result.config_.retained_experts_by_layer.resize(result.config_.layer_count);
+        for (const auto& [layer_text, experts] : masks->as_object()) {
+            std::size_t layer = 0;
+            const auto parsed = std::from_chars(
+                layer_text.data(), layer_text.data() + layer_text.size(), layer);
+            if (parsed.ec != std::errc{} ||
+                parsed.ptr != layer_text.data() + layer_text.size() ||
+                layer >= result.config_.layer_count) {
+                throw std::runtime_error("invalid expert-mask layer index");
+            }
+            auto& retained = result.config_.retained_experts_by_layer[layer];
+            std::unordered_set<std::size_t> seen;
+            for (const Json& expert : experts.as_array()) {
+                const std::size_t index = size_value(
+                    expert, "qwen38_expert_keep expert index");
+                if (index >= result.config_.expert_count || !seen.insert(index).second) {
+                    throw std::runtime_error("invalid retained expert index");
+                }
+                retained.push_back(index);
+            }
+            if (retained.size() < result.config_.experts_per_token ||
+                retained.size() == result.config_.expert_count) {
+                throw std::runtime_error(
+                    "expert mask must retain between top-k and expert_count - 1 experts");
+            }
+            std::sort(retained.begin(), retained.end());
         }
     }
 

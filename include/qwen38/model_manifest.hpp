@@ -63,6 +63,7 @@ struct ModelConfig {
     bool attention_norm_has_offset{true};
     bool indexer_norm_has_offset{true};
     std::vector<std::size_t> shared_only_layers;
+    std::vector<std::vector<std::size_t>> retained_experts_by_layer;
     std::vector<std::size_t> streamed_expert_layers;
     std::size_t streamed_expert_cache_bytes{0};
     bool niwaki_maps_unfolded{false};

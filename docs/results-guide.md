@@ -199,6 +199,25 @@ only with a substantially broader independent agentic/coding/reasoning
 calibration corpus and layer-sensitive budgets. Pruning does not address
 target-only decode while top-10 activated experts remain unchanged.
 
+### September 20 layer-sensitive follow-up
+
+The materially different allocation suggested above was tested: layers
+`0,1,31,35,36,39` retain all 512 experts, while the other 42 use the VQ-aware
+HOPE rankings at 288, 384, or 448 experts.
+
+| Test | Unpruned v1 | Sensitive6 + 288 | Sensitive6 + 384 | Sensitive6 + 448 |
+|---|---:|---:|---:|---:|
+| IFBench first 30, strict/loose | 14/30 | 15/30 | **15/30** | **17/30** |
+| Bounded-thinking 20/70/100 | not freshly rerun | not expanded | **3/3** | **3/3** |
+| HumanEval original 164 | 145/164 historical | not run | **152/164** | **149/164** |
+| Projected physical main weights | 45.780 GiB | 34.341 GiB | **39.243 GiB** | 42.512 GiB |
+| Actual mask-test footprint | 36.7 GiB | 36.7 GiB | 37.0 GiB | 36.9 GiB |
+
+The 384 allocation is the only retained physical-export candidate. The mask
+kept every weight resident and top-10 active work unchanged, so it proves
+model behavior but not memory or speed. Full protocol, generation-length data,
+and limitations are in the [qualification report](vq-sensitive6-pruning-2026-09-20.md).
+
 ## Product targets
 
 These are deferred research targets, not pending automatic work after closeout.

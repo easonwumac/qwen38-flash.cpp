@@ -484,6 +484,29 @@ SparseMoe::SparseMoe(
     if (experts_per_token_ == 0 || experts_per_token_ > expert_count_) {
         throw std::runtime_error("invalid experts_per_token");
     }
+    const auto& retained_by_layer =
+        tensors.manifest().config().retained_experts_by_layer;
+    if (prefix.starts_with("language_model.model.layers.") &&
+        layer_index_ < retained_by_layer.size() &&
+        !retained_by_layer[layer_index_].empty()) {
+        std::vector<float> bias(expert_count_, -std::numeric_limits<float>::infinity());
+        for (const std::size_t expert : retained_by_layer[layer_index_]) {
+            if (expert >= expert_count_) {
+                throw std::runtime_error("expert mask does not match routed expert count");
+            }
+            bias[expert] = 0.0F;
+        }
+        expert_mask_ = MlxArray::from_float32(
+            bias, std::vector<int>{1, 1, checked_int(expert_count_, "expert count")});
+        expert_masked_ = true;
+        static std::once_flag announced;
+        std::call_once(announced, [&] {
+            std::cerr << "[expert-mask] routed expert mask engaged: retained="
+                      << retained_by_layer[layer_index_].size()
+                      << " of " << expert_count_
+                      << "; weights remain physically resident\n";
+        });
+    }
     if (!has_routed_) return;
     if (paged_store_) {
         if (experts_per_token_ != experts_per_token || compact_qmeta_requested_bits() != 0)
@@ -930,6 +953,12 @@ MlxArray SparseMoe::project_linear(
         projection.group_size, projection.bits);
 }
 
+MlxArray SparseMoe::router_logits(const MlxArray& input) const {
+    MlxArray logits = project_linear(input, router_);
+    if (!expert_masked_) return logits;
+    return MlxArray::add(logits, expert_mask_.astype(logits.dtype()));
+}
+
 MlxArray SparseMoe::project_expert(
     const MlxArray& input,
     const QuantizedProjection& projection,
@@ -1006,7 +1035,7 @@ std::vector<RouterSelection> SparseMoe::route_decode_batch(
     if (shape.size() != 3 || shape[0] != 1 || shape[1] < 1 || shape[1] > 8) {
         throw std::runtime_error("decode router requires input shape [1,S,hidden], S=1..8");
     }
-    MlxArray logits = project_linear(input, router_);
+    MlxArray logits = router_logits(input);
     const std::vector<float> values = logits.astype(MLX_FLOAT32).to_float32();
     const std::size_t rows = static_cast<std::size_t>(shape[1]);
     if (values.size() != rows * expert_count_) {
@@ -1077,7 +1106,7 @@ MlxArray SparseMoe::forward_experts_decode_profiled(
             // route_decode performs selection from FP32 logits.  Keep the
             // device path on the same precision contract before softmax/top-k;
             // otherwise BF16 gate rounding can change both weights and experts.
-            MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
+            MlxArray logits = router_logits(input).astype(MLX_FLOAT32);
             const bool use_selected_softmax =
                 selected_softmax_router_enabled(normalize_topk_probability_);
             MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1800,7 +1829,7 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
             expert_rows.reserve(inputs.size());
             weight_rows.reserve(inputs.size());
             for (const MlxArray& input : inputs) {
-                MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
+                MlxArray logits = router_logits(input).astype(MLX_FLOAT32);
                 const bool use_selected_softmax =
                     selected_softmax_router_enabled(normalize_topk_probability_);
                 MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1875,7 +1904,7 @@ std::vector<MlxArray> SparseMoe::forward_decode_multi(
         std::string_view(device_router) == "1";
     for (const MlxArray& input : inputs) {
         if (route_on_device) {
-            MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
+            MlxArray logits = router_logits(input).astype(MLX_FLOAT32);
             const bool use_selected_softmax =
                 selected_softmax_router_enabled(normalize_topk_probability_);
             MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -1970,7 +1999,7 @@ MlxArray SparseMoe::forward_verify_impl(
         std::string_view(device_router) == "1") {
         const int rows = shape[1];
         const auto routing_started = Clock::now();
-        MlxArray logits = project_linear(input, router_).astype(MLX_FLOAT32);
+        MlxArray logits = router_logits(input).astype(MLX_FLOAT32);
         const bool use_selected_softmax =
             selected_softmax_router_enabled(normalize_topk_probability_);
         MlxArray gates = use_selected_softmax ? logits.share() : logits.softmax_axis(-1);
@@ -2184,7 +2213,7 @@ MlxArray SparseMoe::forward_prefill_impl(
         const int rows = shape[1];
         const int slots = checked_int(experts_per_token_, "VQ slots");
         const auto routing_started = Clock::now();
-        MlxArray gates = project_linear(input, router_).softmax_axis(-1);
+        MlxArray gates = router_logits(input).softmax_axis(-1);
         MlxArray partition = gates.argpartition_axis(-slots, -1);
         const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - slots};
         const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};
@@ -2609,7 +2638,7 @@ MlxArray SparseMoe::forward_prefill_impl(
     const int top_k = checked_int(experts_per_token_, "experts_per_token");
     const int slots = rows * top_k;
     const auto routing_started = Clock::now();
-    MlxArray gates = project_linear(input, router_).softmax_axis(-1);
+    MlxArray gates = router_logits(input).softmax_axis(-1);
     MlxArray partition = gates.argpartition_axis(-top_k, -1);
     const std::vector<int> start{0, 0, static_cast<int>(expert_count_) - top_k};
     const std::vector<int> stop{1, rows, static_cast<int>(expert_count_)};

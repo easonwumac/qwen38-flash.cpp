@@ -70,6 +70,7 @@ void run_model_manifest_tests() {
         "group":64,"pack_bits":8}},
       "vq_ple":{"geometry":{"k":256,"dim":8,"group":32,"row_bytes":20},
         "keys":["model.layers.1.ple.ple_embedding.ngram_embedding.shard_0"]},
+      "qwen38_expert_keep":{"0":[0,1,2,3,4,5,6,7,8,9]},
       "qwen38_streaming":{"layers":[0,47],"expert_cache_bytes":1048576},
       "niwaki":{"shared_only_layers":[10,11],"maps_unfolded":true},
       "text_config":{
@@ -143,6 +144,10 @@ void run_model_manifest_tests() {
     QWEN38_CHECK(manifest.vector_quantized_ple()->keys.size() == 1);
     QWEN38_CHECK(manifest.config().shared_only_layers ==
         std::vector<std::size_t>({10, 11}));
+    QWEN38_CHECK(manifest.config().retained_experts_by_layer.size() == 48);
+    QWEN38_CHECK(manifest.config().retained_experts_by_layer.at(0) ==
+        std::vector<std::size_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+    QWEN38_CHECK(manifest.config().retained_experts_by_layer.at(1).empty());
     QWEN38_CHECK(manifest.config().streamed_expert_layers ==
         std::vector<std::size_t>({0, 47}));
     QWEN38_CHECK(manifest.config().streamed_expert_cache_bytes == 1048576);

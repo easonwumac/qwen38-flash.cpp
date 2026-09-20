@@ -139,6 +139,7 @@ private:
     [[nodiscard]] static MlxArray project_linear(
         const MlxArray& input,
         const LinearProjection& projection);
+    [[nodiscard]] MlxArray router_logits(const MlxArray& input) const;
     [[nodiscard]] MlxArray project_expert(
         const MlxArray& input,
         const QuantizedProjection& projection,
@@ -194,6 +195,8 @@ private:
     std::string prefix_;
     bool has_routed_{true};
     LinearProjection router_;
+    MlxArray expert_mask_;
+    bool expert_masked_{false};
     QuantizedProjection expert_gate_;
     QuantizedProjection expert_up_;
     QuantizedProjection expert_down_;
