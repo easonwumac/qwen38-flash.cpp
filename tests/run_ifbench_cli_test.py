@@ -58,6 +58,33 @@ class RunIfbenchCliTest(unittest.TestCase):
             "mlx",
         )
 
+    def test_normalizes_llama_cpp_timings(self) -> None:
+        self.assertEqual(
+            run_ifbench.extract_performance(
+                {
+                    "timings": {
+                        "prompt_ms": 125.0,
+                        "predicted_ms": 250.0,
+                        "predicted_per_second": 40.0,
+                    }
+                }
+            ),
+            {
+                "prompt_ms": 125.0,
+                "generation_ms": 250.0,
+                "generation_tps": 40.0,
+            },
+        )
+
+    def test_prefers_native_performance_payload(self) -> None:
+        native = {"generation_tps": 57.0}
+        self.assertIs(
+            run_ifbench.extract_performance(
+                {"performance": native, "timings": {"predicted_per_second": 40.0}}
+            ),
+            native,
+        )
+
     def test_selects_cases_in_requested_key_order(self) -> None:
         cases = [{"key": "0"}, {"key": 10}, {"key": "20"}]
         self.assertEqual(

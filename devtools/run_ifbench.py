@@ -37,6 +37,21 @@ def extract_reasoning_content(message: dict[str, Any]) -> str:
     return message.get("reasoning_content") or message.get("reasoning") or ""
 
 
+def extract_performance(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize native-server and llama.cpp timing payloads."""
+    performance = payload.get("performance")
+    if isinstance(performance, dict) and performance:
+        return performance
+    timings = payload.get("timings")
+    if not isinstance(timings, dict):
+        return {}
+    return {
+        "prompt_ms": timings.get("prompt_ms"),
+        "generation_ms": timings.get("predicted_ms"),
+        "generation_tps": timings.get("predicted_per_second"),
+    }
+
+
 def select_cases_by_key(
     cases: list[dict[str, Any]], raw_keys: str
 ) -> list[dict[str, Any]]:
@@ -165,7 +180,7 @@ def main() -> int:
                 reasoning_content=extract_reasoning_content(message),
                 finish_reason=payload["choices"][0].get("finish_reason"),
                 usage=payload.get("usage", {}),
-                performance=payload.get("performance", {}),
+                performance=extract_performance(payload),
                 error=None,
             )
         except Exception as exc:

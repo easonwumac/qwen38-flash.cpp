@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,12 @@ class TextStoppingCriteria:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
+    parser.add_argument(
+        "--model-loader",
+        choices=("mlx-vlm", "prism-hadamard"),
+        default="mlx-vlm",
+        help="Use the checkpoint's bundled Hadamard-aware loader when required.",
+    )
     parser.add_argument("--problems", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--samples", type=Path, required=True)
@@ -78,7 +85,14 @@ def main() -> int:
     problems = load_problems(args.problems)
     if args.limit is not None:
         problems = problems[: args.limit]
-    model, processor = load(args.model, strict=False)
+    if args.model_loader == "prism-hadamard":
+        model_path = Path(args.model).resolve()
+        sys.path.insert(0, str(model_path / "runtime"))
+        from vision_artifact import load_vl_model
+
+        model, processor, _ = load_vl_model(model_path)
+    else:
+        model, processor = load(args.model, strict=False)
     tokenizer = getattr(processor, "tokenizer", processor)
     rows: list[dict[str, Any]] = []
 
@@ -122,6 +136,7 @@ def main() -> int:
                 model,
                 processor,
                 prompt_for(problem),
+                image=None,
                 max_tokens=args.max_tokens,
                 temperature=0.0,
                 stopping_criteria=criteria,
