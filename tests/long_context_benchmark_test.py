@@ -56,6 +56,29 @@ class LongContextBenchmarkTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.measurement_from_response(response, 1, 1, 1.0)
 
+    def test_measurement_parses_splash_metrics(self) -> None:
+        response = {
+            "usage": {
+                "prompt_tokens": 131000,
+                "completion_tokens": 1,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+            "metrics": {
+                "request_latency": {
+                    "start_to_first_token_ms": 250000.0,
+                    "first_token_to_done_ms": 0.01,
+                }
+            },
+            "choices": [{"message": {"content": "Done"}}],
+        }
+        measurement = MODULE.measurement_from_response(
+            response, 8000, 500000, 250001.0
+        )
+        self.assertEqual(measurement.prompt_tokens, 131000)
+        self.assertEqual(measurement.cached_prompt_tokens, 0)
+        self.assertAlmostEqual(measurement.prompt_tps, 524.0)
+        self.assertEqual(measurement.generation_tps, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

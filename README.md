@@ -18,6 +18,14 @@ and footprint are essentially unchanged. v1 remains the daily default.
 [Paired results](docs/vq-v2-upgrade-2026-09-19.md) ·
 [SWE-bench pilot](docs/swebench-verified-pilot-2026-09-20.md)
 
+An external Splash 1.0 control materially improved the dense 27B operating
+point on the same 64 GiB M5 Pro: HumanEval **154/164**, IFBench first-30
+**19/30**, HumanEval decode **80.00 tok/s median**, and a constrained 131K-token
+run at **219.03 PP / 38.67 native decode tok/s** with a 23.39 GiB session peak.
+Its model-specific DFlash 2 draft cannot be reused by Flash-Next, and its
+chat-only HumanEval prompt is not byte-identical to the historical 27B control.
+[External runtime report](docs/splash-27b-evaluation-2026-09-20.md)
+
 VQ 3.2bpw hybrid and SSD expert streaming were also tested under the same
 40 GiB ceiling. A one-layer stream preserved the paired token trajectory, but
 fell to 21.32 tok/s; six streamed layers fell to 8.73 tok/s, and MTP did not
@@ -157,6 +165,7 @@ They are reference/research results, not alternative daily configurations.
 | Accepted configuration, closure decision, deferred work | [Daily-use baseline](docs/daily-use-2026-09-19.md) |
 | What's changed | [Changelog](CHANGELOG.md) |
 | Scores, speed, context, RAM, pruning and rejected models | [Results guide](docs/results-guide.md) |
+| External Splash 27B quality, throughput and 128K control | [Splash evaluation](docs/splash-27b-evaluation-2026-09-20.md) |
 | Full protocols and implementation gains | [Benchmark detail](docs/benchmark-history.md) |
 | Startup, resources, cache, shutdown and recovery | [Operations](docs/operations.md) |
 | API / engine / supported tensor layouts | [API](docs/api.md) · [Architecture](docs/architecture.md) · [Capabilities](docs/model-capabilities.md) |

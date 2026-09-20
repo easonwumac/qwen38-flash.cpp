@@ -49,7 +49,17 @@ def measurement_from_response(
 ) -> Measurement:
     try:
         usage = response["usage"]
-        performance = response["performance"]
+        performance = response.get("performance")
+        if not isinstance(performance, dict):
+            latency = response["metrics"]["request_latency"]
+            performance = {
+                "prompt_ms": latency["start_to_first_token_ms"],
+                "cached_prompt_tokens": usage.get("prompt_tokens_details", {}).get(
+                    "cached_tokens", 0
+                ),
+                "generation_ms": latency.get("first_token_to_done_ms", 0.0),
+                "generation_tps": latency.get("stream_tokens_per_second", 0.0),
+            }
         message = response["choices"][0]["message"]
         output = (message.get("content") or "") + (
             message.get("reasoning_content") or ""
@@ -82,12 +92,12 @@ def measurement_from_response(
         raise ValueError(f"response lacks valid performance telemetry: {error}") from error
 
 
-def request_once(url: str, lines: int, timeout: float) -> Measurement:
+def request_once(url: str, model: str, lines: int, timeout: float) -> Measurement:
     prompt = build_prompt(lines)
     prompt_bytes = len(prompt.encode("utf-8"))
     body = json.dumps(
         {
-            "model": "qwen38-flash",
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1,
             "temperature": 0,
@@ -125,6 +135,7 @@ def request_once(url: str, lines: int, timeout: float) -> Measurement:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:11438")
+    parser.add_argument("--model", default="qwen38-flash")
     parser.add_argument("--lines", type=int, default=16152)
     parser.add_argument("--min-prompt-tokens", type=int, default=258000)
     parser.add_argument("--max-prompt-tokens", type=int, default=259000)
@@ -140,7 +151,7 @@ def main() -> int:
         parser.error("invalid token gate or timeout")
 
     try:
-        measurement = request_once(args.url, args.lines, args.timeout)
+        measurement = request_once(args.url, args.model, args.lines, args.timeout)
     except (RuntimeError, ValueError) as error:
         print(f"long-context: {error}", file=sys.stderr)
         return 2

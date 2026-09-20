@@ -92,6 +92,7 @@ These rows answer different questions and are not one universal leaderboard.
 | VQ 2.1bpw | `TheDrainFlorist/Qwen3.8-Flash-Next-VQ-2.1bpw`, revision `64b0fb0f98a552d91fb9abd5531d547b2e78c8a8` |
 | REAP-288 Q4 | `sh0wie/Qwen3.8-Flash-Next-REAP-288-MLX-4bit` lineage plus the project's verified Q8/Q4 MTP and SSD-PLE assets |
 | Qwen3.8-27B Q4 | `mlx-community/Qwen3.8-27B-4bit` through the external `mlx-vlm` control runner |
+| Qwen3.8-27B Splash | The same MLX Q4 target lineage repacked for Splash 1.0, plus its model-specific five-layer DFlash 2 draft |
 | Niwaki 99B | `neopolita/Qwen3.8-Flash-Next-99B-A5B-Niwaki-3bit-mlx` |
 | Niwaki 113B | `neopolita/Qwen3.8-Flash-Next-113B-A5B-Niwaki-3bit-mlx` |
 
@@ -100,6 +101,7 @@ These rows answer different questions and are not one universal leaderboard.
 | VQ 2.1bpw | **30.59** | **57.94** native MTP fixture; **46.93** full HumanEval run | HumanEval 146/164 MTP; IFBench best-retained 18/30; thinking pilot 8/10 | 36.3--39.6 GiB | Current target |
 | REAP-288 Q4 | **41.06** | **71.06** automatic MTP | IFBench full 300: 34.67% strict; EvalPlus HumanEval 90.85% | 38.3--40.8 GiB | Historical reference |
 | Qwen3.8-27B Q4 | **17.21** on EvalPlus run | 50.22 aggregate in four-request smoke | Thinking IFBench subset 70%; EvalPlus HumanEval 91.46% | 17.29 GB MLX | Quality/control runner |
+| Qwen3.8-27B Splash | **80.00 median** on HumanEval | **95.37 native aggregate** on four-stream IFBench; 94.23 favorable fixture | HumanEval **154/164**; IFBench first-30 **19/30** | 23.39 GiB constrained 128K session; default four-stream IFBench peaked at 42.11 GiB | Strong external daily-use control; not a Flash-Next runtime |
 | Niwaki 99B Q3/Q4 | **41.60** at retained 128K needle | **70.08** external MTP at 16K | Ten-case/broad gates insufficient for promotion | 39.30 GiB at retained 128K | Research only |
 | Niwaki 113B 3-bit | 37.76--40.07 in pilots | No qualified MTP | 0/3 corrected bounded-thinking gates | 26.6--41.3 GiB | Rejected |
 
@@ -122,6 +124,11 @@ place the qualified server near 40 GiB.
 | Historical EvalPlus no-thinking chat runner, 164 | See complete-program row | **149/164 (90.85%)** | **150/164 (91.46%)** | Not run |
 | SWE-bench Verified, fixed three-task pilot | **2/3 v1; 1/3 v2** | Not run | Not run | Not run |
 
+The separate Splash 1.0 chat-only control scored **154/164 HumanEval** and
+**19/30 strict/loose IFBench** with the same Q4 27B target lineage. Its
+HumanEval transport prompt and four-way IFBench scheduler are not byte-identical
+to the historical rows; see the [full external-runtime protocol](splash-27b-evaluation-2026-09-20.md).
+
 The VQ 8/10 thinking pilot demonstrates a promising protocol, not that the VQ
 checkpoint has completed or matched the full published IFBench benchmark.
 See [public-quality-evaluation.md](public-quality-evaluation.md) for exact
@@ -139,6 +146,7 @@ prompts, stopping rules, failure analysis, and official-score limitations.
 | REAP-288 | 128K | 550.92 median PP / 20.56 median decode tok/s | Three cold retrieval runs |
 | REAP-288 | 192K | 281.17 PP / 4.19 decode tok/s | Needle recovered; only 0.25 GiB over safety floor |
 | REAP-288 | 262K | no valid completion | Not claimed |
+| Qwen3.8-27B Splash | 131,024 | **219.03 PP / 38.67 native decode tok/s** | 40 GiB hard ceiling; 32-token exact-replay decode; directional |
 
 The two Niwaki 128K rows use different runtime/numeric paths and are both kept
 because one represents the low-rank MLX research frontier and the other the

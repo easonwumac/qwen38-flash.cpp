@@ -31,6 +31,12 @@ class RunHumanEvalTest(unittest.TestCase):
         self.assertIn("<think>\n\n</think>", prompt)
         self.assertTrue(prompt.endswith("```python\n"))
 
+    def test_evalplus_chat_instruction_has_no_rendered_template(self) -> None:
+        prompt = MODULE.evalplus_chat_instruction("def answer():\n    pass")
+        self.assertIn("```\ndef answer():\n    pass\n```", prompt)
+        self.assertNotIn("<|im_start|>", prompt)
+        self.assertNotIn("<think>", prompt)
+
     def test_solution_to_completion_extracts_fenced_function_body(self) -> None:
         text = "Here it is:\n```python\ndef answer():\n    return 42\n```"
         self.assertEqual(MODULE.solution_to_completion(text, "answer"), "\n    return 42")

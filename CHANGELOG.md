@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-20 — External Splash 27B qualification
+
+- Qualify Splash 1.0 with its Qwen3.8-27B Q4 target and five-layer DFlash 2
+  draft on the same 64 GiB M5 Pro: HumanEval 154/164 and IFBench first-30
+  19/30 strict/loose.
+- Measure 80.00 tok/s median HumanEval decode and 95.37 native aggregate tok/s
+  across the four-stream IFBench run. The default IFBench session peaked at
+  42.11 GiB and therefore does not meet this project's 40 GiB product ceiling.
+- Under an allocator-enforced 40 GiB ceiling, complete a 131,024-token cold
+  prefill at 219.03 tok/s and a 32-token exact-replay decode at 38.67 native
+  tok/s; session peak was 23.39 GiB and memory pressure stayed normal.
+- Add chat-only complete-program HumanEval support and normalize Splash metrics
+  in the long-context runner. Existing protocols and defaults are unchanged.
+
+Details: [Splash 27B evaluation](docs/splash-27b-evaluation-2026-09-20.md).
+
 ## 2026-09-19 — VQ v2 paired evaluation
 
 - Prepare existing compact d8 gate/up codebooks independently of down geometry;

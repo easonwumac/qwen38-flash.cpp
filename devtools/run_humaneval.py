@@ -43,18 +43,23 @@ def evalplus_raw_trim(text: str) -> str:
 
 def evalplus_nonthinking_prompt(task_prompt: str) -> str:
     """Render the EvalPlus chat protocol used for instruction-tuned models."""
-    instruction = (
-        "Please provide a self-contained Python script that solves the following "
-        "problem in a markdown code block:"
-    )
+    instruction = evalplus_chat_instruction(task_prompt)
     response = (
         "Below is a Python script with a self-contained function that solves the "
         "problem and passes corresponding tests:"
     )
     return (
-        f"<|im_start|>user\n{instruction}\n```\n{task_prompt.strip()}\n```"
+        f"<|im_start|>user\n{instruction}"
         "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         f"{response}\n```python\n"
+    )
+
+
+def evalplus_chat_instruction(task_prompt: str) -> str:
+    """Return the user message for chat-only OpenAI-compatible servers."""
+    return (
+        "Please provide a self-contained Python script that solves the following "
+        f"problem in a markdown code block:\n```\n{task_prompt.strip()}\n```"
     )
 
 
@@ -92,7 +97,12 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument(
         "--mode",
-        choices=("raw", "chat-nonthinking", "evalplus-nonthinking"),
+        choices=(
+            "raw",
+            "chat-nonthinking",
+            "evalplus-nonthinking",
+            "chat-evalplus-nonthinking",
+        ),
         default="raw",
     )
     parser.add_argument(
@@ -135,6 +145,19 @@ def main() -> int:
                 "max_tokens": args.max_tokens,
                 "stream": False,
             }
+        elif args.mode == "chat-evalplus-nonthinking":
+            endpoint = "/v1/chat/completions"
+            body = {
+                "model": args.model,
+                "messages": [{
+                    "role": "user",
+                    "content": evalplus_chat_instruction(problem["prompt"]),
+                }],
+                "temperature": 0,
+                "reasoning_effort": "none",
+                "max_tokens": args.max_tokens,
+                "stream": False,
+            }
         else:
             endpoint = "/v1/chat/completions"
             body = {
@@ -165,10 +188,10 @@ def main() -> int:
             choice = payload["choices"][0]
             raw = (
                 choice["text"]
-                if args.mode != "chat-nonthinking"
+                if args.mode in ("raw", "evalplus-nonthinking")
                 else choice["message"]["content"]
             )
-            if args.mode == "evalplus-nonthinking":
+            if args.mode in ("evalplus-nonthinking", "chat-evalplus-nonthinking"):
                 completion = solution_to_completion(raw, str(problem["entry_point"]))
             elif args.stop_profile == "evalplus":
                 completion = evalplus_raw_trim(raw)
@@ -176,12 +199,19 @@ def main() -> int:
                 completion = raw
             else:
                 completion = trim_completion(raw)
+            performance = payload.get("performance", {})
+            if not performance and payload.get("metrics"):
+                rate = payload["metrics"].get("request_latency", {}).get(
+                    "stream_tokens_per_second"
+                )
+                if rate is not None:
+                    performance = {"generation_tps": rate}
             row.update(
                 completion=completion,
                 raw_completion=raw,
                 finish_reason=choice.get("finish_reason"),
                 usage=payload.get("usage", {}),
-                performance=payload.get("performance", {}),
+                performance=performance,
                 error=None,
             )
         except Exception as exc:
