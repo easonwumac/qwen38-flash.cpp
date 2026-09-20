@@ -213,10 +213,13 @@ HOPE rankings at 288, 384, or 448 experts.
 | Projected physical main weights | 45.780 GiB | 34.341 GiB | **39.243 GiB** | 42.512 GiB |
 | Actual mask-test footprint | 36.7 GiB | 36.7 GiB | 37.0 GiB | 36.9 GiB |
 
-The 384 allocation is the only retained physical-export candidate. The mask
-kept every weight resident and top-10 active work unchanged, so it proves
-model behavior but not memory or speed. Full protocol, generation-length data,
-and limitations are in the [qualification report](vq-sensitive6-pruning-2026-09-20.md).
+Those rows are MTP-off diagnostics. Required MTP-on qualification subsequently
+rejected the 384 allocation: v1 scored 14/30 versus its unpruned 18/30 control;
+v2 scored 13/30 versus 14/30, emitted 17,547 tokens with two truncations, and
+its fixed 64-token MTP fixture fell from a fresh paired 53.66 to 46.03 tok/s.
+The mask kept every weight resident, so no memory saving was measured and no
+physical export is retained. Full protocol and MTP telemetry are in the
+[qualification report](vq-sensitive6-pruning-2026-09-20.md).
 
 ## Product targets
 

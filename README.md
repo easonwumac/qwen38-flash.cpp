@@ -23,11 +23,12 @@ recover the loss. A down-only hybrid passed the 3-case IFBench gate but was
 slower than VQ 2.1bpw. These remain opt-in checkpoint capabilities, not the
 daily model. [Hybrid/streaming qualification](docs/vq32-hybrid-streaming-2026-09-20.md)
 
-A new layer-sensitive VQ pruning mask kept six sensitive layers at 512 experts
-and retained 384 on the other 42. It reached 15/30 IFBench, 3/3 bounded-thinking
-and 152/164 HumanEval, with projected physical main weights of 39.243 GiB.
-This is a promising **mask-only** result: all weights remained resident, so it
-is not yet a RAM or speed claim and has not replaced the daily checkpoint.
+A layer-sensitive VQ pruning mask kept six sensitive layers at 512 experts and
+retained 384 on the other 42. Its MTP-off result reached 15/30 IFBench and
+152/164 HumanEval, but the required MTP-on follow-up fell to 14/30 on v1 and
+13/30 on v2. The mask also retained all physical weights and v2's fixed MTP
+fixture fell from a paired 53.66 to 46.03 tok/s. The candidate is therefore
+rejected; no sub-40-GiB physical checkpoint or speed saving is claimed.
 [Pruning qualification](docs/vq-sensitive6-pruning-2026-09-20.md)
 
 ## What this delivers
