@@ -31,6 +31,12 @@ Latest follow-up: [September 19 qualification](vq-quality-preserving-2026-09-19.
 documents a QSA rollback correctness fix, full-program HumanEval scoring,
 and rejected PP/decode experiments. No new speed record is claimed by that fix.
 
+The [SWE-bench Verified three-task pilot](swebench-verified-pilot-2026-09-20.md)
+adds bounded agentic-coding evidence. Under one fixed mini-SWE-agent scaffold,
+v1 resolved 2/3 and v2 resolved 1/3; v2 also took more calls and wall time.
+This is a directional development subset, not a full 500-task score. The run
+also found and fixed an FP32 packed-QSA threadgroup-memory overflow.
+
 ## Current production target: VQ 2.1bpw
 
 The upstream mixed-codebook [v2 upgrade evaluation](vq-v2-upgrade-2026-09-19.md)
@@ -38,7 +44,8 @@ is complete for the bounded short-context suite: HumanEval 153/164 versus the
 historical v1 146/164, but fresh paired IFBench 14/30 versus 18/30. Paired warm
 PP is 535.59 versus 526.68 tok/s; short target-only decode and physical footprint
 are essentially unchanged. Both revisions are retained and v1 remains the daily
-default pending selection. The tables below remain the v1 historical scorecard.
+default. The later three-task agentic pilot also favored v1. The tables below
+remain the v1 historical scorecard.
 
 The [persistent-verifier follow-up](persistent-verifier-2026-09-19.md) was
 rejected: S=5 target verification took 84.57 ms versus 62.84 ms for the existing
@@ -65,6 +72,7 @@ MTP sidecar, MLX 0.32.2.
 | IFBench | first 30, native MTP, greedy/no-thinking | **18/30 strict and loose**, 35.28 aggregate tok/s |
 | IFBench control | same first 30, target-only | **14/30 strict and loose**, 28.55 aggregate tok/s |
 | Thinking pilot | first 10, sampled xhigh bounded thinking | **8/10 strict and loose**, 28.60 aggregate tok/s |
+| SWE-bench Verified pilot | three fixed tasks, mini-SWE-agent, native MTP | **2/3 resolved**; v2 control **1/3**; directional subset only |
 | Exact B=2 probe | two 64-step independent streams | **41.35 vs 30.61 aggregate tok/s (1.351x)** |
 | HTTP B=2 gate | concurrent IFBench keys 20/70 | **25.46 vs 23.76 aggregate tok/s**, byte-identical |
 
@@ -112,6 +120,7 @@ place the qualified server near 40 GiB.
 | HumanEval raw completion, 164 | Not run | **81.10%** target-only Q8 PLE | **80.49%** | Not run |
 | HumanEval complete-program chat, original tests, 164 | **147/164 target-only; 146/164 native MTP** | Not rescored | **150/164 historical rescore** | Not run |
 | Historical EvalPlus no-thinking chat runner, 164 | See complete-program row | **149/164 (90.85%)** | **150/164 (91.46%)** | Not run |
+| SWE-bench Verified, fixed three-task pilot | **2/3 v1; 1/3 v2** | Not run | Not run | Not run |
 
 The VQ 8/10 thinking pilot demonstrates a promising protocol, not that the VQ
 checkpoint has completed or matched the full published IFBench benchmark.

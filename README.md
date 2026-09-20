@@ -12,9 +12,11 @@ this is the best retained tested configuration, not a proven hardware limit.
 
 The newer mixed-d4/d8 **VQ v2 has been evaluated, with quality trade-offs**:
 HumanEval 153/164 versus v1's historical 146/164, but paired IFBench 14/30 versus
-18/30. Short decode and footprint are essentially unchanged. v1 remains the
-daily default pending model selection; the scorecard below is still v1.
-[Paired results and upgrade decision](docs/vq-v2-upgrade-2026-09-19.md)
+18/30. A fixed three-task SWE-bench Verified pilot also favored v1, 2/3 versus
+v2's 1/3; this is directional evidence, not a full-suite score. Short decode
+and footprint are essentially unchanged. v1 remains the daily default.
+[Paired results](docs/vq-v2-upgrade-2026-09-19.md) ·
+[SWE-bench pilot](docs/swebench-verified-pilot-2026-09-20.md)
 
 VQ 3.2bpw hybrid and SSD expert streaming were also tested under the same
 40 GiB ceiling. A one-layer stream preserved the paired token trajectory, but
@@ -63,6 +65,7 @@ cache off unless stated. These are different workloads, not one universal rate.
 | HumanEval target-only control | **147/164 (89.63%)** | Same full-program protocol; not HumanEval+ |
 | IFBench first 30 | **18/30 strict/loose (60%)** | Native MTP, max 4,096; 35.28 aggregate decode tok/s across serial requests |
 | IFBench thinking pilot | **8/10 (80%)** | First ten, sampled xhigh, bounded 4,096; MTP bypassed; not full IFBench |
+| SWE-bench Verified pilot | **2/3 resolved** | Three fixed tasks, mini-SWE-agent, automatic native MTP; directional subset, not a full-suite score |
 | 32K context | **22.68 decode tok/s** | 32,024 input / 29 output tokens, Q8 KV, MTP off; 39.5 GiB peak |
 | Two-stream model probe | **41.35 aggregate tok/s (1.351×)** | Two independent 64-step streams; HTTP gains are smaller |
 | Memory | **36.3–39.6 GiB footprint** | Observed qualified runs; not an all-context guarantee |

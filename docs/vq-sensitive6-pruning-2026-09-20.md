@@ -117,13 +117,12 @@ diagnostics, not promotion evidence.
 ## Agentic evaluation follow-up
 
 HumanEval and IFBench are not agentic benchmarks. For coding-agent evidence,
-use SWE-bench Verified under one fixed public scaffold; for broader terminal
-work use Terminal-Bench. Both require a containerized evaluation environment,
-which was not available on this Mac during this run. A small fixed subset is a
-valid development gate only when clearly labeled; it must not be reported as a
-full official score. GAIA targets general assistants, while tau-bench targets
-multi-turn tool/policy interaction and is less direct for this coding-focused
-engine.
+the later [SWE-bench Verified pilot](swebench-verified-pilot-2026-09-20.md)
+used one fixed public scaffold and official evaluation containers. V1 resolved
+2/3 tasks and v2 resolved 1/3. The small fixed subset is a development gate,
+not a full-suite score. For broader terminal work use Terminal-Bench; GAIA
+targets general assistants, while tau-bench targets multi-turn tool/policy
+interaction and is less direct for this coding-focused engine.
 
 ## Drafter placement and v2 optimization boundary
 

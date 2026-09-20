@@ -74,6 +74,16 @@ run; the rewritten README is not an equivalent benchmark input.
   reasoning budget or a premature EOS is reached before `</think>`, the engine
   inserts Qwen's early-stop instruction and continues from the same KV state.
 
+## Agentic coding pilot
+
+On 2026-09-20, a fixed three-task SWE-bench Verified pilot used
+mini-SWE-agent 2.4.6, the official SWE-bench 5.0.2 evaluator, one worker,
+greedy/no-thinking generation, a 40-call limit, and automatic native MTP. VQ
+v1 resolved **2/3** tasks in 91 calls and 55:29 of effective task wall time;
+VQ v2 resolved **1/3** in 98 calls and 69:00. Both had zero infrastructure or
+evaluator errors. This is a directional subset, not a full-suite score. See the
+[protocol and per-task results](swebench-verified-pilot-2026-09-20.md).
+
 ## Current VQ evaluation
 
 Common environment: Apple M5 Pro MacBook Pro, 18 CPU cores, 64 GB unified

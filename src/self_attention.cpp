@@ -1048,7 +1048,9 @@ MlxArray SelfAttention::packed_qsa_attention(
     const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
         {.name = "T", .value = query.dtype()},
     }};
-    int tile_size = 32;
+    // Two TILE x D arrays share threadgroup memory. FP32 query paths need the
+    // smaller tile to stay within the 32 KiB Apple GPU limit.
+    int tile_size = query.dtype() == MLX_FLOAT32 ? 16 : 32;
     if (const char* configured = std::getenv("QWEN38_QSA_PACKED_TILE");
         configured != nullptr) {
         char* end = nullptr;
@@ -1145,7 +1147,9 @@ MlxArray SelfAttention::packed_qsa_attention_q8(
     const std::array<MlxMetalDtypeTemplate, 1> dtype_templates{{
         {.name = "T", .value = query.dtype()},
     }};
-    int tile_size = 32;
+    // The packed Q8 path can receive FP32 activations after a restored or
+    // extended multi-turn state. TILE=32 would allocate 64 KiB at D=256.
+    int tile_size = query.dtype() == MLX_FLOAT32 ? 16 : 32;
     if (const char* configured = std::getenv("QWEN38_QSA_PACKED_TILE");
         configured != nullptr) {
         char* end = nullptr;
