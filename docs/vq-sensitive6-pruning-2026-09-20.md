@@ -146,10 +146,24 @@ prove sufficient target acceptance.
 
 v2 still has optimization room, but not an established v2-specific shortcut.
 Its retained unpruned baselines are 535.59 warm PP, 30.23 target-only and 54.86
-native-MTP tok/s. Only nine of 48 routed layers use the small d4 codebooks; the
-K256 table already fits cache. Precomputed codebook dots, packed-word reuse,
-`float4` lookup, prefill word reuse, cross-row expert reuse and threadgroup
-staging were all measured and rejected. The dominant remaining work is the
-common target verifier/VQ trunk, so future effort should require a measured
-reduction in complete S=5 verifier time rather than another isolated d4 lookup
-micro-optimization.
+native-MTP tok/s. Layers 2--47 use the small d4 codebook for down; only nine of
+48 routed layers use it for gate/up. The K256 tables already fit cache.
+Precomputed codebook dots, packed-word reuse, `float4` lookup, prefill word
+reuse, cross-row expert reuse and threadgroup staging were all measured and
+rejected.
+
+A fresh full-target S=5 profile measured v2 at 59.5445 ms versus v1 at
+66.1002 ms, so mixed d4 is already about 9.9% faster in the verifier. Replacing
+the retained `2+2+1` MoE split with `4+1` kept parity but measured 59.631 ms.
+A native five-row MoE path improved the same-process verifier microbenchmark
+from 61.1052 to 59.3785 ms (2.9%), but six interleaved HTTP passes over code,
+JSON, explanation and creative prompts were noise-equivalent: output hashes,
+proposal paths and acceptance were identical, while candidate/control rates
+overlapped from 33.17 to 52.62 tok/s. It was removed.
+
+The final v2-specific probe loaded the d4 BF16 activation and FP16 codebook in
+four-element vectors while preserving the scalar accumulation order. It kept
+exact output bits but moved the complete layer-27 S=5 MoE only from 1.8253 to
+1.8103 ms (0.8%). It was also removed. The dominant remaining work is the
+common target verifier/VQ trunk; future effort should require a measured
+end-to-end reduction rather than another isolated d4 lookup micro-optimization.
