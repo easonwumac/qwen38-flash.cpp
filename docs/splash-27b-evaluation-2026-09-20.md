@@ -9,7 +9,8 @@ Status: external runtime/control; not part of `qwen38-flash.cpp`.
 Splash 1.0 materially changes the local 27B comparison. Its specialized
 Qwen3.8-27B Q4 target plus five-layer DFlash 2 draft preserved strong quality,
 ran HumanEval at an 80.00 tok/s per-request median, and kept a constrained 128K
-session well below the project's 40 GiB ceiling. The retained VQ engine still
+session's Metal allocations well below the project's 40 GiB ceiling. The
+retained VQ engine still
 demonstrates a different Flash-Next/VQ execution path, but it is no longer the
 best measured local quality/speed/memory operating point on this Mac.
 
@@ -49,8 +50,8 @@ Sources: [Splash package](https://huggingface.co/incoai/Qwen3.8-27B-Splash),
 | 32K cold PP | **435.85 tok/s** | 32,722 prompt tokens, no cache, 75.08 s TTFT, one generated token |
 | 128K cold PP | **219.03 tok/s** | 131,024 prompt tokens, no cache, 598.20 s TTFT, one generated token |
 | 128K exact-replay decode | **38.67 native / 39.14 stream tok/s** | 131,008 / 131,024 prompt tokens reused; 32 output tokens; 25 / 49 drafts accepted; 510.8 ms TTFT |
-| Constrained 128K memory | **23.39 GiB session peak** | Includes an intentionally cancelled divergent-prefix request; hard Metal ceiling 40 GiB, memory pressure stayed normal |
-| Default four-stream IFBench memory | **42.11 GiB peak** | Automatic memory plan, therefore above the project's 40 GiB product ceiling |
+| Constrained 128K Metal allocations | **23.39 GiB session peak** | Includes an intentionally cancelled divergent-prefix request; hard Metal ceiling 40 GiB, memory pressure stayed normal |
+| Default four-stream IFBench Metal allocations | **42.11 GiB peak** | Automatic memory plan, therefore above the project's 40 GiB product ceiling under this counter |
 
 The 128K decode row is a directional 32-token sample, not a long-output
 distribution. At 131,024 input tokens only 48 tokens remained in the configured
@@ -69,7 +70,7 @@ full re-prefill; that request was cancelled after 47,104 rows.
 | Favorable speculative fixture | 94.23 | 57.94 |
 | 32K context decode | not isolated in this run | 22.68 |
 | 128K context | 219.03 PP / 38.67 native decode | unqualified |
-| Memory | 17.86 GiB fixed plan; 23.39 GiB constrained-session peak | 36.3--39.6 GiB qualified footprint |
+| Memory | 17.86 GiB fixed Metal plan; 23.39 GiB constrained Metal peak | 36.3--39.6 GiB qualified process footprint |
 
 The HumanEval prompt transport differs: Splash exposes chat completions but not
 the raw completions endpoint used by the historical 27B assistant-prefill run.
@@ -77,6 +78,14 @@ Both rows use the same original tests and EvalPlus 0.3.1 complete-program
 sanitizer, so the result establishes strong quality and no speculative loss;
 the four-pass improvement over the historical 150/164 27B row must not be
 attributed solely to weights or runtime.
+
+Splash's `/status` memory values are Metal allocator counters, whereas the VQ
+row uses macOS task footprint. They are not a like-for-like RAM measurement.
+An idle post-start sample reported 1.45 GB system footprint for the native
+engine process (2.53 GB process-lifetime peak), while Splash reported a much
+larger fixed Metal plan; file-backed zero-copy weights explain part of the
+difference. No macOS process-footprint sampler ran throughout the 128K request,
+so 23.39 GiB must not be relabelled as total process RAM.
 
 IFBench used four-way rolling admission instead of the VQ row's serial native
 MTP run. Temperature zero makes the quality comparison useful, but it is not a

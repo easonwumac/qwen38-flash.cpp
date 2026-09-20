@@ -7,10 +7,12 @@
   19/30 strict/loose.
 - Measure 80.00 tok/s median HumanEval decode and 95.37 native aggregate tok/s
   across the four-stream IFBench run. The default IFBench session peaked at
-  42.11 GiB and therefore does not meet this project's 40 GiB product ceiling.
+  42.11 GiB in Splash's Metal-allocation counter and therefore does not meet
+  this project's 40 GiB product ceiling under that counter.
 - Under an allocator-enforced 40 GiB ceiling, complete a 131,024-token cold
   prefill at 219.03 tok/s and a 32-token exact-replay decode at 38.67 native
-  tok/s; session peak was 23.39 GiB and memory pressure stayed normal.
+  tok/s; the Metal-allocation peak was 23.39 GiB and memory pressure stayed
+  normal.
 - Add chat-only complete-program HumanEval support and normalize Splash metrics
   in the long-context runner. Existing protocols and defaults are unchanged.
 

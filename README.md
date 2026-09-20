@@ -21,7 +21,8 @@ and footprint are essentially unchanged. v1 remains the daily default.
 An external Splash 1.0 control materially improved the dense 27B operating
 point on the same 64 GiB M5 Pro: HumanEval **154/164**, IFBench first-30
 **19/30**, HumanEval decode **80.00 tok/s median**, and a constrained 131K-token
-run at **219.03 PP / 38.67 native decode tok/s** with a 23.39 GiB session peak.
+run at **219.03 PP / 38.67 native decode tok/s** with a 23.39 GiB peak in
+Splash's Metal-allocation counter.
 Its model-specific DFlash 2 draft cannot be reused by Flash-Next, and its
 chat-only HumanEval prompt is not byte-identical to the historical 27B control.
 [External runtime report](docs/splash-27b-evaluation-2026-09-20.md)

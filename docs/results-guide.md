@@ -101,7 +101,7 @@ These rows answer different questions and are not one universal leaderboard.
 | VQ 2.1bpw | **30.59** | **57.94** native MTP fixture; **46.93** full HumanEval run | HumanEval 146/164 MTP; IFBench best-retained 18/30; thinking pilot 8/10 | 36.3--39.6 GiB | Current target |
 | REAP-288 Q4 | **41.06** | **71.06** automatic MTP | IFBench full 300: 34.67% strict; EvalPlus HumanEval 90.85% | 38.3--40.8 GiB | Historical reference |
 | Qwen3.8-27B Q4 | **17.21** on EvalPlus run | 50.22 aggregate in four-request smoke | Thinking IFBench subset 70%; EvalPlus HumanEval 91.46% | 17.29 GB MLX | Quality/control runner |
-| Qwen3.8-27B Splash | **80.00 median** on HumanEval | **95.37 native aggregate** on four-stream IFBench; 94.23 favorable fixture | HumanEval **154/164**; IFBench first-30 **19/30** | 23.39 GiB constrained 128K session; default four-stream IFBench peaked at 42.11 GiB | Strong external daily-use control; not a Flash-Next runtime |
+| Qwen3.8-27B Splash | **80.00 median** on HumanEval | **95.37 native aggregate** on four-stream IFBench; 94.23 favorable fixture | HumanEval **154/164**; IFBench first-30 **19/30** | Metal allocations: 23.39 GiB constrained 128K peak; default four-stream IFBench peaked at 42.11 GiB | Strong external daily-use control; not a Flash-Next runtime |
 | Niwaki 99B Q3/Q4 | **41.60** at retained 128K needle | **70.08** external MTP at 16K | Ten-case/broad gates insufficient for promotion | 39.30 GiB at retained 128K | Research only |
 | Niwaki 113B 3-bit | 37.76--40.07 in pilots | No qualified MTP | 0/3 corrected bounded-thinking gates | 26.6--41.3 GiB | Rejected |
 
