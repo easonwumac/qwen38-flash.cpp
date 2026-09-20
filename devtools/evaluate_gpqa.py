@@ -44,7 +44,9 @@ def main() -> int:
     by_key = {str(row["key"]): row for row in generated}
     results = []
     for case in cases:
-        generated_row = by_key.get(str(case["key"]), {})
+        generated_row = by_key.get(str(case["key"]))
+        if generated_row is None:
+            continue
         response = str(generated_row.get("response") or "")
         match = ANSWER_PATTERN.search(response)
         extracted = match.group(1).upper() if match else None
@@ -67,6 +69,7 @@ def main() -> int:
     summary = {
         "passed": passed,
         "total": len(results),
+        "dataset_total": len(cases),
         "accuracy": passed / len(results) if results else None,
         "wilson_95": [low, high],
         "parse_failures": sum(bool(row["parse_failure"]) for row in results),

@@ -47,6 +47,13 @@ class RunHumanEvalTest(unittest.TestCase):
             "    return value",
         )
 
+    def test_solution_to_script_extracts_complete_fenced_program(self) -> None:
+        text = "Explanation\n```python\ndef plus_one(x):\n    return x + 1\n```"
+        self.assertEqual(
+            MODULE.solution_to_script(text),
+            "def plus_one(x):\n    return x + 1",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

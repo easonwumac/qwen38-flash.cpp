@@ -85,6 +85,26 @@ class RunIfbenchCliTest(unittest.TestCase):
             native,
         )
 
+    def test_normalizes_splash_metrics(self) -> None:
+        self.assertEqual(
+            run_ifbench.extract_performance(
+                {
+                    "metrics": {
+                        "request_latency": {
+                            "ttft_ms": 350.0,
+                            "first_token_to_done_ms": 2500.0,
+                            "stream_tokens_per_second": 50.0,
+                        }
+                    }
+                }
+            ),
+            {
+                "prompt_ms": 350.0,
+                "generation_ms": 2500.0,
+                "generation_tps": 50.0,
+            },
+        )
+
     def test_selects_cases_in_requested_key_order(self) -> None:
         cases = [{"key": "0"}, {"key": 10}, {"key": "20"}]
         self.assertEqual(

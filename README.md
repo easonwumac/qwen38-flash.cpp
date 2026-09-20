@@ -18,14 +18,14 @@ and footprint are essentially unchanged. v1 remains the daily default.
 [Paired results](docs/vq-v2-upgrade-2026-09-19.md) ·
 [SWE-bench pilot](docs/swebench-verified-pilot-2026-09-20.md)
 
-An external Splash 1.0 control materially improved the dense 27B operating
-point on the same 64 GiB M5 Pro: HumanEval **154/164**, IFBench first-30
-**19/30**, HumanEval decode **80.00 tok/s median**, and a constrained 131K-token
-run at **219.03 PP / 38.67 native decode tok/s** with a 23.39 GiB peak in
-Splash's Metal-allocation counter.
-Its model-specific DFlash 2 draft cannot be reused by Flash-Next, and its
-chat-only HumanEval prompt is not byte-identical to the historical 27B control.
-[External runtime report](docs/splash-27b-evaluation-2026-09-20.md)
+External Splash 1.0 controls now provide the strongest daily-use choices on the
+same 64 GiB M5 Pro. Under a paired thinking/16K IFBench protocol, dense 27B
+scored **30/30** while 35B-A3B scored **27/30**. The 35B MoE was much faster:
+**139.56 single-stream / 255.19 four-stream aggregate decode tok/s**, **2,410.55
+PP tok/s at 32K**, and **1,161.30 PP / 135.85 replay decode tok/s at 131K**.
+Use 35B for routine throughput and 27B when local quality is the priority.
+Their model-specific DFlash 2 drafts cannot be reused by Flash-Next.
+[Paired external-runtime report](docs/splash-comparison-2026-09-20.md)
 
 VQ 3.2bpw hybrid and SSD expert streaming were also tested under the same
 40 GiB ceiling. A one-layer stream preserved the paired token trajectory, but
@@ -166,7 +166,7 @@ They are reference/research results, not alternative daily configurations.
 | Accepted configuration, closure decision, deferred work | [Daily-use baseline](docs/daily-use-2026-09-19.md) |
 | What's changed | [Changelog](CHANGELOG.md) |
 | Scores, speed, context, RAM, pruning and rejected models | [Results guide](docs/results-guide.md) |
-| External Splash 27B quality, throughput and 128K control | [Splash evaluation](docs/splash-27b-evaluation-2026-09-20.md) |
+| External Splash 27B/35B quality, concurrency and 128K controls | [Splash comparison](docs/splash-comparison-2026-09-20.md) |
 | Full protocols and implementation gains | [Benchmark detail](docs/benchmark-history.md) |
 | Startup, resources, cache, shutdown and recovery | [Operations](docs/operations.md) |
 | API / engine / supported tensor layouts | [API](docs/api.md) · [Architecture](docs/architecture.md) · [Capabilities](docs/model-capabilities.md) |

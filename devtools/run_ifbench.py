@@ -38,17 +38,27 @@ def extract_reasoning_content(message: dict[str, Any]) -> str:
 
 
 def extract_performance(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize native-server and llama.cpp timing payloads."""
+    """Normalize native-server, llama.cpp, and Splash timing payloads."""
     performance = payload.get("performance")
     if isinstance(performance, dict) and performance:
         return performance
     timings = payload.get("timings")
-    if not isinstance(timings, dict):
+    if isinstance(timings, dict):
+        return {
+            "prompt_ms": timings.get("prompt_ms"),
+            "generation_ms": timings.get("predicted_ms"),
+            "generation_tps": timings.get("predicted_per_second"),
+        }
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return {}
+    latency = metrics.get("request_latency")
+    if not isinstance(latency, dict):
         return {}
     return {
-        "prompt_ms": timings.get("prompt_ms"),
-        "generation_ms": timings.get("predicted_ms"),
-        "generation_tps": timings.get("predicted_per_second"),
+        "prompt_ms": latency.get("ttft_ms"),
+        "generation_ms": latency.get("first_token_to_done_ms"),
+        "generation_tps": latency.get("stream_tokens_per_second"),
     }
 
 
@@ -147,6 +157,9 @@ def main() -> int:
         }
         if args.no_thinking:
             body["thinking"] = False
+            # Splash and Responses-compatible servers use reasoning_effort;
+            # retaining the legacy boolean keeps older native servers working.
+            body["reasoning_effort"] = "none"
         else:
             body["reasoning_effort"] = args.reasoning_effort
             body.update(

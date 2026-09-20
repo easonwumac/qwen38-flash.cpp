@@ -4,6 +4,10 @@ Date: 2026-09-20
 
 Status: external runtime/control; not part of `qwen38-flash.cpp`.
 
+The later paired 16K-thinking rerun supersedes this document's original
+4K-budget IFBench row. See the [27B/35B comparison](splash-comparison-2026-09-20.md)
+for the final daily-use decision and matched concurrency results.
+
 ## Conclusion
 
 Splash 1.0 materially changes the local 27B comparison. Its specialized
@@ -43,8 +47,8 @@ Sources: [Splash package](https://huggingface.co/incoai/Qwen3.8-27B-Splash),
 |---|---:|---|
 | HumanEval original tests | **154/164 (93.90%)** | Chat-only self-contained-program prompt, greedy/no-thinking, max 768, EvalPlus 0.3.1 sanitizer, six length-limited, zero API errors |
 | HumanEval throughput | **80.00 tok/s median** | 41,870 completion tokens; 63.69 aggregate completion tok/s including TTFT and serial request gaps |
-| IFBench first 30 | **19/30 strict and loose (63.33%)** | Pinned public dataset, greedy/no-thinking, max 4,096, rolling concurrency four, 11 length-limited, zero API errors |
-| IFBench four-stream throughput | **95.37 native / 93.57 end-to-end tok/s** | 75,154 completion tokens; DFlash accepted 57,629 / 122,528 drafts (47.03%) |
+| IFBench first 30 | **30/30 strict and loose (100%)** | Pinned public dataset, thinking/xhigh, temperature 0, max 16,384, rolling concurrency four, no truncations or API errors |
+| IFBench four-stream throughput | **85.98 aggregate / 84.04 end-to-end tok/s** | 122,909 completion tokens; complete quality run, not a favorable fixture |
 | Predictable short decode | **94.23 tok/s** | Three 256-token integer-list requests; 672 / 672 drafts accepted; deliberately favorable |
 | Medium-reasoning samples | **46.78 tok/s median** | Three 512-token coding/analysis prompts: 52.67 / 37.01 / 46.78; all hit the reasoning-token cap |
 | 32K cold PP | **435.85 tok/s** | 32,722 prompt tokens, no cache, 75.08 s TTFT, one generated token |
@@ -65,7 +69,7 @@ full re-prefill; that request was cancelled after 47,104 rows.
 | Metric | Splash 27B Q4 + DFlash 2 | Flash-Next VQ v1 |
 |---|---:|---:|
 | HumanEval original tests | **154/164** | 146/164 native MTP; 147/164 target-only |
-| IFBench first 30, no-thinking | **19/30** | 18/30 native MTP |
+| IFBench first 30, thinking | **30/30** with 16K output budget | 8/10 bounded thinking pilot; not a paired 30-row result |
 | Ordinary measured decode | 80.00 median on HumanEval | 46.93 aggregate on HumanEval |
 | Favorable speculative fixture | 94.23 | 57.94 |
 | 32K context decode | not isolated in this run | 22.68 |
@@ -88,9 +92,9 @@ difference. No macOS process-footprint sampler ran throughout the 128K request,
 so 23.39 GiB must not be relabelled as total process RAM.
 
 IFBench used four-way rolling admission instead of the VQ row's serial native
-MTP run. Temperature zero makes the quality comparison useful, but it is not a
-byte-for-byte scheduler A/B. The aggregate speed difference is nevertheless
-large enough that scheduling detail cannot explain it away.
+MTP run. The corrected Splash run also used thinking and a 16K output budget,
+whereas the VQ row used no-thinking and 4K. They answer different product
+questions and are not a byte-for-byte quality A/B.
 
 ## Engineering consequences
 

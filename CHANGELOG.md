@@ -1,22 +1,21 @@
 # Changelog
 
-## 2026-09-20 — External Splash 27B qualification
+## 2026-09-20 — External Splash 27B/35B qualification
 
-- Qualify Splash 1.0 with its Qwen3.8-27B Q4 target and five-layer DFlash 2
-  draft on the same 64 GiB M5 Pro: HumanEval 154/164 and IFBench first-30
-  19/30 strict/loose.
-- Measure 80.00 tok/s median HumanEval decode and 95.37 native aggregate tok/s
-  across the four-stream IFBench run. The default IFBench session peaked at
-  42.11 GiB in Splash's Metal-allocation counter and therefore does not meet
-  this project's 40 GiB product ceiling under that counter.
-- Under an allocator-enforced 40 GiB ceiling, complete a 131,024-token cold
-  prefill at 219.03 tok/s and a 32-token exact-replay decode at 38.67 native
-  tok/s; the Metal-allocation peak was 23.39 GiB and memory pressure stayed
-  normal.
-- Add chat-only complete-program HumanEval support and normalize Splash metrics
-  in the long-context runner. Existing protocols and defaults are unchanged.
+- Under the same thinking/16K first-30 IFBench protocol, qualify dense 27B at
+  30/30 and 35B-A3B at 27/30 strict/loose. The corrected 27B result supersedes
+  the earlier 19/30 run whose 4K output budget truncated 11 cases.
+- Complete HumanEval and MBPP+ controls: 27B scores 154/164 and 294/378; 35B
+  scores 149/164 and 284/378. These code controls disable reasoning.
+- On a fixed 12-prompt thinking workload, measure 27B at 45.71 B=1 / 102.61
+  B=4 aggregate tok/s and 35B at 139.56 / 255.19 tok/s.
+- Under a 40 GiB ceiling, measure 35B at 2,410.55 PP tok/s at 32K and 1,161.30
+  PP / 135.85 exact-replay stream decode tok/s at 131K. The 128K session peak
+  was 21.78 GiB in Splash's Metal-allocation counter.
+- Extend evaluation tools for Splash metrics, MBPP solution output, and partial
+  GPQA scoring without changing the existing default protocols.
 
-Details: [Splash 27B evaluation](docs/splash-27b-evaluation-2026-09-20.md).
+Details: [paired Splash evaluation](docs/splash-comparison-2026-09-20.md).
 
 ## 2026-09-19 — VQ v2 paired evaluation
 

@@ -67,7 +67,9 @@ def solution_to_completion(text: str, entrypoint: str) -> str:
     """Extract an entry-point body so OpenAI HumanEval can append it."""
     if "</think>" in text:
         text = text.rsplit("</think>", 1)[1]
-    blocks = re.findall(r"```(?:python)?\s*\n?(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    blocks = re.findall(
+        r"```(?:python)?\s*\n?(.*?)```", text, re.DOTALL | re.IGNORECASE
+    )
     code = (blocks[-1] if blocks else text).strip("\n")
     signature = re.search(
         rf"(?m)^def\s+{re.escape(entrypoint)}\s*\([^\n]*\).*:\s*$", code,
@@ -82,6 +84,14 @@ def solution_to_completion(text: str, entrypoint: str) -> str:
     return "\n" + "\n".join(body).rstrip()
 
 
+def solution_to_script(text: str) -> str:
+    """Extract a complete script for benchmarks such as MBPP."""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    blocks = re.findall(r"```(?:python)?\s*\n?(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    return (blocks[-1] if blocks else text).strip()
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
@@ -94,6 +104,7 @@ def main() -> int:
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--url", default="http://127.0.0.1:11438")
     parser.add_argument("--model", default="qwen38-flash")
+    parser.add_argument("--benchmark", default="OpenAI HumanEval")
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument(
         "--mode",
@@ -112,6 +123,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--sample-format",
+        choices=("completion", "solution"),
+        default="completion",
+        help="Write prompt-suffix completions or complete scripts for the evaluator.",
+    )
     args = parser.parse_args()
 
     problems = load_problems(args.problems)
@@ -228,10 +245,19 @@ def main() -> int:
             "generation_tps": row.get("performance", {}).get("generation_tps"),
         }), flush=True)
 
-    sample_rows = [
-        {"task_id": row["task_id"], "completion": row["completion"]}
-        for row in rows
-    ]
+    if args.sample_format == "solution":
+        sample_rows = [
+            {
+                "task_id": row["task_id"],
+                "solution": solution_to_script(row["raw_completion"]),
+            }
+            for row in rows
+        ]
+    else:
+        sample_rows = [
+            {"task_id": row["task_id"], "completion": row["completion"]}
+            for row in rows
+        ]
     write_jsonl(args.samples, sample_rows)
     rates = [
         float(row["performance"]["generation_tps"])
@@ -240,13 +266,14 @@ def main() -> int:
     ]
     summary = {
         "protocol": {
-            "benchmark": "OpenAI HumanEval",
+            "benchmark": args.benchmark,
             "problems": len(problems),
             "temperature": 0,
             "max_tokens": args.max_tokens,
             "completion_mode": args.mode,
             "stop_profile": args.stop_profile,
             "samples_per_problem": 1,
+            "sample_format": args.sample_format,
         },
         "errors": sum(bool(row.get("error")) for row in rows),
         "completion_tokens": sum(
